@@ -80,6 +80,22 @@ test('automatic scene analysis accepts a neutral sleeping-room observation witho
   assert.deepEqual((await provider.cue(scene)).result, cue);
 });
 
+test('visible resting posture can produce a considerate cue without speech', async () => {
+  const scene = { ...surroundingsInput(), manual: false, audioContext: null };
+  const cue = { cue: 'Someone appears to be resting at the desk; avoid interrupting.', reason: 'A person has their head down on folded arms at a desk.', confidence: 0.91, type: 'reminder', should_display: true };
+  const provider = createProvider(env, async (_url, options) => {
+    const body = JSON.parse(options.body);
+    const observation = JSON.parse(body.messages.at(-1).content.find(part => part.type === 'text').text);
+    assert.deepEqual(observation.transcript, []);
+    assert.match(observation.request, /prioritize that activity/);
+    assert.match(body.messages[0].content, /Closed eyes alone do not establish sleep/);
+    assert.match(body.messages[0].content, /Never infer fatigue, tiredness, exhaustion/);
+    assert.match(body.messages[0].content, /If the activity is unclear/);
+    return { ok: true, json: async () => completion(cue) };
+  });
+  assert.deepEqual((await provider.cue(scene)).result, cue);
+});
+
 test('conversation provider excludes coarse audio metadata and retains speech-grounded policy', async () => {
   const provider = createProvider(env, async (_url, options) => {
     const body = JSON.parse(options.body);
