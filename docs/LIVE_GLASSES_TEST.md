@@ -36,7 +36,7 @@ The lens shows **Start** as the default focused action, alongside **Close**. Tap
 
 The app reuses the device/display connection for Start and Resume and waits for the old camera to finish stopping before attaching a new camera. Old-screen button events and old-camera callbacks cannot control the new stream. Keep the phone app open for the first wristband test; background operation still needs physical validation.
 
-The user confirmed wristband streaming works. The display-stability update removes clear-before-send and ignores repeated screens, hidden transcripts, and transient analysis progress. The active button row stays **Pause / Analyze / Stop**, with at most three short buttons; cue text is capped and takes priority over extra captions/notes. The phone’s **Start glasses** opens the controls without starting capture. Physical fit and stability of the revised layout need a lens check.
+The user confirmed wristband streaming works. The display-stability update removes clear-before-send and ignores repeated screens, hidden transcripts, and transient analysis progress. The active button row stays **Pause / Analyze / Stop**, with at most three short buttons; cue and caption text are capped to keep controls compact. The phone’s **Start glasses** opens the controls without starting capture. Physical fit and stability of the revised layout need a lens check.
 
 ### Verify capture and cues
 
@@ -64,3 +64,11 @@ The capture screen displays this recovery above the preview, and the setup/captu
 - Physical glasses preview/audio, Muse understanding of actual surroundings, and visible lens output must be confirmed in the steps above. Installation and API reachability alone do not establish those results.
 
 Display-stability validation: 34 native tests passed, including unchanged-screen suppression, compact button labels, and display-only phone startup. The signed build was installed on the test iPhone; the wearer must confirm lens fit and absence of flashing.
+
+## If Analyze appears to do nothing
+
+Use live mode, not **Connection test only**. Lens captions are now on by default and show a short **Heard:** excerpt. Speak a complete sentence and pause. Ambient glasses audio below the provisional energy threshold is still sent to ASR in bounded six-second windows; quiet speech is no longer discarded as presumed silence. These windows are uploaded only during live capture, never during the no-upload test.
+
+Analyze displays progress, queues one manual request while speech is transcribing, and reports an abstention, expired context, new-speech cancellation, or failure. Repeated taps during analysis do not create duplicate requests. The phone's Muse observation gives the reason when no cue is warranted. Fresh speech can invalidate an in-flight cue; retry after a pause.
+
+When backend code changes, restart the running Node process: it does not reload modules under `npm start`. During this check the old running process predated the Muse response-budget fix. After restart, a synthetic transcript sent through the public HTTPS tunnel returned a valid cue in about 4.5 seconds. Synthetic speech transcription returned the expected words in about one second. These checks verify the backend, not the wearer's actual microphone recognition.

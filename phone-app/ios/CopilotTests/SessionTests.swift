@@ -6,6 +6,61 @@ import MWDATCore
 
 @MainActor
 final class SessionTests: XCTestCase {
+  func testQuietGlassesPCMStillReachesTranscription() throws {
+    let microphone = ConversationMicrophone()
+    let chunks = OSAllocatedUnfairLock(initialState:[AudioChunk]())
+    microphone.onChunk = { chunk in chunks.withLock { $0.append(chunk) } }
+    microphone.prepareStreamPCM()
+    defer { microphone.stop() }
+    let format = try XCTUnwrap(AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:16000,channels:1,interleaved:false))
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat:format,frameCapacity:16000))
+    buffer.frameLength = 16000
+    let data = try XCTUnwrap(buffer.floatChannelData?[0])
+    for i in 0..<16000 { data[i] = 0.001 * sin(Float(i) * 0.08) }
+    let time = nowMs()
+    for i in 1...6 { microphone.receiveStreamPCM(buffer,at:time+Double(i)*1000) }
+    let captured = chunks.withLock { $0 }
+    XCTAssertEqual(captured.count,1,"Below-threshold audio must reach ASR, not be dropped as silence")
+    XCTAssertEqual(Data(base64Encoded:try XCTUnwrap(captured.first).audioBase64)?.count,192044)
+  }
+
+  func testManualAnalyzeWaitsForTranscriptionAndShowsProgress() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.addSimulationLine("Can you have it ready by Friday?")
+    model.isTranscribing = true
+    model.requestCue(manual:true)
+    XCTAssertNotNil(model.pendingManualAnalysisAt)
+    XCTAssertEqual(model.analysisFeedback,"Finishing speech, then analyzing…")
+    XCTAssertEqual(model.requests,0)
+    model.isTranscribing = false
+    try await Task.sleep(for:.milliseconds(2300))
+    XCTAssertNil(model.pendingManualAnalysisAt)
+    XCTAssertGreaterThan(model.requests,0)
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertNotNil(model.cue)
+  }
+
+  func testCaptionsAndAnalysisFeedbackAreVisibleWithoutExtraButtons() {
+    XCTAssertTrue(SessionModel().displayCaptions)
+    let screen = GlassesScreen(cue:nil,caption:"Hello there",note:nil,paused:false,captionsEnabled:true,
+      ready:false,starting:false,testOnly:false,feedback:"Analyzing…")
+    XCTAssertEqual(screen.title,"Analyzing…")
+    XCTAssertEqual(screen.detail,"Heard: Hello there")
+    XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
+  }
+
+  func testAbstentionShowsAnOutcomeOnLens() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.addSimulationLine("The sky is blue.")
+    try await Task.sleep(for:.milliseconds(1600))
+    model.requestCue(manual:true)
+    XCTAssertEqual(model.analysisFeedback,"Analyzing…")
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertNil(model.cue)
+    XCTAssertEqual(model.analysisFeedback,"No new cue needed. See phone for why.")
+  }
   func testStoppedStreamingKeepsControlsAndConsentButClearsContext() async throws {
     let model = try await activeModel()
     model.contextText = "Private session note"
@@ -62,13 +117,42 @@ final class SessionTests: XCTestCase {
   }
 
   func testLensControlsStayCompactWithCueAndCaption() {
-    let screen = GlassesScreen(cue:String(repeating:"x",count:150),caption:"Caption",note:"Note",paused:false,
+    let screen = GlassesScreen(cue:String(repeating:"x",count:150),caption:"  Caption\n\ttext  ",note:"Note",paused:false,
       captionsEnabled:true,ready:false,starting:false,testOnly:false)
     XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
     XCTAssertEqual(screen.cue?.count,90)
-    XCTAssertNil(screen.detail,"Cue takes precedence over extra text so buttons fit")
+    XCTAssertEqual(screen.detail,"Heard: Caption text","A social cue must not hide enabled captions; newlines must not crowd out controls")
     let test = GlassesScreen(cue:nil,caption:nil,note:nil,paused:false,captionsEnabled:false,ready:false,starting:false,testOnly:true)
     XCTAssertEqual(test.labels,["Pause","Test cue","Stop"])
+  }
+
+  func testEnabledCaptionsUpdateAlongsideCueAndSurviveItsRemoval() {
+    let controller = GlassesController()
+    controller.displayReady = true
+    controller.show("Ask what they meant.",caption:"We can meet Friday.",captionsEnabled:true)
+    let revision = controller.displayRevision
+    controller.show("Ask what they meant.",caption:"Friday afternoon works.",captionsEnabled:true)
+    XCTAssertEqual(controller.displayRevision,revision+1,"New captions must reach the lens while a cue is visible")
+    XCTAssertEqual(controller.requestedScreen?.cue,"Ask what they meant.")
+    XCTAssertEqual(controller.requestedScreen?.detail,"Heard: Friday afternoon works.")
+    controller.show(nil,caption:"Friday afternoon works.",captionsEnabled:true)
+    XCTAssertNil(controller.requestedScreen?.cue)
+    XCTAssertEqual(controller.requestedScreen?.detail,"Heard: Friday afternoon works.")
+    controller.show("Ask what they meant.",caption:"Friday afternoon works.",captionsEnabled:false)
+    XCTAssertEqual(controller.requestedScreen?.cue,"Ask what they meant.")
+    XCTAssertNil(controller.requestedScreen?.detail,"Turning captions off must still work during a cue")
+  }
+
+  func testCombinedDisplayClearsSpeechOutsideActiveCapture() {
+    for (paused, ready, starting) in [(true,false,false), (true,true,false), (false,false,true)] {
+      let screen = GlassesScreen(cue:"Ask what they meant.",caption:"Private speech",note:nil,
+        paused:paused,captionsEnabled:true,ready:ready,starting:starting,testOnly:false)
+      XCTAssertNil(screen.cue)
+      XCTAssertNil(screen.detail)
+    }
+    let excerpt = GlassesScreen(cue:"A cue",caption:String(repeating:"a",count:100),note:nil,
+      paused:false,captionsEnabled:true,ready:false,starting:false,testOnly:false)
+    XCTAssertEqual(excerpt.detail,"Heard: …" + String(repeating:"a",count:60))
   }
 
   func testPhoneStartGlassesOnlyOpensControls() {
@@ -219,6 +303,7 @@ final class SessionTests: XCTestCase {
     model.requestCue(manual:true)
     XCTAssertTrue(model.isThinking)
     model.addSimulationLine("Let's talk about lunch instead.")
+    XCTAssertEqual(model.analysisFeedback,"New speech. Analyze after a pause.")
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertNil(model.cue)
     XCTAssertFalse(model.isThinking)
