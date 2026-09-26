@@ -7,11 +7,15 @@ import Vision
 final class SessionModel {
   enum Phase: String { case stopped = "Stopped", starting = "Starting", active = "Listening", paused = "Paused" }
   var phase: Phase = .stopped
+  var consent = false
+  var glassesControlsReady = false
+  var openingGlassesControls = false
   var captureMode: CaptureMode = .phone
   var simulate: Bool {
     get { captureMode == .simulated }
     set { captureMode = newValue ? .simulated : .displayGlasses }
   }
+  var sceneOnly: Bool { captureMode == .displayGlasses }
   var phoneCameraEnabled = true
   var localMock = true
   /// Set when Start could not reach a live server: camera and mic still run, AI features wait.
@@ -24,7 +28,9 @@ final class SessionModel {
   var contextText = ""
   var sampleInterval = 8.0
   var simulateSurroundings = false
-  var displayCaptions = false
+  var displayCaptions = true
+  var analysisFeedback: String?
+  var pendingManualAnalysisAt: Double?
   var latestAudioContext: AudioContext?
   var reducedPower = false
   var nextAnalysisAt: Double = 0
@@ -119,7 +125,7 @@ final class SessionModel {
       guard let self, self.phase == .active, self.captureMode == .phone else { return }
       self.phonePreview = image; self.phoneFramesReceived += 1; self.sample(image, at:time); self.checkFaces(image, at:time)
     }
-    phoneCamera.onFailure = { [weak self] message in self?.pause(message) }
+    phoneCamera.onFailure = { [weak self] message in self?.captureFailed(message) }
     // Raw voice energy (fans, music, crowds, ongoing talk) never cancels cues; only recognized speech updates timing.
     microphone.onVoice = nil
     microphone.onChunk = { [weak self] chunk in Task { @MainActor in self?.transcribe(chunk) } }
@@ -127,19 +133,20 @@ final class SessionModel {
       guard let self, self.phase == .active, context.capturedAtMs >= self.captureStartedAt else { return }
       self.latestAudioContext = context
     } }
-    microphone.onFailure = { [weak self] message in Task { @MainActor in self?.pause(message) } }
+    microphone.onFailure = { [weak self] message in Task { @MainActor in self?.captureFailed(message) } }
   }
   private func configureGlassesCallbacks() {
     glasses.onFrame = { [weak self] image, time in self?.sample(image, at:time); self?.checkFaces(image, at:time) }
-    glasses.onFailure = { [weak self] message in self?.pause(message) }
+    glasses.onFailure = { [weak self] message in self?.captureFailed(message) }
     glasses.onHelp = { [weak self] in self?.requestCue(manual:true) }
     glasses.onPause = { [weak self] in self?.pause() }
-    glasses.onStop = { [weak self] in self?.stop() }
+    glasses.onStop = { [weak self] in self?.stopStreaming() }
+    glasses.onDisconnect = { [weak self] in self?.stop() }
     glasses.onDismiss = { [weak self] in self?.dismiss() }
     glasses.onResume = { [weak self] in self?.start() }
   }
   private var client: APIClient { APIClient(endpoint:endpoint, token:proxyToken) }
-  var canStart: Bool { (captureMode != .regularGlasses || !selectedAudioUID.isEmpty) && (phase == .stopped || phase == .paused) }
+  var canStart: Bool { consent && (captureMode != .regularGlasses || !selectedAudioUID.isEmpty) && (phase == .stopped || phase == .paused) }
   var savedNote: String? { contextText.split(separator:"\n").first.map(String.init) }
   var analyzesSurroundings: Bool {
     captureMode.needsGlasses || (captureMode == .phone && phoneCameraEnabled) || (simulate && simulateSurroundings)
@@ -151,6 +158,7 @@ final class SessionModel {
     if requiresCamera && !freshFrame {
       return "Waiting for fresh \(captureMode.needsGlasses ? "glasses" : "phone") camera frames."
     }
+    if sceneOnly { return nil } // A fresh image is sufficient; missing audio is reported separately.
     let expectedSource = captureMode == .displayGlasses ? "glasses_pcm" : captureMode == .regularGlasses ? "glasses_hfp" : "phone"
     guard let audio = latestAudioContext, timestamp - audio.capturedAtMs <= 10000,
           audio.capturedAtMs <= timestamp + 1000, audio.source == expectedSource else {
@@ -170,11 +178,21 @@ final class SessionModel {
     return analyzesSurroundings ? "Watching surroundings" : "Listening for context"
   }
   func analysisInterval(at timestamp: Double = nowMs(), reducedPower: Bool) -> Double {
-    SurroundingsPolicy.analysisInterval(recentSpeech:lastVoiceAt > 0 && timestamp - lastVoiceAt < 30000, reducedPower:reducedPower)
+    if sceneOnly { return reducedPower ? 30 : 10 }
+    return SurroundingsPolicy.analysisInterval(recentSpeech:lastVoiceAt > 0 && timestamp - lastVoiceAt < 30000, reducedPower:reducedPower)
   }
   private func publishDisplay() {
     guard captureMode.hasGlassesDisplay, phase == .active else { return }
-    glasses.show(cue, caption:captionText, note:savedNote, status:analysisStatus, captionsEnabled:displayCaptions)
+    glasses.show(cue, caption:sceneOnly ? nil : captionText, note:sceneOnly ? nil : savedNote, captionsEnabled:displayCaptions && !sceneOnly, feedback:analysisFeedback, sceneOnly:sceneOnly)
+  }
+  private func feedback(_ message: String) {
+    analysisFeedback = message
+    publishDisplay()
+  }
+  private func queueManualAnalysis(_ message: String, at timestamp: Double) {
+    if pendingManualAnalysisAt == nil { pendingManualAnalysisAt = timestamp }
+    notice = message
+    feedback(message)
   }
   enum ConnectionStatus: Equatable { case unknown, checking, connected, failed(String) }
   var connectionStatus: ConnectionStatus = .unknown
@@ -231,21 +249,36 @@ final class SessionModel {
     do { audioPorts = try microphone.availablePorts(); notice = audioPorts.isEmpty ? "No Bluetooth microphones found." : "" }
     catch { notice = error.localizedDescription }
   }
-  func start() {
-    guard canStart else { return }
+  func openGlassesControls() {
+    guard captureMode.hasGlassesDisplay else { return }
+    start(displayOnly:true)
+  }
+  func startFromPhone() {
+    if captureMode.hasGlassesDisplay { openGlassesControls() }
+    else { start() }
+  }
+  func start(displayOnly: Bool = false) {
+    guard canStart, !displayOnly || captureMode.hasGlassesDisplay else { return }
+    let previousStart = startTask
+    openingGlassesControls = displayOnly
+    glassesControlsReady = false
+    analysisFeedback = nil; pendingManualAnalysisAt = nil
     epoch += 1
     let thisEpoch = epoch
     phase = .starting
     captureStartedAt = nowMs()
     lastAnalysisAt = 0; nextAnalysisAt = 0
     invalidateCue()
-    notice = ""
+    notice = displayOnly ? "Opening controls on glasses. Camera and microphone stay off." : ""
     startTask = Task { [weak self] in
       guard let self else { return }
+      await previousStart?.value
       await transportTask?.value
+      guard epoch == thisEpoch, !Task.isCancelled else { return }
       if !simulate {
         offline = false
         // A missing server must not block the camera; captions and cues wait for it instead.
+        if !displayOnly {
         do {
           let health = try await client.health()
           modelMode = health.modelMode ?? "Unknown"
@@ -254,10 +287,20 @@ final class SessionModel {
           guard epoch == thisEpoch, !Task.isCancelled else { return }
           offline = true; modelMode = "Offline"; notice = "Can't reach server. Camera only."
         }
+        }
         guard epoch == thisEpoch, !Task.isCancelled else { return }
-        if captureMode.needsGlasses { await glasses.stop(); configureGlassesCallbacks() }
+        if captureMode.needsGlasses { configureGlassesCallbacks() }
         guard epoch == thisEpoch, !Task.isCancelled else { return }
         do {
+          if displayOnly {
+            try await glasses.connectDisplayOnly()
+            guard epoch == thisEpoch, !Task.isCancelled else { return }
+            phase = .paused; openingGlassesControls = false; glassesControlsReady = true
+            notice = "Controls ready on glasses. Select Start with your wristband. Camera and microphone are off."
+            glasses.show(nil, paused:true, ready:true)
+            return
+          }
+          if captureMode.hasGlassesDisplay { glasses.show(nil, starting:true) }
           if captureMode == .phone {
             try await microphone.startPhone()
             guard epoch == thisEpoch, !Task.isCancelled else { microphone.stop(); return }
@@ -268,13 +311,14 @@ final class SessionModel {
           audioRate = microphone.actualSampleRate
         } catch {
           guard epoch == thisEpoch else { return }
-          microphone.stop(); phoneCamera.stop()
-          if captureMode.needsGlasses { await glasses.stop() }
-          guard epoch == thisEpoch else { return }
-          phase = .paused; notice = error.localizedDescription; return
+          let needsGlassesUpdate = captureMode.needsGlasses && GlassesController.requiresGlassesAppUpdate(error)
+          captureFailed(needsGlassesUpdate ? GlassesController.updateInstructions : error.localizedDescription)
+          if needsGlassesUpdate { glasses.report(error) }
+          return
         }
       }
       guard epoch == thisEpoch, !Task.isCancelled else { return }
+      openingGlassesControls = false
       phase = .active
       captureActiveAtMs = nowMs()
       if !offline { notice = "" }
@@ -293,15 +337,29 @@ final class SessionModel {
             self.pause("Phone needs to cool down. Analysis paused; resume when ready."); return
           }
           self.reducedPower = ProcessInfo.processInfo.isLowPowerModeEnabled || ProcessInfo.processInfo.thermalState == .serious
-          self.requestCue(manual:false)
+          if let pending = self.pendingManualAnalysisAt, nowMs() - pending > 15000 {
+            self.pendingManualAnalysisAt = nil
+            self.feedback("Pause speech, then tap Analyze again.")
+          } else { self.requestCue(manual:self.pendingManualAnalysisAt != nil) }
         }
       }
+    }
+  }
+  // Capture failure must not close a healthy display/device session. Only the
+  // explicit Close/phone Stop action tears down the control connection.
+  func captureFailed(_ message: String) {
+    guard phase == .starting || phase == .active else { return }
+    pause(message)
+    if captureMode.hasGlassesDisplay {
+      glasses.show(nil, paused:true, status:"Capture paused. Check phone, then Resume.")
     }
   }
   func pause(_ reason: String = "Paused. Camera, microphone and uploads stopped.") {
     guard phase == .active || phase == .starting else { return }
     epoch += 1
     phase = .paused
+    openingGlassesControls = false; glassesControlsReady = false
+    analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
@@ -310,15 +368,26 @@ final class SessionModel {
     if captureMode.needsGlasses { glasses.pauseCapture() }
     notice = reason
   }
+  // Stop capture and clear session context, retaining the consented control connection.
+  func stopStreaming() {
+    guard captureMode.hasGlassesDisplay, consent, phase != .stopped else { return }
+    pause()
+    contextText = ""; recentCues = []; lastCueAt = 0
+    glassesControlsReady = true
+    glasses.pauseCapture(ready:true)
+    notice = "Streaming stopped and session context cleared. Select Start on glasses, or Stop on the phone to disconnect."
+  }
   func stop() {
     epoch += 1
     phase = .stopped
+    openingGlassesControls = false; glassesControlsReady = false
+    analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
     nextAnalysisAt = 0; simulatedScene = ""; currentScene = nil
-    lastVoiceAt = 0; recentCues = []; lastCueAt = 0; lastRequestedSpeechAt = 0
+    consent = false; lastVoiceAt = 0; recentCues = []; lastCueAt = 0; lastRequestedSpeechAt = 0
     captionText = nil; captionAtMs = 0
     if captureMode.needsGlasses { transportTask = Task { await glasses.stop() } }
     notice = ""
@@ -444,6 +513,9 @@ final class SessionModel {
   }
   func markDistracting() { distracting += 1; dismiss() }
   private func invalidateCue() {
+    if isThinking && phase == .active {
+      analysisFeedback = "New speech. Analyze after a pause."
+    } else if cue != nil { analysisFeedback = "Streaming" }
     generation += 1
     cueTask?.cancel(); cueTask = nil; isThinking = false
     ttlTask?.cancel()
@@ -462,8 +534,8 @@ final class SessionModel {
     latestFrame = SampledFrame(dataUrl:"data:image/jpeg;base64," + data.base64EncodedString(), capturedAtMs:time)
     latestSampleAt = time
   }
-  private func transcribe(_ chunk: AudioChunk) {
-    guard !uploadsDisabled, phase == .active, chunk.startedAtMs >= captureStartedAt - 200 else { return }
+  func transcribe(_ chunk: AudioChunk) {
+    guard !sceneOnly, !uploadsDisabled, phase == .active, chunk.startedAtMs >= captureStartedAt - 200 else { return }
     guard asrTask == nil else { audioDrops += 1; return }
     let thisEpoch = epoch
     let connection = client
@@ -542,22 +614,27 @@ final class SessionModel {
   }
   func requestCue(manual: Bool) {
     guard !uploadsDisabled else { return }
-    guard phase == .active, cueTask == nil else { return }
+    guard phase == .active else { return }
+    guard cueTask == nil else { if manual { feedback("Analyzing…") }; return }
     let timestamp = nowMs()
-    if let issue = liveInputIssue(at:timestamp) { if manual { notice = issue }; return }
+    guard !isTranscribing else {
+      if manual { queueManualAnalysis("Finishing speech, then analyzing…", at:timestamp) }
+      return
+    }
+    if let issue = liveInputIssue(at:timestamp) { if manual { queueManualAnalysis(issue, at:timestamp) }; return }
     let surroundings = analyzesSurroundings
-    let last = transcript.last
+    let last = sceneOnly ? nil : transcript.last
     let freshSpeech = last.flatMap { timestamp - $0.endMs <= 15000 ? $0 : nil }
     let frame = latestFrame.flatMap { timestamp - $0.capturedAtMs <= SurroundingsPolicy.frameFreshnessMs && $0.capturedAtMs <= timestamp ? $0 : nil }
     // Silence does not imply missing context: a fresh library image can support a cue.
     guard timestamp - captureStartedAt >= 1500,
           surroundings ? (frame != nil || freshSpeech != nil) : freshSpeech != nil else {
-      if manual { notice = "Not enough context yet." }
+      if manual { queueManualAnalysis(surroundings ? "Waiting for a fresh camera view…" : "Say a sentence, then pause…", at:timestamp) }
       return
     }
     if surroundings {
       nextAnalysisAt = max(lastAnalysisAt + analysisInterval(at:timestamp, reducedPower:reducedPower) * 1000,
-                           lastCueAt + SurroundingsPolicy.cueCooldownMs)
+                           sceneOnly ? 0 : lastCueAt + SurroundingsPolicy.cueCooldownMs)
       guard manual || timestamp >= nextAnalysisAt else { return }
     } else {
       // Automatic checks need new speech since the last check, plus the usual cooldown.
@@ -566,9 +643,9 @@ final class SessionModel {
                        && (last?.endMs ?? 0) > lastRequestedSpeechAt) else { return }
     }
     let revision = generation, thisEpoch = epoch
-    let context = contextText.split(separator:"\n").prefix(5).map { String($0.prefix(160)) }
+    let context = (sceneOnly ? "" : contextText).split(separator:"\n").prefix(5).map { String($0.prefix(160)) }
     // When speech has aged out, don't let it dominate the current visual setting.
-    let entries = surroundings && freshSpeech == nil ? [] : transcript
+    let entries = sceneOnly || (surroundings && freshSpeech == nil) ? [] : transcript
     let audio = surroundings ? latestAudioContext.flatMap { timestamp - $0.capturedAtMs <= 10000 ? $0 : nil } : nil
     let present = presentPeople
     let request = CueRequest(transcript:entries, frame:frame, context:context, manual:manual,
@@ -581,7 +658,8 @@ final class SessionModel {
     let evidenceAt = freshSpeech?.endMs ?? frame?.capturedAtMs ?? timestamp
     lastRequestedGeneration = revision; lastAnalysisAt = timestamp; lastRequestedSpeechAt = last?.endMs ?? 0
     nextAnalysisAt = timestamp + analysisInterval(at:timestamp, reducedPower:reducedPower) * 1000
-    isThinking = true; requests += 1; publishDisplay()
+    pendingManualAnalysisAt = nil
+    isThinking = true; requests += 1; feedback(sceneOnly ? "Muse is checking the scene…" : "Analyzing…")
     cueTask = Task { [weak self] in
       guard let self else { return }
       defer {
@@ -621,7 +699,11 @@ final class SessionModel {
         let evidenceStillFresh = surroundings ? (speechStillFresh || frameStillFresh) : speechStillFresh
         guard epoch == thisEpoch, generation == revision, phase == .active, !Task.isCancelled,
               completedAt - timestamp <= SurroundingsPolicy.responseMaxAgeMs,
-              evidenceStillFresh else { staleDrops += 1; return }
+              evidenceStillFresh else {
+          staleDrops += 1
+          if epoch == thisEpoch && generation == revision { if sceneOnly { cue = nil }; feedback(sceneOnly ? "Scene changed. Checking again shortly…" : "Context expired. Tap Analyze again.") }
+          return
+        }
         apiMs = response.metrics?.apiMs ?? 0; recordCost(response.metrics?.estimatedCostUsd ?? (simulate && localMock ? 0 : nil))
         let result = response.result
         if let scene = result.scene?.trimmingCharacters(in:.whitespaces), !scene.isEmpty, scene != currentScene { currentScene = scene }
@@ -633,20 +715,30 @@ final class SessionModel {
         guard result.should_display, result.confidence.isFinite, result.confidence >= 0.8, result.confidence <= 1,
               ["clarify", "follow_up", "reminder", "respond"].contains(result.type),
               !text.isEmpty, text.count <= 90, text.split(whereSeparator: { $0.isWhitespace }).count <= 14,
-              !recentCues.contains(normalized) else { notice = ""; return }
+              (sceneOnly || !recentCues.contains(normalized)) else {
+          if sceneOnly { cue = nil }
+          notice = ""
+          feedback("No new cue needed. See phone for why.")
+          return
+        }
         cue = text; shown += 1; lastCueAt = nowMs(); contextToDisplayMs = lastCueAt - evidenceAt
         lastAnalysisOutcome = "Social cue ready."
+        analysisFeedback = "Social cue"
         recentCues = Array((recentCues + [normalized]).suffix(20))
         publishDisplay()
         notice = ""
-        ttlTask = Task { [weak self] in
+        if !sceneOnly { ttlTask = Task { [weak self] in
           try? await Task.sleep(for:SurroundingsPolicy.cueLifetime)
           guard let self, !Task.isCancelled, self.generation == revision else { return }
           // Expiry clears the cue without extending the automatic cooldown.
-          self.cue = nil; self.publishDisplay()
-        }
+          self.cue = nil; self.analysisFeedback = "Streaming"; self.publishDisplay()
+        } }
       } catch {
-        if epoch == thisEpoch, generation == revision, !Task.isCancelled { notice = "Cue failed. Try again." }
+        if epoch == thisEpoch, generation == revision, !Task.isCancelled {
+          if sceneOnly { cue = nil }
+          notice = "Cue failed. " + (sceneOnly ? "Retrying automatically." : "Try again.")
+          feedback("Analysis failed. Check phone for details.")
+        }
       }
     }
   }

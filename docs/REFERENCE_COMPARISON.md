@@ -39,9 +39,9 @@ The phone mode does not initialize Meta DAT and does not require glasses pairing
 
 ## Phone acceptance sequence
 
-1. Build/install `phone-app/ios/Copilot.xcodeproj`. Choose **iPhone**, turn **Capture test only (no uploads)** on for the first check, confirm participant consent, Start.
+1. Build/install `phone-app/ios/Copilot.xcodeproj`. Choose **iPhone**, connect to the server in Settings, confirm participant consent, Start. If the server is unreachable, capture still starts camera-only.
 2. Verify microphone permission and displayed source rate. With camera enabled, verify rear-camera permission and fresh preview. Stop and verify capture ends. No API key is required for this step.
-3. Configure `.env` on the server for live Muse and a separate proxy token. Configure a reachable trusted HTTPS URL in iPhone Settings. Stop and disable Capture test only. Confirm consent and Start again.
+3. Configure `.env` on the server for live Muse and a separate proxy token. In iPhone Settings, leave the server URL empty and tap **Connect** to find the Mac server on the same Wi-Fi (or enter an HTTPS URL). Confirm consent and Start again.
 4. Say “Would you like that hot or iced?” The exact ASR result should appear under **Captions**, separate from a wearer-entered **Your notes** entry such as “Small iced latte.” A model suggestion may abstain; do not demand a redundant cue.
 5. Continue speaking while a prior request runs. Captions retain their own age/order checks, while suggestions from obsolete context are discarded. Dismiss a suggestion: captions and notes must remain. Pause clears captured content, and Stop also clears saved notes.
 6. Deny permissions, interrupt audio, lose network, background the app, and resume deliberately. Record actual caption delay, errors and usefulness. Simulator tests do not replace this sequence.

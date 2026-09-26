@@ -23,6 +23,7 @@ final class ConversationMicrophone: @unchecked Sendable {
   private var selectedUID = ""
   private var selectedPortType: AVAudioSession.Port = .bluetoothHFP
   private var tapInstalled = false
+  private var ownsAudioSession = false
   var onChunk: (@Sendable (AudioChunk) -> Void)?
   var onVoice: (@Sendable (Double) -> Void)?
   var onContext: (@Sendable (AudioContext) -> Void)?
@@ -71,6 +72,7 @@ final class ConversationMicrophone: @unchecked Sendable {
     let session = AVAudioSession.sharedInstance()
     try session.setCategory(.playAndRecord, mode:.videoRecording, options:portType == .bluetoothHFP ? [.allowBluetoothHFP] : [.defaultToSpeaker])
     try session.setActive(true)
+    ownsAudioSession = true
     guard let port = session.availableInputs?.first(where: { $0.portType == portType && (requestedUID == nil || $0.uid == requestedUID) }) else {
       try? session.setActive(false)
       throw CopilotError(message:"Selected microphone unavailable. No other microphone was substituted.")
@@ -152,10 +154,14 @@ final class ConversationMicrophone: @unchecked Sendable {
         }
         if state.samples.isEmpty { state.chunkStart = endedAt - Double(count) / 16 }
         state.samples.append(contentsOf:part)
-        // Flush after silence or at exactly six seconds; carry the remainder forward.
-        if state.samples.count == 96000 || (state.samples.count >= 16000 && endedAt - state.lastVoice > 450) {
-          if state.lastVoice >= state.chunkStart {
-            chunks.append(AudioChunk(audioBase64:Self.wav(state.samples).base64EncodedString(), startedAtMs:state.chunkStart, endedAtMs:state.lastVoice))
+        // Ambient glasses gain is not calibrated. Always transcribe its bounded
+        // six-second windows, even below our energy threshold; ASR decides if
+        // speech is present. Never discard a quiet voice as presumed silence.
+        let hasEnergy = state.lastVoice >= state.chunkStart
+        let silenceAfterSpeech = state.samples.count >= 16000 && endedAt - state.lastVoice > 450
+        if state.samples.count == 96000 || (silenceAfterSpeech && (!state.streamPCM || hasEnergy)) {
+          if state.streamPCM || hasEnergy {
+            chunks.append(AudioChunk(audioBase64:Self.wav(state.samples).base64EncodedString(), startedAtMs:state.chunkStart, endedAtMs:state.streamPCM ? endedAt : state.lastVoice))
           }
           state.samples.removeAll(keepingCapacity:true)
         }
@@ -172,7 +178,12 @@ final class ConversationMicrophone: @unchecked Sendable {
     engine.stop()
     if tapInstalled { engine.inputNode.removeTap(onBus:0); tapInstalled = false }
     observers.forEach(NotificationCenter.default.removeObserver); observers.removeAll()
-    try? AVAudioSession.sharedInstance().setActive(false, options:.notifyOthersOnDeactivation)
+    // DAT owns ambient audio. Pausing its PCM consumer must not deactivate
+    // the shared audio session underneath the still-connected glasses SDK.
+    if ownsAudioSession {
+      try? AVAudioSession.sharedInstance().setActive(false, options:.notifyOthersOnDeactivation)
+      ownsAudioSession = false
+    }
   }
 
   static func wav(_ samples: [Int16]) -> Data {

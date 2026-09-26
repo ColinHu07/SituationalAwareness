@@ -18,6 +18,17 @@ struct PhoneCaptureView: View {
     NavigationStack {
       ScrollView {
         VStack(alignment:.leading,spacing:20) {
+          if usesGlasses && model.glasses.updateRequired {
+            VStack(alignment:.leading,spacing:10) {
+              Label("Glasses app update required",systemImage:"arrow.down.circle").font(.headline)
+              Text(GlassesController.updateInstructions).font(.subheadline)
+              Button("Open Meta glasses app updater",systemImage:"arrow.up.forward.app") {
+                Task { await model.glasses.openGlassesAppUpdate() }
+              }.buttonStyle(.borderedProminent)
+              Text("Capture cannot start until Meta completes this update.").font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth:.infinity,alignment:.leading)
+              .padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
+          }
           preview
           if let scene = model.currentScene { SceneChip(scene:scene) }
           PresenceStrip(model:model)
@@ -33,6 +44,7 @@ struct PhoneCaptureView: View {
             }.frame(maxWidth:.infinity,alignment:.leading)
               .padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
           }
+          if !model.sceneOnly {
           captions
           VStack(alignment:.leading,spacing:8) {
             Label("NOTES",systemImage:"note.text").font(.caption.bold()).tracking(1)
@@ -40,6 +52,7 @@ struct PhoneCaptureView: View {
               .lineLimit(2...4)
               .onChange(of:model.contextText) { _, _ in model.contextChanged() }
           }.padding(18).background(mint.opacity(0.45),in:RoundedRectangle(cornerRadius:18))
+          }
         }.padding(20)
       }.background(Color(red:0.95,green:0.97,blue:0.95))
         .safeAreaInset(edge:.bottom) { captureControls }
@@ -69,10 +82,18 @@ struct PhoneCaptureView: View {
           VStack(spacing:12) {
             if model.phase == .starting { ProgressView().tint(.white) }
             Image(systemName:cameraEnabled ? "camera" : "mic.fill").font(.largeTitle)
+            if !previewPlaceholder.isEmpty { Text(previewPlaceholder).font(.subheadline).multilineTextAlignment(.center) }
           }.foregroundStyle(.white).padding(24)
         }
       }.aspectRatio(16.0/9.0,contentMode:.fit)
     }
+  }
+
+  private var previewPlaceholder: String {
+    if model.openingGlassesControls && model.phase == .starting { return "Opening glasses controls…" }
+    if model.glassesControlsReady { return "Ready on glasses. Press Start with your wristband." }
+    if model.phase == .starting { return "Opening \(sourceName.lowercased()) camera…" }
+    return ""
   }
 
   private var sessionStatus: some View {
@@ -87,8 +108,10 @@ struct PhoneCaptureView: View {
         Text(model.notice).font(.subheadline).foregroundStyle(.secondary)
           .accessibilityIdentifier("capture.notice")
       }
-      TimelineView(.periodic(from:.now,by:1)) { context in
-        inputStatus(at:context.date.timeIntervalSince1970 * 1000)
+      DisclosureGroup("Input status") {
+        TimelineView(.periodic(from:.now,by:1)) { context in
+          inputStatus(at:context.date.timeIntervalSince1970 * 1000)
+        }
       }
       if usesGlasses, let error = model.glasses.lastError, error != model.notice {
         Label(error,systemImage:"exclamationmark.triangle").font(.caption).foregroundStyle(.red)
@@ -99,7 +122,7 @@ struct PhoneCaptureView: View {
   private var captureControls: some View {
     HStack(spacing:12) {
       if model.phase == .paused {
-        Button("Resume",systemImage:"play.fill") { model.start() }
+        Button(model.captureMode.hasGlassesDisplay ? "Start glasses" : usesGlasses && model.glasses.updateRequired ? "Retry after update" : "Resume",systemImage:"play.fill") { model.startFromPhone() }
           .buttonStyle(.borderedProminent).disabled(!model.canStart)
       } else if model.phase == .active {
         Button("Pause",systemImage:"pause.fill") { model.pause() }.buttonStyle(.borderedProminent)
@@ -144,7 +167,7 @@ struct PhoneCaptureView: View {
   private var cueCard: some View {
     VStack(alignment:.leading,spacing:16) {
       HStack {
-        Label("CUE",systemImage:"sparkle")
+        Label(model.sceneOnly ? "SCENE" : "CUE",systemImage:"sparkle")
           .font(.caption.bold()).tracking(1)
         Spacer()
       }.foregroundStyle(mint)
@@ -152,17 +175,22 @@ struct PhoneCaptureView: View {
         .font(.system(size:27,weight:.medium,design:.rounded))
         .foregroundStyle(.white).frame(maxWidth:.infinity,minHeight:70,alignment:.leading)
         .accessibilityIdentifier("capture.cue")
-      HStack {
+      if !model.sceneOnly { HStack {
         Button("Analyze now") { model.requestCue(manual:true) }
           .disabled(model.phase != .active || model.isThinking || model.uploadsDisabled)
         Spacer()
         Button("Dismiss") { model.dismiss() }.disabled(model.cue == nil)
-      }.font(.subheadline.weight(.semibold)).tint(mint)
+      }.font(.subheadline.weight(.semibold)).tint(mint) }
     }.padding(22).background(ink,in:RoundedRectangle(cornerRadius:20))
   }
 
   private var emptyCueText: String {
-    model.offline ? "Server offline" : "Room to listen."
+    if model.offline { return "Server offline" }
+    if model.sceneOnly {
+      if model.phase != .active { return "Start streaming to check the scene." }
+      return model.analysisFeedback ?? "Waiting for a fresh camera frame…"
+    }
+    return "Room to listen."
   }
 
   private var captions: some View {

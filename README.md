@@ -32,7 +32,7 @@ The iOS app now offers three real capture paths plus a labeled demo. **iPhone** 
 
 The phone screen separates **Captions** (completed ASR speech chunks), **Your notes** (wearer-authored), and **AI suggestion**. Captions do not wait for the suggestion cooldown and survive suggestion dismissal. They are not word-by-word partial streaming. Camera/audio input and live Meta calls still need real-device validation.
 
-Start with **Capture test only (no uploads)** on a real iPhone to verify permissions and preview without a model key. Then configure the Muse proxy, turn capture testing off, and follow [phone acceptance steps](docs/REFERENCE_COMPARISON.md#phone-acceptance-sequence). Phone mode pauses in the background; keep it open for the first test.
+On a real iPhone, Start works camera-only until the server is connected, which verifies permissions and preview without a model key. Then run the server, tap **Connect** in Settings, and follow [phone acceptance steps](docs/REFERENCE_COMPARISON.md#phone-acceptance-sequence). Phone mode pauses in the background; keep it open for the first test.
 
 ## Run now — no API key, installs or glasses needed
 
@@ -64,7 +64,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
   -derivedDataPath artifacts/DerivedData CODE_SIGNING_ALLOWED=NO build
 ```
 
-The app starts in **iPhone** mode. Choose **Simulated demo** with a **local scripted provider** to try it without a backend or hardware. Our simulated display is not Meta Mock Device Kit validation of Display glasses. The separate **Connection test only (no uploads)** mode exercises the selected camera/audio path and a manual Display cue before configuring Muse. For actual hardware, use [the two-person demo protocol](docs/DEMO.md).
+The app starts in **iPhone** mode. Choose **Simulated demo** with a **local scripted provider** to try it without a backend or hardware. Our simulated display is not Meta Mock Device Kit validation of Display glasses. Without a connected server, Start runs camera-only, which exercises the selected camera/audio path and **Test display** before configuring Muse. For actual hardware, use [the two-person demo protocol](docs/DEMO.md).
 
 ## Enable live Muse Spark and ASR
 

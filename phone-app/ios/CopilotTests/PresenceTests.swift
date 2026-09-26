@@ -6,7 +6,7 @@ import UIKit
 final class PresenceTests: XCTestCase {
   private func activeModel(_ store: PeopleStore) async throws -> SessionModel {
     let model = SessionModel(people:store)
-    model.simulate = true; model.localMock = true
+    model.simulate = true; model.localMock = true; model.consent = true
     model.start()
     try await Task.sleep(for:.milliseconds(100))
     XCTAssertEqual(model.phase,.active)
@@ -124,7 +124,7 @@ final class IntroductionTests: XCTestCase {
     let store = PeopleStore(fileURL:nil)
     let jo = store.addPerson("Jo Park")!
     let model = SessionModel(people:store)
-    model.simulate = true; model.localMock = true
+    model.simulate = true; model.localMock = true; model.consent = true
     model.start()
     try await Task.sleep(for:.milliseconds(100))
     model.addSimulationLine("Hey everyone, this is my friend Priya")
@@ -142,7 +142,7 @@ final class IntroductionTests: XCTestCase {
   func testNotHereIsUndoneOnlyByAnIntroduction() async throws {
     let store = PeopleStore(fileURL:nil)
     let model = SessionModel(people:store)
-    model.simulate = true; model.localMock = true
+    model.simulate = true; model.localMock = true; model.consent = true
     model.start()
     try await Task.sleep(for:.milliseconds(100))
     model.addSimulationLine("My name is Priya")

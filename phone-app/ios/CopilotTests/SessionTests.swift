@@ -1,13 +1,263 @@
 import XCTest
 import AVFoundation
 import os
+import MWDATCore
 @testable import Copilot
 
 @MainActor
 final class SessionTests: XCTestCase {
+  func testSceneOnlyStartsAnalysisWithoutSpeechAndSkipsASR() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    model.phase = .active
+    model.consent = true
+    model.endpoint = "invalid-endpoint" // Never contact a real service in this test.
+    model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:nowMs())
+    model.transcribe(AudioChunk(audioBase64:"test",startedAtMs:nowMs()-1000,endedAtMs:nowMs()))
+    XCTAssertFalse(model.isTranscribing)
+    XCTAssertTrue(model.transcript.isEmpty)
+    model.requestCue(manual:false)
+    XCTAssertEqual(model.requests,1,"A camera frame automatically starts scene analysis without any speech")
+    XCTAssertTrue(model.isThinking)
+    model.requestCue(manual:false)
+    XCTAssertEqual(model.requests,1,"Only one analysis may run at a time")
+    XCTAssertEqual(model.analysisInterval(reducedPower:false),10)
+    XCTAssertEqual(model.analysisInterval(reducedPower:true),30)
+    model.stop()
+  }
+
+  func testSceneOnlyDisplayHasAutomaticAnalysisAndTwoControls() {
+    let screen = GlassesScreen(cue:"This looks like a library. Keep your voice low.",caption:nil,note:nil,
+      paused:false,captionsEnabled:false,ready:false,starting:false,sceneOnly:true)
+    XCTAssertEqual(screen.labels,["Pause","Stop"])
+    XCTAssertEqual(screen.actions,[.pause,.stop])
+    XCTAssertNotNil(screen.cue)
+  }
+
+  func testStartupFailureKeepsDisplayAndAllowsRetry() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    model.consent = true
+    model.phase = .starting
+    model.glasses.displayReady = true
+    model.captureFailed("Camera permission denied")
+    XCTAssertEqual(model.phase,.paused)
+    XCTAssertTrue(model.canStart)
+    XCTAssertTrue(model.consent)
+    XCTAssertTrue(model.glasses.displayReady)
+    XCTAssertEqual(model.notice,"Camera permission denied")
+    XCTAssertEqual(model.glasses.requestedScreen?.mode,.paused)
+    XCTAssertEqual(model.glasses.requestedScreen?.labels,["Resume","Stop","Close"])
+    XCTAssertEqual(model.glasses.requestedScreen?.status,"Capture paused. Check phone, then Resume.")
+    XCTAssertNil(model.latestFrame)
+    XCTAssertNil(model.latestAudioContext)
+    // A late failure cannot replace the original actionable error after pause.
+    model.captureFailed("Late transport error")
+    XCTAssertEqual(model.notice,"Camera permission denied")
+    model.stop()
+  }
+
+  func testRecoveryMessageDoesNotLeakIntoNextStream() {
+    let screen = GlassesScreen(cue:nil,caption:nil,note:nil,paused:false,
+      captionsEnabled:true,ready:false,starting:false,status:"Previous failure")
+    XCTAssertNil(screen.status)
+    XCTAssertEqual(screen.title,"Streaming")
+  }
+
+  func testQuietGlassesPCMStillReachesTranscription() throws {
+    let microphone = ConversationMicrophone()
+    let chunks = OSAllocatedUnfairLock(initialState:[AudioChunk]())
+    microphone.onChunk = { chunk in chunks.withLock { $0.append(chunk) } }
+    microphone.prepareStreamPCM()
+    defer { microphone.stop() }
+    let format = try XCTUnwrap(AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:16000,channels:1,interleaved:false))
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat:format,frameCapacity:16000))
+    buffer.frameLength = 16000
+    let data = try XCTUnwrap(buffer.floatChannelData?[0])
+    for i in 0..<16000 { data[i] = 0.001 * sin(Float(i) * 0.08) }
+    let time = nowMs()
+    for i in 1...6 { microphone.receiveStreamPCM(buffer,at:time+Double(i)*1000) }
+    let captured = chunks.withLock { $0 }
+    XCTAssertEqual(captured.count,1,"Below-threshold audio must reach ASR, not be dropped as silence")
+    XCTAssertEqual(Data(base64Encoded:try XCTUnwrap(captured.first).audioBase64)?.count,192044)
+  }
+
+  func testManualAnalyzeWaitsForTranscriptionAndShowsProgress() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.addSimulationLine("Can you have it ready by Friday?")
+    model.isTranscribing = true
+    model.requestCue(manual:true)
+    XCTAssertNotNil(model.pendingManualAnalysisAt)
+    XCTAssertEqual(model.analysisFeedback,"Finishing speech, then analyzing…")
+    XCTAssertEqual(model.requests,0)
+    model.isTranscribing = false
+    try await Task.sleep(for:.milliseconds(2300))
+    XCTAssertNil(model.pendingManualAnalysisAt)
+    XCTAssertGreaterThan(model.requests,0)
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertNotNil(model.cue)
+  }
+
+  func testCaptionsAndAnalysisFeedbackAreVisibleWithoutExtraButtons() {
+    XCTAssertTrue(SessionModel().displayCaptions)
+    let screen = GlassesScreen(cue:nil,caption:"Hello there",note:nil,paused:false,captionsEnabled:true,
+      ready:false,starting:false,feedback:"Analyzing…")
+    XCTAssertEqual(screen.title,"Analyzing…")
+    XCTAssertEqual(screen.detail,"Heard: Hello there")
+    XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
+  }
+
+  func testAbstentionShowsAnOutcomeOnLens() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.addSimulationLine("The sky is blue.")
+    try await Task.sleep(for:.milliseconds(1600))
+    model.requestCue(manual:true)
+    XCTAssertEqual(model.analysisFeedback,"Analyzing…")
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertNil(model.cue)
+    XCTAssertEqual(model.analysisFeedback,"No new cue needed. See phone for why.")
+  }
+  func testStoppedStreamingKeepsControlsAndConsentButClearsContext() async throws {
+    let model = try await activeModel()
+    model.contextText = "Private session note"
+    model.addSimulationLine("Some private speech")
+    model.manualDisplayTest()
+    model.captureMode = .displayGlasses
+    model.stopStreaming()
+    XCTAssertEqual(model.phase,.paused)
+    XCTAssertTrue(model.glassesControlsReady)
+    XCTAssertTrue(model.canStart)
+    XCTAssertTrue(model.consent)
+    XCTAssertNil(model.cue)
+    XCTAssertNil(model.latestFrame)
+    XCTAssertNil(model.latestAudioContext)
+    XCTAssertTrue(model.transcript.isEmpty)
+    XCTAssertTrue(model.contextText.isEmpty)
+    model.stop()
+    XCTAssertFalse(model.consent)
+    XCTAssertFalse(model.glassesControlsReady)
+  }
+
+  func testOldDisplayButtonsCannotControlNewScreen() {
+    let controller = GlassesController()
+    controller.displayReady = true
+    var starts = 0
+    var stops = 0
+    controller.onResume = { starts += 1 }
+    controller.onStop = { stops += 1 }
+    let oldRevision = controller.displayRevision
+    controller.show(nil,paused:true,ready:true)
+    controller.perform(.start,revision:oldRevision)
+    controller.perform(.stop,revision:oldRevision)
+    XCTAssertEqual(starts,0)
+    XCTAssertEqual(stops,0)
+    controller.perform(.start,revision:controller.displayRevision)
+    XCTAssertEqual(starts,1)
+  }
+
+  func testLensDoesNotRedrawForHiddenCaptionsOrModelProgress() {
+    let controller = GlassesController()
+    controller.displayReady = true
+    controller.show(nil,status:"Watching surroundings")
+    let revision = controller.displayRevision
+    controller.show(nil,caption:"A new transcript",status:"Analyzing surroundings…")
+    controller.show(nil,caption:"Another transcript",status:"Transcribing speech")
+    XCTAssertEqual(controller.displayRevision,revision)
+    controller.show("Keep your voice low.")
+    XCTAssertEqual(controller.displayRevision,revision+1)
+    controller.show("Keep your voice low.",caption:"More speech",status:"Watching surroundings")
+    XCTAssertEqual(controller.displayRevision,revision+1)
+    controller.clear()
+    controller.show("Keep your voice low.")
+    XCTAssertEqual(controller.displayRevision,revision+3,"Closing invalidates the cached screen")
+  }
+
+  func testLensControlsStayCompactWithCueAndCaption() {
+    let screen = GlassesScreen(cue:String(repeating:"x",count:150),caption:"  Caption\n\ttext  ",note:"Note",paused:false,
+      captionsEnabled:true,ready:false,starting:false)
+    XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
+    XCTAssertEqual(screen.cue?.count,90)
+    XCTAssertEqual(screen.detail,"Heard: Caption text","A social cue must not hide enabled captions; newlines must not crowd out controls")
+  }
+
+  func testEnabledCaptionsUpdateAlongsideCueAndSurviveItsRemoval() {
+    let controller = GlassesController()
+    controller.displayReady = true
+    controller.show("Ask what they meant.",caption:"We can meet Friday.",captionsEnabled:true)
+    let revision = controller.displayRevision
+    controller.show("Ask what they meant.",caption:"Friday afternoon works.",captionsEnabled:true)
+    XCTAssertEqual(controller.displayRevision,revision+1,"New captions must reach the lens while a cue is visible")
+    XCTAssertEqual(controller.requestedScreen?.cue,"Ask what they meant.")
+    XCTAssertEqual(controller.requestedScreen?.detail,"Heard: Friday afternoon works.")
+    controller.show(nil,caption:"Friday afternoon works.",captionsEnabled:true)
+    XCTAssertNil(controller.requestedScreen?.cue)
+    XCTAssertEqual(controller.requestedScreen?.detail,"Heard: Friday afternoon works.")
+    controller.show("Ask what they meant.",caption:"Friday afternoon works.",captionsEnabled:false)
+    XCTAssertEqual(controller.requestedScreen?.cue,"Ask what they meant.")
+    XCTAssertNil(controller.requestedScreen?.detail,"Turning captions off must still work during a cue")
+  }
+
+  func testCombinedDisplayClearsSpeechOutsideActiveCapture() {
+    for (paused, ready, starting) in [(true,false,false), (true,true,false), (false,false,true)] {
+      let screen = GlassesScreen(cue:"Ask what they meant.",caption:"Private speech",note:nil,
+        paused:paused,captionsEnabled:true,ready:ready,starting:starting)
+      XCTAssertNil(screen.cue)
+      XCTAssertNil(screen.detail)
+    }
+    let excerpt = GlassesScreen(cue:"A cue",caption:String(repeating:"a",count:100),note:nil,
+      paused:false,captionsEnabled:true,ready:false,starting:false)
+    XCTAssertEqual(excerpt.detail,"Heard: …" + String(repeating:"a",count:60))
+  }
+
+  func testPhoneStartGlassesOnlyOpensControls() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    model.consent = true
+    model.startFromPhone()
+    XCTAssertTrue(model.openingGlassesControls)
+    XCTAssertEqual(model.phase,.starting)
+    XCTAssertEqual(model.requests,0)
+    XCTAssertNil(model.latestFrame)
+    model.stop() // Cancel before any SDK work; test must not access hardware.
+  }
+
+  func testCameraStopWaitsForCompletionAndHasBoundedFailure() async {
+    var stopped = false
+    let finish = Task { @MainActor in
+      try? await Task.sleep(for:.milliseconds(80))
+      stopped = true
+    }
+    let completed = await GlassesController.waitForStop(timeout:.seconds(1)) { stopped }
+    XCTAssertTrue(completed)
+    await finish.value
+    let timedOut = await GlassesController.waitForStop(timeout:.milliseconds(60)) { false }
+    XCTAssertFalse(timedOut)
+  }
+
+  func testOpeningGlassesControlsRequiresConsent() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    model.openGlassesControls()
+    XCTAssertEqual(model.phase,.stopped)
+    XCTAssertFalse(model.openingGlassesControls)
+  }
+  func testGlassesAppUpdateErrorPreservesActionableRecovery() {
+    let controller = GlassesController()
+    var failure: String?
+    controller.onFailure = { failure = $0 }
+    controller.report(DeviceSessionError.datAppOnTheGlassesUpdateRequired)
+    XCTAssertTrue(controller.updateRequired)
+    XCTAssertEqual(failure,GlassesController.updateInstructions)
+    XCTAssertEqual(controller.lastError,GlassesController.updateInstructions)
+    controller.report(DeviceSessionError.noEligibleDevice)
+    XCTAssertFalse(controller.updateRequired)
+    XCTAssertNotEqual(failure,GlassesController.updateInstructions)
+  }
   private func activeModel() async throws -> SessionModel {
     let model = SessionModel()
-    model.simulate = true; model.localMock = true
+    model.simulate = true; model.localMock = true; model.consent = true
     model.start()
     try await Task.sleep(for:.milliseconds(100))
     XCTAssertEqual(model.phase,.active)
@@ -16,6 +266,8 @@ final class SessionTests: XCTestCase {
   func testPhoneIsDefaultAndDoesNotRequirePairedGlasses() {
     let model = SessionModel()
     XCTAssertEqual(model.captureMode,.phone)
+    XCTAssertFalse(model.canStart, "Starting needs consent")
+    model.consent = true
     XCTAssertTrue(model.canStart)
     XCTAssertTrue(model.analyzesSurroundings)
     model.phoneCameraEnabled = false
@@ -307,13 +559,13 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(captured.allSatisfy { abs($0.endedAtMs-$0.startedAtMs-6000) < 1 })
   }
 
-  func testLiveGlassesNeedFreshCameraAndAudio() {
+  func testSceneOnlyNeedsFreshCameraAndPhoneStillRequiresAudio() {
     let model = SessionModel()
     model.captureMode = .displayGlasses
     let time = nowMs()
     XCTAssertNotNil(model.liveInputIssue(at:time))
     model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:time)
-    XCTAssertNotNil(model.liveInputIssue(at:time), "Camera alone does not prove a full live capture path")
+    XCTAssertNil(model.liveInputIssue(at:time), "Scene-only checks can proceed without ambient audio")
     model.latestAudioContext = AudioContext(capturedAtMs:time,windowMs:1000,activityRatio:0,rmsDbFS:-80,source:"glasses_pcm")
     XCTAssertNil(model.liveInputIssue(at:time), "Silent ambient PCM is valid live audio")
     XCTAssertNotNil(model.liveInputIssue(at:time+10001))
@@ -374,7 +626,7 @@ final class SessionTests: XCTestCase {
 
   func testUnreachableServerStillStartsPhoneCaptureWithoutUploads() async throws {
     let model = SessionModel(people:PeopleStore(fileURL:nil))
-    model.captureMode = .phone; model.phoneCameraEnabled = false
+    model.captureMode = .phone; model.phoneCameraEnabled = false; model.consent = true
     model.endpoint = "http://127.0.0.1:9" // nothing listens here
     model.start()
     for _ in 0..<50 where model.phase == .starting { try await Task.sleep(for:.milliseconds(100)) }

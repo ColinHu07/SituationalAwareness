@@ -30,7 +30,7 @@ DAT 1.0.0 adds `MockDisplayKit` previews and click injection. This app's native 
 ## Phone first (no glasses required)
 
 1. Choose **iPhone**, optionally enable the rear camera, and keep the app foreground.
-2. For permission/preview testing, enable **Capture test only (no uploads)**, confirm consent and **Start analyzing**. Verify the source rate/preview, then Stop. No transcript is fabricated.
+2. For permission/preview testing, confirm consent and **Start**. Without a reachable server, capture starts camera-only: verify the preview, then Stop. No transcript is fabricated.
 3. Configure server-side `MODEL_MODE=live`, `MUSE_API_KEY`, and a separate `COPILOT_PROXY_TOKEN` in ignored `.env`. Enter only a reachable trusted HTTPS proxy URL and proxy token in app Settings. Simulator loopback HTTP is allowed; a real phone needs the server's reachable address.
 4. Disable capture testing, confirm consent and Start. Phone mode explicitly selects the built-in microphone. Bounded WAV chunks go to Muse ASR; recognized words appear in **Captions**. Notes and suggestions stay separate.
 5. Captions expire after 15 seconds and clear on Pause/Stop. Dismiss removes only the suggestion. Pause keeps wearer notes; Stop erases them and resets consent. Backgrounding pauses phone capture, including audio-only sessions; Resume is deliberate.
@@ -42,7 +42,7 @@ DAT 1.0.0 adds `MockDisplayKit` previews and click injection. This app's native 
 3. Select **Display glasses** or **Meta glasses**, then **Pair / register with Meta AI** and complete registration. The callback is handled through `Wearables.handleUrl`.
 4. **Display glasses:** obtain **Camera and Audio Streaming** app approval for development/beta testing. Start checks/requests both DAT camera and microphone permissions and requests the app's iOS microphone permission. There is no HFP selection. Camera, direct ambient audio and Display share one session. Audio streaming is experimental and unavailable for production release channels.
 5. **Regular Meta glasses:** use **Refresh Bluetooth audio inputs** and explicitly select the glasses by Bluetooth name. This route still uses HFP; camera attaches first, the selected HFP route settles for two seconds and is verified, then video starts. A lost route pauses capture; no phone mic is substituted.
-6. Enable **Connection test only (no uploads)**, obtain consent, then **Start analyzing**. Check fresh frames and the reported source rate. In Display mode, Start also waits for ambient audio delivery. Use **Manual glasses display test**, physically verify the cue, Dismiss, and Stop. This does not require a model key or upload audio/images.
+6. Obtain consent, then **Start**. Check fresh frames and the reported source rate under **Input status**. In Display mode, Start also waits for ambient audio delivery. Use **Test display**, physically verify the cue, Dismiss, and Stop.
 7. Disable connection testing, configure the trusted HTTPS proxy URL and proxy token, save, and **Check proxy**. The backend must report live mode for real capture. Confirm consent again, then Start.
 8. Display controls are **Analyze now**, **Dismiss** when a cue exists, **Pause**, and **Stop**. Pause stops capture while retaining **Resume analysis / Stop** on the display; Resume creates a fresh DAT session. Stop clears the display then ends the session. System display/session interruption also pauses capture. Regular glasses show results on the phone; spoken output is not implemented.
 
