@@ -48,8 +48,8 @@ struct PhoneCaptureView: View {
           if !model.sceneOnly {
           captions
           VStack(alignment:.leading,spacing:8) {
-            Label("YOUR NOTES",systemImage:"note.text").font(.caption.bold()).tracking(1)
-            TextField("Things you want to remember",text:$model.contextText,axis:.vertical)
+            Label("NOTES",systemImage:"note.text").font(.caption.bold()).tracking(1)
+            TextField("Add a note",text:$model.contextText,axis:.vertical)
               .lineLimit(2...4)
               .onChange(of:model.contextText) { _, _ in model.contextChanged() }
             Text("Kept for this session and cleared on Stop.").font(.caption).foregroundStyle(.secondary)
@@ -58,7 +58,7 @@ struct PhoneCaptureView: View {
         }.padding(20)
       }.background(Color(red:0.95,green:0.97,blue:0.95))
         .safeAreaInset(edge:.bottom) { captureControls }
-        .navigationTitle("\(sourceName) live capture")
+        .navigationTitle(sourceName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement:.topBarTrailing) {
           Button("Setup") { model.pause(); dismiss() }
@@ -72,7 +72,7 @@ struct PhoneCaptureView: View {
         Label("\(sourceName.uppercased()) CAMERA",systemImage:usesGlasses ? "eyeglasses" : "iphone")
           .font(.caption.bold()).tracking(1)
         Spacer()
-        Text(model.phase == .active ? "LIVE INPUT" : model.phase.rawValue.uppercased())
+        Text(model.phase == .active ? "LIVE" : model.phase.rawValue.uppercased())
           .font(.caption2.bold()).foregroundStyle(.secondary)
       }
       ZStack {
@@ -111,8 +111,10 @@ struct PhoneCaptureView: View {
       }
       Text(model.notice).font(.subheadline).foregroundStyle(.secondary)
         .accessibilityIdentifier("capture.notice")
-      TimelineView(.periodic(from:.now,by:1)) { context in
-        inputStatus(at:context.date.timeIntervalSince1970 * 1000)
+      DisclosureGroup("Input status") {
+        TimelineView(.periodic(from:.now,by:1)) { context in
+          inputStatus(at:context.date.timeIntervalSince1970 * 1000)
+        }
       }
       if usesGlasses, let error = model.glasses.lastError, error != model.notice {
         Label(error,systemImage:"exclamationmark.triangle").font(.caption).foregroundStyle(.red)
@@ -128,16 +130,7 @@ struct PhoneCaptureView: View {
         Text(model.sceneOnly ? "Muse checks the scene every 10 seconds, or 30 seconds in reduced-power mode. Pause or Stop ends capture. The recommendation stays until the next result." : "Camera and audio stay on until Pause or Stop. Muse checks about every 8–20 seconds, or 30 seconds in reduced-power mode. Results take time to return.")
           .font(.caption).foregroundStyle(.secondary)
       }
-      if model.phase == .paused && !model.connectionTestOnly {
-        Button("Test capture without uploads") {
-          model.connectionTestOnly = true
-          model.startFromPhone()
-        }.font(.subheadline).disabled(!model.canStart)
-      }
-      if model.phase == .paused {
-        Text("Setup pauses capture so you can check pairing and proxy settings.")
-          .font(.caption).foregroundStyle(.secondary)
-      }
+
     }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
   }
 
@@ -153,7 +146,7 @@ struct PhoneCaptureView: View {
         Button("Stop",systemImage:"stop.fill",role:.destructive) { model.stop(); dismiss() }
           .buttonStyle(.bordered)
       } else {
-        Button("Return to setup") { dismiss() }.buttonStyle(.borderedProminent)
+        Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
       }
       Spacer(minLength:0)
     }.controlSize(.large).padding(.horizontal,20).padding(.vertical,12)
@@ -200,9 +193,7 @@ struct PhoneCaptureView: View {
         .font(.system(size:27,weight:.medium,design:.rounded))
         .foregroundStyle(.white).frame(maxWidth:.infinity,minHeight:70,alignment:.leading)
         .accessibilityIdentifier("capture.cue")
-      Text(model.captureMode.hasGlassesDisplay
-        ? "This phone mirrors the cue sent to the glasses. Check the lens to verify it appears."
-        : "Muse adds a brief suggestion when the scene or conversation calls for one.")
+      Text(model.captureMode.hasGlassesDisplay ? "Shown on phone and glasses." : "A suggestion for the scene or conversation.")
         .font(.caption).foregroundStyle(.white.opacity(0.7))
       if !model.sceneOnly { HStack {
         Button("Analyze now") { model.requestCue(manual:true) }
