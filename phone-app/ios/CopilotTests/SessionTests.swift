@@ -24,6 +24,10 @@ final class SessionTests: XCTestCase {
     XCTAssertFalse(model.canStart)
     model.consent = true
     XCTAssertTrue(model.canStart)
+    XCTAssertTrue(model.analyzesSurroundings)
+    model.phoneCameraEnabled = false
+    XCTAssertFalse(model.analyzesSurroundings)
+    model.phoneCameraEnabled = true
     model.captureMode = .regularGlasses
     XCTAssertFalse(model.canStart)
     model.selectedAudioUID = "explicitly-selected-hfp"
@@ -257,8 +261,10 @@ final class SessionTests: XCTestCase {
 
   func testGlassesClockPreservesRelativeAudioVideoTimeAndRejectsLateFrames() {
     let clock = GlassesStreamClock()
+    XCTAssertFalse(clock.hasVideo)
     func pts(_ seconds: Double) -> CMTime { CMTime(seconds:seconds,preferredTimescale:1000) }
     XCTAssertEqual(clock.timestamp(for:pts(10),audio:false,arrival:100000),100000)
+    XCTAssertTrue(clock.hasVideo)
     XCTAssertEqual(clock.timestamp(for:pts(10.1),audio:true,arrival:100150),100100)
     XCTAssertEqual(clock.timestamp(for:pts(10.5),audio:false,arrival:100550),100500)
     XCTAssertNil(clock.timestamp(for:pts(10.3),audio:false,arrival:100600))
@@ -311,5 +317,62 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(captured.count,2)
     XCTAssertTrue(captured.allSatisfy { Data(base64Encoded:$0.audioBase64)?.count == 192044 })
     XCTAssertTrue(captured.allSatisfy { abs($0.endedAtMs-$0.startedAtMs-6000) < 1 })
+  }
+
+  func testLiveGlassesNeedFreshCameraAndAudio() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    let time = nowMs()
+    XCTAssertNotNil(model.liveInputIssue(at:time))
+    model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:time)
+    XCTAssertNotNil(model.liveInputIssue(at:time), "Camera alone does not prove a full live capture path")
+    model.latestAudioContext = AudioContext(capturedAtMs:time,windowMs:1000,activityRatio:0,rmsDbFS:-80,source:"glasses_pcm")
+    XCTAssertNil(model.liveInputIssue(at:time), "Silent ambient PCM is valid live audio")
+    XCTAssertNotNil(model.liveInputIssue(at:time+10001))
+    model.captureMode = .phone
+    model.phoneCameraEnabled = false
+    model.latestFrame = nil
+    model.latestAudioContext = AudioContext(capturedAtMs:time,windowMs:1000,activityRatio:0,rmsDbFS:-80,source:"phone")
+    XCTAssertNil(model.liveInputIssue(at:time), "Explicit audio-only phone mode needs no frame")
+  }
+
+  func testStalledCapturePausesAndClearsCueAndResult() async throws {
+    let model = try await activeModel()
+    model.manualDisplayTest()
+    model.lastSceneSummary = "A previous observation"
+    model.lastAnalysisOutcome = "Social cue ready."
+    model.captureMode = .phone
+    let time = nowMs()
+    model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:time)
+    model.latestAudioContext = AudioContext(capturedAtMs:time,windowMs:1000,activityRatio:0,rmsDbFS:-80,source:"phone")
+    model.checkCaptureHealth(at:time+13000)
+    XCTAssertEqual(model.phase,.paused)
+    XCTAssertNil(model.cue)
+    XCTAssertNil(model.lastSceneSummary)
+    XCTAssertNil(model.lastAnalysisOutcome)
+    XCTAssertNil(model.latestFrame)
+    XCTAssertNil(model.latestAudioContext)
+    model.stop()
+  }
+
+  func testNoUploadManualDisplayTestDoesNotCallMuse() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.connectionTestOnly = true
+    model.manualDisplayTest()
+    XCTAssertNotNil(model.cue)
+    model.requestCue(manual:true)
+    XCTAssertEqual(model.requests,0)
+    XCTAssertEqual(model.uploadedBytes,0)
+  }
+
+  func testDevelopmentConnectionRejectsUnsafeOrIncompleteSetup() {
+    let token = String(repeating:"x",count:32)
+    XCTAssertNotNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"https://test.example", "ASIDE_PROXY_TOKEN":token]))
+    XCTAssertNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"http://test.example", "ASIDE_PROXY_TOKEN":token]))
+    XCTAssertNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"https://user:password@test.example", "ASIDE_PROXY_TOKEN":token]))
+    XCTAssertNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"https://test.example?token=secret", "ASIDE_PROXY_TOKEN":token]))
+    XCTAssertNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"https://test.example", "ASIDE_PROXY_TOKEN":"short"]))
+    XCTAssertNil(DevelopmentConnection.settings(from:[:]))
   }
 }

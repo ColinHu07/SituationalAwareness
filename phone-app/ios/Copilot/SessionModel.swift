@@ -32,6 +32,9 @@ final class SessionModel {
   var phonePreview: UIImage?
   var phoneFramesReceived = 0
   var cue: String?
+  var lastSceneSummary: String?
+  var lastAnalysisOutcome: String?
+  var lastAnalysisAtMs: Double = 0
   var notice = "Start only after everyone agrees."
   var modelMode = "Not checked"
   var audioRate: Double = 0
@@ -68,10 +71,23 @@ final class SessionModel {
   @ObservationIgnored private var latestSampleAt: Double = 0
   @ObservationIgnored private var transportTask: Task<Void, Never>?
   @ObservationIgnored private var captureStartedAt: Double = 0
+  @ObservationIgnored private var captureActiveAtMs: Double = 0
   @ObservationIgnored private var lastAnalysisAt: Double = 0
   @ObservationIgnored private var simulatedScene = ""
 
   init() {
+    #if DEBUG
+    let launchEnvironment = ProcessInfo.processInfo.environment
+    if let settings = DevelopmentConnection.settings(from:launchEnvironment) {
+      do {
+        try TokenStore.save(settings.token)
+        UserDefaults.standard.set(settings.endpoint,forKey:"copilot.endpoint")
+        endpoint = settings.endpoint; proxyToken = settings.token
+        notice = "Test backend configured. Choose your inputs and start when ready."
+      } catch { notice = "Could not save the test connection. Configure it in Settings." }
+    }
+    if launchEnvironment["ASIDE_CAPTURE_MODE"] == "display_glasses" { captureMode = .displayGlasses }
+    #endif
     phoneCamera.onFrame = { [weak self] image, time in
       guard let self, self.phase == .active, self.captureMode == .phone else { return }
       self.phonePreview = image; self.phoneFramesReceived += 1; self.sample(image, at:time)
@@ -104,7 +120,28 @@ final class SessionModel {
   private var client: APIClient { APIClient(endpoint:endpoint, token:proxyToken) }
   var canStart: Bool { consent && (captureMode != .regularGlasses || !selectedAudioUID.isEmpty) && (phase == .stopped || phase == .paused) }
   var savedNote: String? { contextText.split(separator:"\n").first.map(String.init) }
-  var analyzesSurroundings: Bool { captureMode == .displayGlasses || (simulate && simulateSurroundings) }
+  var analyzesSurroundings: Bool {
+    captureMode.needsGlasses || (captureMode == .phone && phoneCameraEnabled) || (simulate && simulateSurroundings)
+  }
+  var requiresCamera: Bool { captureMode.needsGlasses || (captureMode == .phone && phoneCameraEnabled) }
+  func liveInputIssue(at timestamp: Double = nowMs()) -> String? {
+    guard !simulate else { return nil }
+    let freshFrame = latestFrame.map { timestamp - $0.capturedAtMs <= 10000 && $0.capturedAtMs <= timestamp + 1000 } ?? false
+    if requiresCamera && !freshFrame {
+      return "Waiting for fresh \(captureMode.needsGlasses ? "glasses" : "phone") camera frames."
+    }
+    let expectedSource = captureMode == .displayGlasses ? "glasses_pcm" : captureMode == .regularGlasses ? "glasses_hfp" : "phone"
+    guard let audio = latestAudioContext, timestamp - audio.capturedAtMs <= 10000,
+          audio.capturedAtMs <= timestamp + 1000, audio.source == expectedSource else {
+      return "Waiting for live \(captureMode.hasGlassesDisplay ? "glasses ambient" : "microphone") audio."
+    }
+    return nil
+  }
+  func checkCaptureHealth(at timestamp: Double = nowMs()) {
+    guard phase == .active, !simulate, timestamp - captureActiveAtMs >= 12000,
+          let issue = liveInputIssue(at:timestamp) else { return }
+    pause("Capture stopped receiving data. \(issue) Resume after checking the connection.")
+  }
   var analysisStatus: String {
     if connectionTestOnly { return "Capture test · no uploads" }
     if isThinking { return "Analyzing surroundings…" }
@@ -176,6 +213,7 @@ final class SessionModel {
       }
       guard epoch == thisEpoch, !Task.isCancelled else { return }
       phase = .active
+      captureActiveAtMs = nowMs()
       notice = simulate ? "SIMULATED SESSION — choose a scene or add a demo line below." : connectionTestOnly ? "CAPTURE TEST — selected inputs active; no uploads or transcription." : analyzesSurroundings ? "Analyzing started. Camera and microphone are active; Muse checks samples periodically. Pause or Stop any time." : captureMode == .phone ? "iPhone microphone active. Captions appear after each speech chunk; notes stay separate." : "Recording selected glasses HFP microphone. Everyone can ask you to stop."
       publishDisplay()
       loopTask?.cancel()
@@ -185,6 +223,8 @@ final class SessionModel {
           guard let self, !Task.isCancelled, self.phase == .active else { return }
           self.trimTranscript()
           self.expireCaption()
+          self.checkCaptureHealth()
+          guard self.phase == .active else { return }
           if self.analyzesSurroundings && ProcessInfo.processInfo.thermalState == .critical {
             self.pause("Phone needs to cool down. Analysis paused; resume when ready."); return
           }
@@ -230,6 +270,7 @@ final class SessionModel {
     generation += 1
     cueTask?.cancel(); cueTask = nil; isThinking = false
     ttlTask?.cancel()
+    lastSceneSummary = nil; lastAnalysisOutcome = nil; lastAnalysisAtMs = 0
     if cue != nil { cue = nil; publishDisplay() }
   }
   private func sample(_ image: UIImage, at time: Double) {
@@ -326,6 +367,7 @@ final class SessionModel {
     guard !connectionTestOnly else { if manual { notice = "Connection test makes no API requests. Use Manual display test." }; return }
     guard phase == .active, cueTask == nil, !isTranscribing else { return }
     let timestamp = nowMs()
+    if let issue = liveInputIssue(at:timestamp) { if manual { notice = issue }; return }
     let surroundings = analyzesSurroundings
     let last = transcript.last
     let freshSpeech = last.flatMap { timestamp - $0.endMs <= 15000 && $0.endMs + 100 >= lastVoiceAt ? $0 : nil }
@@ -392,6 +434,9 @@ final class SessionModel {
               evidenceStillFresh, completedAt - lastVoiceAt >= 1500 else { staleDrops += 1; return }
         apiMs = response.metrics?.apiMs ?? 0; recordCost(response.metrics?.estimatedCostUsd ?? (simulate && localMock ? 0 : nil))
         let result = response.result
+        lastSceneSummary = String(result.reason.prefix(400))
+        lastAnalysisOutcome = "No new social cue needed."
+        lastAnalysisAtMs = completedAt
         let text = result.cue.trimmingCharacters(in:.whitespacesAndNewlines)
         let normalized = text.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace }
         guard result.should_display, result.confidence.isFinite, result.confidence >= 0.8, result.confidence <= 1,
@@ -399,6 +444,7 @@ final class SessionModel {
               !text.isEmpty, text.count <= 90, text.split(whereSeparator: { $0.isWhitespace }).count <= 14,
               !recentCues.contains(normalized) else { notice = "No new cue needed. Still watching for context."; return }
         cue = text; shown += 1; lastCueAt = nowMs(); contextToDisplayMs = lastCueAt - evidenceAt
+        lastAnalysisOutcome = "Social cue ready."
         recentCues = Array((recentCues + [normalized]).suffix(20))
         publishDisplay()
         notice = simulate ? "SIMULATED social cue." : captureMode.hasGlassesDisplay ? "Social cue sent to glasses." : "Suggestion ready on the phone."

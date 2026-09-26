@@ -8,7 +8,8 @@ struct CopilotApp: App {
     WindowGroup {
       ContentView(model:model)
         .onOpenURL { url in
-          guard model.captureMode.needsGlasses else { return }
+          // Meta AI can return after a cold launch, before Glasses is selected.
+          // The controller filters for the SDK's registration callback.
           Task { await model.glasses.handle(url) }
         }
         .onChange(of:scenePhase) { _, phase in

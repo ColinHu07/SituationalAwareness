@@ -21,16 +21,25 @@ struct ContentView: View {
           }
           VStack(alignment:.leading,spacing:10) {
             Text("Use Aside with").font(.headline)
-            Picker("Input and output",selection:$model.captureMode) {
-              ForEach(CaptureMode.allCases) { Text($0.rawValue).tag($0) }
-            }.pickerStyle(.menu).disabled(model.phase != .stopped)
-            Text(model.captureMode.description).font(.caption).foregroundStyle(.secondary)
+            HStack(spacing:12) {
+              sourceButton("iPhone", icon:"iphone", mode:.phone, selected:model.captureMode == .phone)
+              sourceButton("Glasses", icon:"eyeglasses", mode:.displayGlasses, selected:model.captureMode.needsGlasses)
+            }.disabled(model.phase != .stopped)
+            if model.captureMode.needsGlasses {
+              Picker("Glasses type",selection:$model.captureMode) {
+                Text("With display").tag(CaptureMode.displayGlasses)
+                Text("Without display").tag(CaptureMode.regularGlasses)
+              }.pickerStyle(.segmented).disabled(model.phase != .stopped)
+            }
+            Text(model.captureMode.hasGlassesDisplay ? "Live glasses camera and nearby audio. Muse’s social cue appears as text here and is sent to your glasses display." : model.captureMode.description)
+              .font(.caption).foregroundStyle(.secondary)
             if model.captureMode == .phone {
               Toggle("Include rear camera",isOn:$model.phoneCameraEnabled).disabled(model.phase != .stopped)
               Toggle("Capture test only (no uploads)",isOn:$model.connectionTestOnly).disabled(model.phase != .stopped)
               Text("Keep the phone app open. You can test microphone/camera permissions without an API key; captions require the live Muse backend.").font(.caption).foregroundStyle(.secondary)
             }
           }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
+          if model.captureMode.needsGlasses { hardware }
           if model.simulate {
             Label("SIMULATED DEVICE & INPUT",systemImage:"testtube.2")
               .font(.caption.bold()).padding(10).frame(maxWidth:.infinity,alignment:.leading)
@@ -66,11 +75,14 @@ struct ContentView: View {
                 Button("Stop",systemImage:"stop.fill",role:.destructive) { model.stop() }.buttonStyle(.bordered)
               }
             }.controlSize(.large)
+            if !model.simulate && model.phase != .stopped {
+              Button("Open live capture view",systemImage:"viewfinder") { showCamera = true }
+            }
           }.padding(20).background(.white,in:RoundedRectangle(cornerRadius:20))
 
           VStack(alignment:.leading,spacing:16) {
             HStack {
-              Text(model.simulate ? "SIMULATED SOCIAL CUE" : model.captureMode.hasGlassesDisplay ? "GLASSES SOCIAL CUE" : "AI SUGGESTION").font(.caption.bold()).tracking(1)
+              Text(model.simulate ? "SIMULATED SOCIAL CUE" : model.captureMode.hasGlassesDisplay ? "PHONE + GLASSES CUE" : "AI SUGGESTION").font(.caption.bold()).tracking(1)
               Spacer(); Image(systemName:"sparkle")
             }.foregroundStyle(mint)
             Text(model.cue ?? "Room to listen.").font(.system(size:25,weight:.medium,design:.rounded)).foregroundStyle(.white)
@@ -101,7 +113,13 @@ struct ContentView: View {
 
           if model.simulate { simulation }
           else if model.captureMode == .phone { phone }
-          else { hardware }
+          else if let image = model.glasses.preview {
+            VStack(alignment:.leading,spacing:10) {
+              Text("Glasses camera preview").font(.headline)
+              Image(uiImage:image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius:14))
+              Text("Glasses frame received · \(model.glasses.framesReceived) total").font(.caption)
+            }
+          }
           DisclosureGroup("Recent transcript · memory only") {
             VStack(alignment:.leading,spacing:10) {
               if model.transcript.isEmpty { Text("No speech captured.").foregroundStyle(.secondary) }
@@ -134,8 +152,22 @@ struct ContentView: View {
     }.tint(ink)
       .fullScreenCover(isPresented:$showCamera) { PhoneCaptureView(model:model) }
       .onChange(of:model.phase) { _, phase in
-        if phase == .starting && model.captureMode == .phone { showCamera = true }
+        if phase == .starting && !model.simulate { showCamera = true }
       }
+  }
+  private func sourceButton(_ title: String, icon: String, mode: CaptureMode, selected: Bool) -> some View {
+    Button { model.captureMode = mode } label: {
+      VStack(spacing:8) {
+        Image(systemName:icon).font(.title2)
+        Text(title).font(.headline)
+      }
+      .frame(maxWidth:.infinity).padding(.vertical,16)
+      .foregroundStyle(selected ? Color.white : ink)
+      .background(selected ? ink : mint.opacity(0.35),in:RoundedRectangle(cornerRadius:14))
+      .overlay(alignment:.topTrailing) {
+        if selected { Image(systemName:"checkmark.circle.fill").font(.caption).foregroundStyle(mint).padding(8) }
+      }
+    }.buttonStyle(.plain).accessibilityIdentifier(mode == .phone ? "source.phone" : "source.glasses")
   }
   @ViewBuilder private func metric(_ name:String,_ value:String) -> some View { GridRow { Text(name).foregroundStyle(.secondary); Text(value).monospacedDigit() } }
   private var simulation: some View {
@@ -161,7 +193,6 @@ struct ContentView: View {
   }
   private var phone: some View {
     VStack(alignment:.leading, spacing:12) {
-      if model.phase == .active { Button("Open camera view") { showCamera = true } }
       Text("iPhone camera preview").font(.headline)
       if let image = model.phonePreview {
         Image(uiImage:image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius:14))
@@ -174,15 +205,15 @@ struct ContentView: View {
   private var hardware: some View {
     VStack(alignment:.leading,spacing:12) {
       Text("Glasses connection").font(.headline)
-      Toggle("Connection test only (no uploads)",isOn:$model.connectionTestOnly).disabled(model.phase != .stopped)
+      Button { Task { await model.glasses.register() } } label: {
+        Label("Pair / register with Meta AI",systemImage:"link").frame(maxWidth:.infinity)
+      }.buttonStyle(.borderedProminent).controlSize(.large)
+        .disabled(model.phase == .active || model.phase == .starting)
+        .accessibilityIdentifier("glasses.pair")
       Text(model.glasses.devices).font(.subheadline)
       if let error = model.glasses.lastError { Text(error).font(.caption).foregroundStyle(.red) }
       Text("DAT: \(model.glasses.registration) · Camera: \(model.glasses.cameraState) · Display: \(model.glasses.displayState)").font(.caption).foregroundStyle(.secondary)
-      if let image = model.glasses.preview {
-        Image(uiImage:image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius:14))
-        Text("Glasses frame received · \(model.glasses.framesReceived) total").font(.caption)
-      }
-      Button("Pair / register with Meta AI") { Task { await model.glasses.register() } }.disabled(model.phase == .active)
+      Toggle("Connection test only (no uploads)",isOn:$model.connectionTestOnly).disabled(model.phase != .stopped)
       if model.captureMode == .regularGlasses {
       Button("Refresh Bluetooth audio inputs") { model.refreshAudioPorts() }.disabled(model.phase == .active || model.phase == .starting)
       Picker("Glasses microphone",selection:$model.selectedAudioUID) {
@@ -194,14 +225,20 @@ struct ContentView: View {
         Text("Camera and nearby audio stream together. Start requests both permissions; no Bluetooth microphone selection is needed.").font(.caption).foregroundStyle(.secondary)
         Text("Ambient audio uses Meta's development/beta SDK capability. The glasses app needs Camera and Audio Streaming access.").font(.caption).foregroundStyle(.secondary)
       }
-      Button("Manual glasses display test") { model.manualDisplayTest() }.disabled(model.phase != .active)
-    }
+      if model.captureMode.hasGlassesDisplay {
+        Button("Manual glasses display test") { model.manualDisplayTest() }.disabled(model.phase != .active)
+      }
+    }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
   }
   private var settings: some View {
     NavigationStack {
       Form {
         Section("Development mode") {
-          Text("Choose iPhone, Meta glasses, Display glasses or Simulated demo on the main screen.").font(.caption)
+          Button("Use simulated demo",systemImage:"testtube.2") {
+            model.captureMode = .simulated
+            showSettings = false
+          }.disabled(model.phase != .stopped)
+          Text("Simulated demo uses typed fixtures, with no live camera or microphone. Choose iPhone or Glasses on the main screen to return to real capture.").font(.caption)
           if model.simulate { Toggle("Local scripted model (no network)",isOn:$model.localMock).disabled(model.phase != .stopped) }
           Text("The scripted model is a small fixture set, not Muse. Real capture modes use the proxy unless Capture test only is enabled.").font(.caption)
         }
@@ -216,7 +253,9 @@ struct ContentView: View {
         Section("This conversation") {
           TextField("Things you chose to remember (one per line)",text:$model.contextText,axis:.vertical).lineLimit(3...5).onChange(of:model.contextText) { _, _ in model.contextChanged() }
           if model.analyzesSurroundings {
-            Toggle("Captions on glasses",isOn:$model.displayCaptions).onChange(of:model.displayCaptions) { _, _ in model.refreshDisplay() }
+            if model.captureMode.hasGlassesDisplay {
+              Toggle("Captions on glasses",isOn:$model.displayCaptions).onChange(of:model.displayCaptions) { _, _ in model.refreshDisplay() }
+            }
             Text("Muse checks about every 8 seconds near conversation, 20 seconds without recent speech, or 30 seconds in reduced-power mode. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
           } else {
             Stepper("Image sample every \(Int(model.sampleInterval)) seconds",value:$model.sampleInterval,in:3...30,step:1)

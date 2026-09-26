@@ -27,6 +27,7 @@ final class GlassesStreamClock: Sendable {
   }
   private let state = OSAllocatedUnfairLock(initialState:State())
   var hasAudio: Bool { state.withLock { $0.hasAudio } }
+  var hasVideo: Bool { state.withLock { $0.lastVideo.isFinite } }
   func stop() { state.withLock { $0.active = false } }
   func timestamp(for presentationTime: CMTime, audio: Bool, arrival: Double = nowMs()) -> Double? {
     let milliseconds = CMTimeGetSeconds(presentationTime) * 1000
@@ -124,6 +125,8 @@ final class GlassesController {
     sessionRevision += 1
     let revision = sessionRevision
     lastPreviewAt = 0
+    framesReceived = 0; lastError = nil
+    preview = nil; previewAtMs = 0
     sessionHasStarted = false; cameraHasStreamed = false; displayHasStarted = false
     let permissions: [Permission] = withDisplay ? [.camera, .microphone] : [.camera]
     for permission in permissions {
@@ -135,7 +138,30 @@ final class GlassesController {
       try Task.checkCancellation()
       guard sessionRevision == revision, !stopping else { throw CancellationError() }
     }
-    try Task.checkCancellation()
+    // AutoDeviceSelector resolves asynchronously. Poll its public snapshot so a
+    // quiet discovery stream cannot leave Start or its cancellation hanging.
+    let selectionDeadline = ContinuousClock.now.advanced(by:.seconds(15))
+    while true {
+      try Task.checkCancellation()
+      guard sessionRevision == revision, !stopping else { throw CancellationError() }
+      if let identifier = selector.activeDevice,
+         let device = wearables.deviceForIdentifier(identifier) {
+        let compatibility = device.compatibility()
+        if compatibility == .deviceUpdateRequired {
+          throw CopilotError(message:"Glasses firmware needs an update in Meta AI before this session can start.")
+        }
+        if compatibility == .sdkUpdateRequired {
+          throw CopilotError(message:"These glasses need a newer DAT SDK. Update the companion app before starting.")
+        }
+        if device.linkState == .connected, compatibility == .compatible { break }
+      }
+      guard ContinuousClock.now < selectionDeadline else {
+        throw CopilotError(message:withDisplay
+          ? "No connected, compatible Display glasses became available. Check Meta AI pairing, registration and firmware, then try again."
+          : "No connected, compatible Meta glasses became available. Check Meta AI pairing, registration and firmware, then try again.")
+      }
+      try await Task.sleep(for:.milliseconds(100))
+    }
     let deviceSession = try wearables.createSession(deviceSelector:selector)
     session = deviceSession
     tokens.append(deviceSession.statePublisher.listen { [weak self] state in
@@ -221,12 +247,12 @@ final class GlassesController {
     guard sessionRevision == revision else { throw CancellationError() }
     camera.stream.start()
     let streamDeadline = Date().addingTimeInterval(12)
-    while (withDisplay && (!displayReady || !clock.hasAudio)) || camera.stream.state != .streaming {
+    while !clock.hasVideo || (withDisplay && (!displayReady || !clock.hasAudio)) || camera.stream.state != .streaming {
       try await Task.sleep(for:.milliseconds(100))
       guard Date() < streamDeadline, sessionRevision == revision else {
         throw CopilotError(message:withDisplay
-          ? "Camera, ambient audio or display not ready. Check DAT 1.0 audio permission and development/beta access. No conversation data has been sent."
-          : "Camera not ready. No conversation data has been sent.")
+          ? "Decoded camera frames, ambient audio or display not ready. Check DAT 1.0 audio permission and development/beta access. No conversation data has been sent."
+          : "No decoded camera frames received. Check the glasses connection. No conversation data has been sent.")
       }
     }
   }

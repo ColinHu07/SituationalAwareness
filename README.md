@@ -1,5 +1,7 @@
 # Aside — an opt-in conversation copilot
 
+**Live test:** the same installed iOS app now offers **iPhone / Glasses** source selection and a shared camera-and-cue screen. Choose **Glasses → With display** for mirrored phone/glasses text. [Step-by-step live glasses setup and test](docs/LIVE_GLASSES_TEST.md).
+
 A runnable native iOS companion with **iPhone**, **regular Meta glasses**, and **Display glasses** capture modes, a small credential-holding backend, and an explicitly simulated browser lab. The wearer starts deliberately, gets a brief social cue from the visible setting or recent recognized speech, and can dismiss, pause or stop.
 
 **Implemented and locally tested; physical glasses acceptance remains unverified.** Pocket operation, nearby-speaker transcription and display wake behavior need the hardware acceptance test. The prototype does not identify faces or infer emotions/intentions. Current and historical verification results are separated below.
