@@ -113,7 +113,11 @@ final class SessionModel {
   private func configureGlassesCallbacks() {
     glasses.onFrame = { [weak self] image, time in self?.sample(image, at:time) }
     glasses.onFailure = { [weak self] message in self?.pause(message) }
-    glasses.onHelp = { [weak self] in self?.requestCue(manual:true) }
+    glasses.onHelp = { [weak self] in
+      guard let self else { return }
+      if self.connectionTestOnly { self.manualDisplayTest() }
+      else { self.requestCue(manual:true) }
+    }
     glasses.onPause = { [weak self] in self?.pause() }
     glasses.onStop = { [weak self] in self?.stopStreaming() }
     glasses.onDisconnect = { [weak self] in self?.stop() }
@@ -156,7 +160,7 @@ final class SessionModel {
   }
   private func publishDisplay() {
     guard captureMode.hasGlassesDisplay, phase == .active else { return }
-    glasses.show(cue, caption:captionText, note:savedNote, status:analysisStatus, captionsEnabled:displayCaptions)
+    glasses.show(cue, caption:captionText, note:savedNote, captionsEnabled:displayCaptions, testOnly:connectionTestOnly)
   }
   func saveConnection() {
     do { try TokenStore.save(proxyToken); UserDefaults.standard.set(endpoint, forKey:"copilot.endpoint"); notice = "Proxy settings saved. Model keys stay on the server." }
@@ -174,6 +178,10 @@ final class SessionModel {
   func openGlassesControls() {
     guard captureMode.hasGlassesDisplay else { return }
     start(displayOnly:true)
+  }
+  func startFromPhone() {
+    if captureMode.hasGlassesDisplay { openGlassesControls() }
+    else { start() }
   }
   func start(displayOnly: Bool = false) {
     guard canStart, !displayOnly || captureMode.hasGlassesDisplay else { return }
@@ -211,7 +219,7 @@ final class SessionModel {
             try await glasses.connectDisplayOnly()
             guard epoch == thisEpoch, !Task.isCancelled else { return }
             phase = .paused; openingGlassesControls = false; glassesControlsReady = true
-            notice = "Controls ready on glasses. Select Start streaming with your wristband. Camera and microphone are off."
+            notice = "Controls ready on glasses. Select Start with your wristband. Camera and microphone are off."
             glasses.show(nil, paused:true, ready:true)
             return
           }
@@ -280,7 +288,7 @@ final class SessionModel {
     contextText = ""; recentCues = []; lastCueAt = 0
     glassesControlsReady = true
     glasses.pauseCapture(ready:true)
-    notice = "Streaming stopped and session context cleared. Select Start streaming on glasses, or Stop on the phone to disconnect."
+    notice = "Streaming stopped and session context cleared. Select Start on glasses, or Stop on the phone to disconnect."
   }
   func stop() {
     epoch += 1

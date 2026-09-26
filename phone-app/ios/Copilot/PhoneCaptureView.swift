@@ -93,7 +93,7 @@ struct PhoneCaptureView: View {
 
   private var previewPlaceholder: String {
     if model.openingGlassesControls && model.phase == .starting { return "Opening glasses controls. Camera and microphone are off." }
-    if model.glassesControlsReady { return "Ready on glasses. Select Start streaming with your wristband." }
+    if model.glassesControlsReady { return "Ready on glasses. Select Start with your wristband. Camera and microphone are off." }
     if model.phase == .starting { return "Opening \(sourceName.lowercased()) camera and microphone…" }
     if model.phase == .paused || model.phase == .stopped { return "Capture \(model.phase.rawValue.lowercased())" }
     return cameraEnabled ? "Waiting for \(sourceName.lowercased()) camera frames…" : "Audio-only session"
@@ -129,7 +129,7 @@ struct PhoneCaptureView: View {
       if model.phase == .paused && !model.connectionTestOnly {
         Button("Test capture without uploads") {
           model.connectionTestOnly = true
-          model.start()
+          model.startFromPhone()
         }.font(.subheadline).disabled(!model.canStart)
       }
       if model.phase == .paused {
@@ -142,7 +142,7 @@ struct PhoneCaptureView: View {
   private var captureControls: some View {
     HStack(spacing:12) {
       if model.phase == .paused {
-        Button(usesGlasses && model.glasses.updateRequired ? "Retry after update" : model.glassesControlsReady ? "Start streaming" : "Resume",systemImage:"play.fill") { model.start() }
+        Button(model.captureMode.hasGlassesDisplay ? "Start glasses" : usesGlasses && model.glasses.updateRequired ? "Retry after update" : "Resume",systemImage:"play.fill") { model.startFromPhone() }
           .buttonStyle(.borderedProminent).disabled(!model.canStart)
       } else if model.phase == .active {
         Button("Pause",systemImage:"pause.fill") { model.pause() }.buttonStyle(.borderedProminent)

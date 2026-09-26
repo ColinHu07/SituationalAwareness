@@ -29,6 +29,7 @@ final class SessionTests: XCTestCase {
 
   func testOldDisplayButtonsCannotControlNewScreen() {
     let controller = GlassesController()
+    controller.displayReady = true
     var starts = 0
     var stops = 0
     controller.onResume = { starts += 1 }
@@ -41,6 +42,45 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(stops,0)
     controller.perform(.start,revision:controller.displayRevision)
     XCTAssertEqual(starts,1)
+  }
+
+  func testLensDoesNotRedrawForHiddenCaptionsOrModelProgress() {
+    let controller = GlassesController()
+    controller.displayReady = true
+    controller.show(nil,status:"Watching surroundings")
+    let revision = controller.displayRevision
+    controller.show(nil,caption:"A new transcript",status:"Analyzing surroundings…")
+    controller.show(nil,caption:"Another transcript",status:"Transcribing speech")
+    XCTAssertEqual(controller.displayRevision,revision)
+    controller.show("Keep your voice low.")
+    XCTAssertEqual(controller.displayRevision,revision+1)
+    controller.show("Keep your voice low.",caption:"More speech",status:"Watching surroundings")
+    XCTAssertEqual(controller.displayRevision,revision+1)
+    controller.clear()
+    controller.show("Keep your voice low.")
+    XCTAssertEqual(controller.displayRevision,revision+3,"Closing invalidates the cached screen")
+  }
+
+  func testLensControlsStayCompactWithCueAndCaption() {
+    let screen = GlassesScreen(cue:String(repeating:"x",count:150),caption:"Caption",note:"Note",paused:false,
+      captionsEnabled:true,ready:false,starting:false,testOnly:false)
+    XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
+    XCTAssertEqual(screen.cue?.count,90)
+    XCTAssertNil(screen.detail,"Cue takes precedence over extra text so buttons fit")
+    let test = GlassesScreen(cue:nil,caption:nil,note:nil,paused:false,captionsEnabled:false,ready:false,starting:false,testOnly:true)
+    XCTAssertEqual(test.labels,["Pause","Test cue","Stop"])
+  }
+
+  func testPhoneStartGlassesOnlyOpensControls() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    model.consent = true
+    model.startFromPhone()
+    XCTAssertTrue(model.openingGlassesControls)
+    XCTAssertEqual(model.phase,.starting)
+    XCTAssertEqual(model.requests,0)
+    XCTAssertNil(model.latestFrame)
+    model.stop() // Cancel before any SDK work; test must not access hardware.
   }
 
   func testCameraStopWaitsForCompletionAndHasBoundedFailure() async {

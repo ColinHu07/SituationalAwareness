@@ -97,6 +97,7 @@ final class GlassesController {
   @ObservationIgnored private var stopping = false
   @ObservationIgnored var operation: Task<Void, Never>?
   @ObservationIgnored var displayRevision = 0
+  @ObservationIgnored var requestedScreen: GlassesScreen?
   @ObservationIgnored private var sessionRevision = 0
   @ObservationIgnored var displayReady = false
   @ObservationIgnored private var lastPreviewAt: Double = 0

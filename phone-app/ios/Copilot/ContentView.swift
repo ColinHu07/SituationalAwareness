@@ -66,7 +66,7 @@ struct ContentView: View {
             }
             HStack(spacing:12) {
               if model.phase == .stopped || model.phase == .paused {
-                Button(model.captureMode.needsGlasses && model.glasses.updateRequired ? "Retry after update" : model.phase == .paused ? "Resume analyzing" : "Start analyzing",systemImage:"play.fill") { model.start() }
+                Button(model.captureMode.hasGlassesDisplay ? "Start glasses" : model.captureMode.needsGlasses && model.glasses.updateRequired ? "Retry after update" : model.phase == .paused ? "Resume analyzing" : "Start analyzing",systemImage:"play.fill") { model.startFromPhone() }
                   .buttonStyle(.borderedProminent).tint(ink).disabled(!model.canStart)
               } else {
                 Button("Pause",systemImage:"pause.fill") { model.pause() }.buttonStyle(.borderedProminent).tint(ink)
@@ -76,9 +76,7 @@ struct ContentView: View {
               }
             }.controlSize(.large)
             if model.captureMode.hasGlassesDisplay && (model.phase == .stopped || model.phase == .paused) {
-              Button("Open controls on glasses",systemImage:"hand.point.up.left") { model.openGlassesControls() }
-                .buttonStyle(.bordered).disabled(!model.canStart)
-              Text("Opens Start streaming on the lens. Use your wristband to select it; camera and microphone stay off until then.")
+              Text("Start glasses opens the controls on the lens. Select Start there to turn on camera and audio. While streaming: Pause suspends capture, Analyze requests a Muse cue, and Stop returns to Start.")
                 .font(.caption).foregroundStyle(.secondary)
             }
             if !model.simulate && model.phase != .stopped {

@@ -1,12 +1,61 @@
 import Foundation
 import MWDATDisplay
 
-// Display-only rendering; camera/session transport is shared with regular glasses.
+// Only visible content participates in equality. Background ASR/model progress
+// never redraws the lens or moves focus when the controls and cue are unchanged.
+struct GlassesScreen: Equatable, Sendable {
+  enum Mode: Sendable { case ready, paused, starting, streaming }
+  let mode: Mode
+  let cue: String?
+  let detail: String?
+  let testOnly: Bool
+  init(cue: String?, caption: String?, note: String?, paused: Bool,
+       captionsEnabled: Bool, ready: Bool, starting: Bool, testOnly: Bool) {
+    mode = starting ? .starting : paused ? (ready ? .ready : .paused) : .streaming
+    self.testOnly = testOnly
+    self.cue = mode == .streaming ? cue.map { String($0.prefix(90)) } : nil
+    if mode == .streaming && self.cue == nil {
+      detail = (captionsEnabled ? caption : note).map { String($0.prefix(60)) }
+    } else { detail = nil }
+  }
+  var title: String {
+    switch mode {
+    case .ready: return "Ready · camera off"
+    case .paused: return "Paused · camera off"
+    case .starting: return "Starting…"
+    case .streaming: return testOnly ? "Camera test · no uploads" : "Streaming"
+    }
+  }
+  var labels: [String] {
+    switch mode {
+    case .ready: return ["Start", "Close"]
+    case .paused: return ["Resume", "Stop", "Close"]
+    case .starting: return ["Cancel"]
+    case .streaming: return ["Pause", testOnly ? "Test cue" : "Analyze", "Stop"]
+    }
+  }
+  var actions: [GlassesController.ControlAction] {
+    switch mode {
+    case .ready: return [.start, .close]
+    case .paused: return [.start, .stop, .close]
+    case .starting: return [.stop]
+    case .streaming: return [.pause, .help, .stop]
+    }
+  }
+}
+
 @MainActor
 extension GlassesController {
-  // Serialize all display writes: a dismissal/stop queued behind an in-flight send always wins.
+  // SDK send replaces the screen atomically. clearDisplay is reserved for closing
+  // controls; clearing before every send produces a visible blank-frame flash.
   func show(_ cue: String?, caption: String? = nil, note: String? = nil, paused: Bool = false,
-            status: String? = nil, captionsEnabled: Bool = false, ready: Bool = false, starting: Bool = false) {
+            status: String? = nil, captionsEnabled: Bool = false, ready: Bool = false,
+            starting: Bool = false, testOnly: Bool = false) {
+    guard displayReady else { return }
+    let screen = GlassesScreen(cue:cue, caption:caption, note:note, paused:paused,
+      captionsEnabled:captionsEnabled, ready:ready, starting:starting, testOnly:testOnly)
+    guard screen != requestedScreen else { return }
+    requestedScreen = screen
     displayRevision += 1
     let revision = displayRevision
     let previous = operation
@@ -14,57 +63,28 @@ extension GlassesController {
       await previous?.value
       guard let self, self.displayRevision == revision, let display = self.display, self.displayReady else { return }
       do {
-        try await display.clearDisplay()
-        guard self.displayRevision == revision else { return }
-        let content = FlexBox(direction:.column, spacing:12) {
-          if starting {
-            Text("Starting stream…", style:.body)
-          } else if paused {
-            Text(ready ? "Ready to stream" : "Streaming paused", style:.body)
-            Text("Camera and microphone are off.", style:.meta, color:.secondary)
-          } else {
-            if let cue {
-              Text("Social cue", style:.meta, color:.secondary)
-              Text(cue, style:.body)
-              if let status { Text(status, style:.meta, color:.secondary) }
-            } else {
-              Text("Muse", style:.meta, color:.secondary)
-              Text(status ?? "Watching surroundings", style:.body)
-              if let note, !note.isEmpty {
-                Text("Your note", style:.meta, color:.secondary)
-                Text(String(note.prefix(80)), style:.meta)
-              }
-            }
-            // Cues get the first glance; completed speech is optional, secondary context.
-            if captionsEnabled, let caption, !caption.isEmpty {
-              Text("Heard · completed speech", style:.meta, color:.secondary)
-              Text(String(caption.suffix(120)), style:.meta)
-            }
+        let content = FlexBox(direction:.column, spacing:8) {
+          Text(screen.title, style:.meta, color:.secondary)
+          Text(screen.cue ?? (screen.mode == .ready ? "Select Start to stream." : screen.mode == .paused ? "Select Resume when ready." : screen.mode == .starting ? "Connecting camera and audio." : "Room to listen."), style:.body)
+          if let detail = screen.detail, !detail.isEmpty {
+            Text(detail, style:.meta, color:.secondary)
           }
+          // At most three short labels; never append Dismiss and widen the row.
           ButtonGroup {
-            if starting {
-              Button(label:"Stop streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.stop, revision:revision) } })
-                .actionRole(.primary)
-            } else if paused {
-              Button(label:ready ? "Start streaming" : "Resume streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.start, revision:revision) } })
-                .actionRole(.primary)
-              if !ready {
-                Button(label:"Stop streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.stop, revision:revision) } })
+            for index in screen.labels.indices {
+              if index == 0 {
+                Button(label:screen.labels[index], onClick:{ [weak self] in Task { @MainActor in self?.perform(screen.actions[index], revision:revision) } })
+                  .actionRole(.primary)
+              } else {
+                Button(label:screen.labels[index], onClick:{ [weak self] in Task { @MainActor in self?.perform(screen.actions[index], revision:revision) } })
               }
-              Button(label:"Close controls", onClick:{ [weak self] in Task { @MainActor in self?.perform(.close, revision:revision) } })
-            } else {
-              Button(label:"Pause streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.pause, revision:revision) } })
-                .actionRole(.primary)
-              Button(label:"Analyze now", onClick:{ [weak self] in Task { @MainActor in self?.perform(.help, revision:revision) } })
-              if cue != nil { Button(label:"Dismiss", onClick:{ [weak self] in Task { @MainActor in self?.perform(.dismiss, revision:revision) } }) }
-              Button(label:"Stop streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.stop, revision:revision) } })
             }
           }
-        }
+        }.padding(12)
         try await display.send(content)
-        if self.displayRevision != revision { try await display.clearDisplay() }
       } catch {
         guard self.displayRevision == revision else { return }
+        self.requestedScreen = nil
         self.fail("Display write failed: \(error.localizedDescription)")
       }
     }
@@ -72,7 +92,6 @@ extension GlassesController {
 
   enum ControlAction { case start, pause, stop, close, help, dismiss }
   func perform(_ action: ControlAction, revision: Int) {
-    // A click queued by an old screen must never act on a new capture session.
     guard displayRevision == revision else { return }
     switch action {
     case .start: onResume?()
@@ -85,6 +104,7 @@ extension GlassesController {
   }
 
   func clear() {
+    requestedScreen = nil
     displayRevision += 1
     let previous = operation
     let cap = display
