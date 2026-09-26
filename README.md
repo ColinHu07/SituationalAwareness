@@ -1,6 +1,6 @@
 # Aside — an opt-in conversation copilot
 
-**Live test:** the same installed iOS app now offers **iPhone / Glasses** source selection and a shared camera-and-cue screen. Choose **Glasses → With display** for mirrored phone/glasses text. [Step-by-step live glasses setup and test](docs/LIVE_GLASSES_TEST.md).
+**Live test:** the same installed iOS app offers **iPhone / Glasses** source selection and a shared camera-and-cue screen. Choose **Glasses → With display** for mirrored phone/glasses text. The iPhone source card also offers **Multi-speaker captions**, a separate Start/Stop test with up to three speaker rows. [Phone caption test setup](phone-app/ios/README.md#quick-multi-speaker-caption-test). [Step-by-step live glasses setup and test](docs/LIVE_GLASSES_TEST.md).
 
 A runnable native iOS companion with **iPhone**, **regular Meta glasses**, and **Display glasses** capture modes, a small credential-holding backend, and an explicitly simulated browser lab. The wearer starts deliberately, gets a brief social cue from the visible setting or recent recognized speech, and can dismiss, pause or stop.
 

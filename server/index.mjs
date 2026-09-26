@@ -6,6 +6,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
 import { createProvider } from './model.mjs';
+import { attachRealtimeASR } from './realtime-asr.mjs';
 import { validateInput, validateAudio, validateLearnInput } from './validation.mjs';
 import { abstain, LIMITS } from '../shared/protocol.mjs';
 
@@ -18,7 +19,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
   // Four slots: the phone transcribes and asks for a cue at the same time, with headroom for cancelled work.
   const recent = [], MAX_PER_MINUTE = 60, MAX_ACTIVE = 4;
   const files = { '/': '../web/index.html', '/app.mjs': '../web/app.mjs', '/style.css': '../web/style.css', '/shared/protocol.mjs': '../shared/protocol.mjs' };
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -64,6 +65,8 @@ export function createServer({ env = process.env, provider = createProvider(env)
       json(status, { error: status === 400 ? error.message : status === 503 ? error.message : 'Processing unavailable. No cue shown; try again after a pause.' });
     } finally { if (acquired) active--; }
   });
+  attachRealtimeASR(server, { env, token });
+  return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

@@ -30,6 +30,12 @@ struct ContentView: View {
             }
             if model.captureMode == .phone {
               Toggle("Camera",isOn:$model.phoneCameraEnabled).disabled(model.phase != .stopped)
+              NavigationLink {
+                PhoneCaptionsView(model:model, settingsPresented:showSettings)
+              } label: {
+                Label("Multi-speaker captions",systemImage:"captions.bubble")
+              }.disabled(model.phase != .stopped)
+                .accessibilityIdentifier("captions.open")
             }
           }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
           with
