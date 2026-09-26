@@ -24,6 +24,7 @@ struct PhoneCaptureView: View {
           cueCard
           if let feedback = model.toneFeedback { RecoveryCard(feedback:feedback) { model.dismissTone() } }
           sessionStatus
+          if !model.sceneOnly { captions }
           if model.lastSceneSummary != nil || model.lastAnalysisOutcome != nil {
             VStack(alignment:.leading,spacing:8) {
               Label("SEEING",systemImage:"eye").font(.caption.bold()).tracking(1)
@@ -34,7 +35,6 @@ struct PhoneCaptureView: View {
             }.frame(maxWidth:.infinity,alignment:.leading)
               .padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
           }
-          if !model.sceneOnly { captions }
           VStack(alignment:.leading,spacing:8) {
             Label("NOTES",systemImage:"note.text").font(.caption.bold()).tracking(1)
             TextField("Add a note",text:$model.contextText,axis:.vertical)
@@ -174,9 +174,18 @@ struct PhoneCaptureView: View {
         Spacer()
         ThatWasMeButton(model:model)
       }
+      Text(model.speechMode).font(.caption).foregroundStyle(.secondary)
       Text(model.captionText ?? "—")
         .font(.title3).foregroundStyle(model.captionText == nil ? .secondary : .primary)
         .frame(maxWidth:.infinity,minHeight:45,alignment:.leading)
+      DisclosureGroup("Caption timing") {
+        Text(model.captionDiagnostics.summary).font(.caption.monospaced())
+        ShareLink("Share timing log",item:model.captionDiagnostics.exportText)
+        ScrollView {
+          Text(model.captionDiagnostics.entries.suffix(30).map(\.line).reversed().joined(separator:"\n"))
+            .font(.caption2.monospaced()).frame(maxWidth:.infinity,alignment:.leading)
+        }.frame(maxHeight:160)
+      }.font(.caption)
     }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
   }
 }

@@ -93,6 +93,7 @@ struct ContentView: View {
               Spacer()
               ThatWasMeButton(model:model)
             }
+            Text(model.speechMode).font(.caption).foregroundStyle(.secondary)
             Text(model.captionText ?? "—")
               .font(.system(size:25,weight:.medium,design:.rounded))
               .foregroundStyle(model.captionText == nil ? .secondary : .primary)

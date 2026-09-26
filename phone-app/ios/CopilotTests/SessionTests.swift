@@ -8,6 +8,7 @@ import MWDATCore
 final class SessionTests: XCTestCase {
   func testSceneOnlyStartsAnalysisWithoutSpeechAndSkipsASR() {
     let model = SessionModel()
+    model.glassesConversationEnabled = false
     model.captureMode = .displayGlasses
     model.phase = .active
     model.consent = true
@@ -280,10 +281,10 @@ final class SessionTests: XCTestCase {
   func testGlassesConversationIsOptionalAndProfilesRemainAvailable() {
     let model = SessionModel(people:PeopleStore(fileURL:nil))
     model.captureMode = .displayGlasses
-    XCTAssertTrue(model.sceneOnly)
+    XCTAssertFalse(model.sceneOnly, "Glasses captions are enabled by default")
     XCTAssertNotNil(model.people.addPerson("Sam"))
-    model.glassesConversationEnabled = true
-    XCTAssertFalse(model.sceneOnly)
+    model.glassesConversationEnabled = false
+    XCTAssertTrue(model.sceneOnly)
     XCTAssertEqual(model.people.people.first?.name,"Sam")
   }
 
@@ -619,6 +620,7 @@ final class SessionTests: XCTestCase {
 
   func testSceneOnlyNeedsFreshCameraAndPhoneStillRequiresAudio() {
     let model = SessionModel()
+    model.glassesConversationEnabled = false
     model.captureMode = .displayGlasses
     let time = nowMs()
     XCTAssertNotNil(model.liveInputIssue(at:time))

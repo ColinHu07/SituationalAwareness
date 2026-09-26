@@ -11,7 +11,7 @@ export function validateInput(body, now = Date.now()) {
     require(Number.isFinite(item.startMs) && Number.isFinite(item.endMs) && item.startMs <= item.endMs &&
       item.endMs <= now + 1000 && item.startMs >= now - 120_000, 'Invalid transcript timestamp');
     require(item.confidence == null || (Number.isFinite(item.confidence) && item.confidence >= 0 && item.confidence <= 1), 'Invalid speech confidence');
-    require(item.speaker === undefined || ['wearer', 'other'].includes(item.speaker), 'Invalid speaker');
+    require(item.speaker === undefined || ['wearer', 'other'].includes(item.speaker) || (typeof item.speaker === 'string' && /^P[1-9][0-9]?$/.test(item.speaker)), 'Invalid speaker');
   }
   require(Array.isArray(body.context) && body.context.length <= 5 && body.context.every(s => typeof s === 'string' && s.length <= 160), 'Invalid session topics');
   require(typeof body.manual === 'boolean', 'manual must be boolean');

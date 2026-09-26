@@ -22,6 +22,17 @@ struct GlassesScreen: Equatable, Sendable {
     self.cue = mode == .streaming ? cue.map { String($0.prefix(90)) } : nil
     if mode == .streaming && captionsEnabled {
       detail = caption.flatMap { text in
+        let lines = text.split(separator:"\n")
+        if lines.count > 1 && lines.allSatisfy({ line in
+          let label = line.split(separator:":", maxSplits:1).first ?? ""
+          return label == "Speaker…" || (label.first == "P" && Int(label.dropFirst()) != nil)
+        }) {
+          return lines.prefix(3).map { line in
+            let parts = line.split(separator:":", maxSplits:1)
+            guard parts.count == 2 else { return String(line.suffix(60)) }
+            return "\(parts[0]): \(parts[1].trimmingCharacters(in:.whitespaces).suffix(60))"
+          }.joined(separator:"\n")
+        }
         let text = text.split(whereSeparator: { $0.isWhitespace }).joined(separator:" ")
         guard !text.isEmpty else { return nil }
         return "Heard: " + (text.count > 60 ? "…" : "") + String(text.suffix(60))

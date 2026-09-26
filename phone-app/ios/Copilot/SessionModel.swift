@@ -23,7 +23,7 @@ final class SessionModel {
     get { captureMode == .simulated }
     set { captureMode = newValue ? .simulated : .displayGlasses }
   }
-  var glassesConversationEnabled = false
+  var glassesConversationEnabled = true
   var sceneOnly: Bool { captureMode == .displayGlasses && !glassesConversationEnabled }
   var phoneCameraEnabled = true
   var localMock = true
@@ -45,6 +45,15 @@ final class SessionModel {
   var reducedPower = false
   var nextAnalysisAt: Double = 0
   var transcript: [TranscriptEntry] = []
+  var captionRows: [CaptionRow] = []
+  let captionDiagnostics = CaptionDiagnostics()
+  var speechMode = "Not started"
+  @ObservationIgnored private var realtimeRelay: (any PhoneCaptionRelay)?
+  @ObservationIgnored private var realtimeRoster = PhoneCaptionRoster()
+  @ObservationIgnored private var realtimeClock = RealtimeSpeechClock()
+  @ObservationIgnored private var finalizedTurns: Set<Int> = []
+  @ObservationIgnored private var realtimeSpeakers: [Int:String] = [:]
+  @ObservationIgnored private let makeRealtimeRelay: @MainActor (String, String) -> any PhoneCaptionRelay
   var captionText: String?
   var captionAtMs: Double = 0
   var phonePreview: UIImage?
@@ -119,7 +128,8 @@ final class SessionModel {
   /// The setting Muse last recognized, shown as a chip and sent back as background.
   var currentScene: String?
 
-  init(people: PeopleStore? = nil) {
+  init(people: PeopleStore? = nil, makeRealtimeRelay: @escaping @MainActor (String, String) -> any PhoneCaptionRelay = { RealtimeASRClient(endpoint:$0, token:$1) }) {
+    self.makeRealtimeRelay = makeRealtimeRelay
     self.people = people ?? PeopleStore()
     #if DEBUG
     let launchEnvironment = ProcessInfo.processInfo.environment
@@ -140,6 +150,10 @@ final class SessionModel {
     phoneCamera.onFailure = { [weak self] message in self?.captureFailed(message) }
     // Raw voice energy (fans, music, crowds, ongoing talk) never cancels cues; only recognized speech updates timing.
     microphone.onVoice = nil
+    microphone.onPCM = { [weak self] data, time in Task { @MainActor in
+      guard let self, time >= self.captureStartedAt else { return }
+      self.sendRealtimePCM(data, endedAtMs:time)
+    } }
     microphone.onChunk = { [weak self] chunk in Task { @MainActor in self?.transcribe(chunk) } }
     microphone.onContext = { [weak self] context in Task { @MainActor in
       guard let self, self.phase == .active, context.capturedAtMs >= self.captureStartedAt else { return }
@@ -324,6 +338,12 @@ final class SessionModel {
           } else {
             try await glasses.start(microphone:microphone, audioUID:selectedAudioUID, withDisplay:captureMode.hasGlassesDisplay)
           }
+          // Muse closes idle streams before slow glasses permission/startup can
+          // finish. Connect only after the capture sources are running.
+          if !connectionTestOnly && !offline && !sceneOnly {
+            await startRealtimeCaptions()
+            guard epoch == thisEpoch, !Task.isCancelled else { return }
+          }
           audioRate = microphone.actualSampleRate
         } catch {
           guard epoch == thisEpoch else { return }
@@ -377,6 +397,7 @@ final class SessionModel {
     openingGlassesControls = false; glassesControlsReady = false
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
+    stopRealtimeCaptions()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     latestFrame = nil; latestAudioContext = nil; latestSampleAt = 0; transcript.removeAll(); lastVoiceAt = 0; captionText = nil; captionAtMs = 0
@@ -401,6 +422,7 @@ final class SessionModel {
     openingGlassesControls = false; glassesControlsReady = false
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
+    stopRealtimeCaptions()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
@@ -643,7 +665,84 @@ final class SessionModel {
     latestFrame = SampledFrame(dataUrl:"data:image/jpeg;base64," + data.base64EncodedString(), capturedAtMs:time)
     latestSampleAt = time
   }
+  func startRealtimeCaptions() async {
+    stopRealtimeCaptions()
+    captionDiagnostics.reset()
+    captionDiagnostics.record("Capture running; opening realtime connection")
+    let run = epoch
+    let relay = makeRealtimeRelay(endpoint, proxyToken)
+    realtimeRelay = relay
+    speechMode = "Connecting realtime captions…"
+    relay.onEvent = { [weak self] event in
+      guard let self, self.epoch == run else { return }
+      self.captionDiagnostics.received(event)
+      self.applyRealtimeCaption(event)
+    }
+    relay.onSend = { [weak self] bytes, duration in
+      guard let self, self.epoch == run else { return }
+      self.captionDiagnostics.sent(bytes:bytes, durationMs:duration)
+    }
+    relay.onFailure = { [weak self] message in
+      guard let self, self.epoch == run else { return }
+      self.captionDiagnostics.record("Realtime failed: \(message)")
+      self.stopRealtimeCaptions()
+      self.speechMode = "Chunked fallback — \(message)"
+    }
+    do {
+      try await relay.start(languageBias:["English", "Hindi"])
+      guard epoch == run, !Task.isCancelled, realtimeRelay != nil else { relay.stop(); return }
+      speechMode = "Live streaming captions"
+    } catch {
+      guard epoch == run, !Task.isCancelled else { relay.stop(); return }
+      captionDiagnostics.record("Realtime startup failed: \(error.localizedDescription)")
+      stopRealtimeCaptions()
+      speechMode = "Chunked fallback — \(error.localizedDescription)"
+    }
+  }
+
+  private func stopRealtimeCaptions() {
+    realtimeRelay?.onEvent = nil; realtimeRelay?.onFailure = nil; realtimeRelay?.onSend = nil
+    realtimeRelay?.stop(); realtimeRelay = nil
+    realtimeRoster = PhoneCaptionRoster(); realtimeClock.reset()
+    finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []
+    speechMode = "Not started"
+  }
+
+  func sendRealtimePCM(_ data: Data, endedAtMs: Double) {
+    guard !sceneOnly, !uploadsDisabled, phase == .starting || phase == .active,
+          let relay = realtimeRelay else { return }
+    captionDiagnostics.captured(bytes:data.count, endedAtMs:endedAtMs)
+    realtimeClock.notePCM(byteCount:data.count, endedAtMs:endedAtMs)
+    relay.sendPCM(data)
+  }
+
+  func applyRealtimeCaption(_ event: RealtimeASREvent) {
+    guard phase == .active, let id = event.turnId,
+          ["transcript.partial", "speaker.updated", "transcript.final"].contains(event.type) else { return }
+    let time = nowMs()
+    if let speaker = event.speaker { realtimeSpeakers[id] = speaker }
+    realtimeRoster.consume(event, at:time)
+    captionRows = realtimeRoster.rows
+    captionText = captionRows.isEmpty ? nil : captionRows.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
+    captionAtMs = time
+    publishDisplay()
+    guard event.type == "transcript.final", !finalizedTurns.contains(id) else { return }
+    finalizedTurns.insert(id)
+    // Bound deduplication bookkeeping during long sessions.
+    if finalizedTurns.count > 256, let oldest = finalizedTurns.min() {
+      finalizedTurns.remove(oldest); realtimeSpeakers[oldest] = nil
+    }
+    guard let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty else { return }
+    let range = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:time)
+    let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:range.startMs, endMs:range.endMs,
+                                confidence:nil, speaker:realtimeSpeakers[id])
+    transcript.append(entry); transcript.sort { $0.endMs < $1.endMs }
+    lastVoiceAt = max(lastVoiceAt, range.endMs)
+    logSpeech(entry); noteNames(in:entry); trimTranscript()
+  }
+
   func transcribe(_ chunk: AudioChunk) {
+    guard realtimeRelay == nil else { return }
     guard !sceneOnly, !uploadsDisabled, phase == .active, chunk.startedAtMs >= captureStartedAt - 200 else { return }
     guard asrTask == nil else { audioDrops += 1; return }
     let thisEpoch = epoch
@@ -716,6 +815,16 @@ final class SessionModel {
     publishDisplay()
   }
   func expireCaption(at timestamp: Double = nowMs()) {
+    if realtimeRelay != nil {
+      realtimeRoster.expire(at:timestamp)
+      let updated = realtimeRoster.rows
+      if updated != captionRows {
+        captionRows = updated
+        captionText = updated.isEmpty ? nil : updated.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
+        publishDisplay()
+      }
+      return
+    }
     if captionText != nil, timestamp-captionAtMs > 15000 { captionText = nil; publishDisplay() }
   }
   func sceneBecameInactive() {

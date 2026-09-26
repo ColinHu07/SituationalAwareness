@@ -229,7 +229,7 @@ final class RealtimeASRClient {
       }
     } catch {
       if socket === task && !stopped && !Task.isCancelled {
-        fail("The caption connection was lost. Check your network and start again.")
+        fail("Caption connection closed (WebSocket \(task.closeCode.rawValue), network \((error as NSError).code)). Start again to reconnect.")
       }
     }
   }
