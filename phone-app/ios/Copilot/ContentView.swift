@@ -12,7 +12,7 @@ struct ContentView: View {
       ScrollView {
         VStack(alignment:.leading, spacing:22) {
           HStack {
-            Label("CONVERSATION COPILOT",systemImage:"eyeglasses").font(.caption.weight(.semibold)).tracking(1.5)
+            Label("SITUATIONAL AWARENESS",systemImage:"eyeglasses").font(.caption.weight(.semibold)).tracking(1.5)
             Spacer()
             Circle().fill(model.phase == .active ? Color.green : Color.gray).frame(width:8,height:8)
           }
