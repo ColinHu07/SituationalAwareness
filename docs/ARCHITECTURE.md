@@ -32,7 +32,7 @@ flowchart LR
 
 Display audio uses experimental `StreamConfiguration.audioCodec` / `audioFramePublisher`, with DAT camera and microphone permissions plus iOS microphone permission. Camera and Audio Streaming app approval is required for development/beta use; production publishing is unavailable for this capability. Regular glasses retain add camera → select/settle/verify HFP → start video. Both paths use a single `DeviceSession`, and Display is attached to that same session. The [pinned release notes](https://github.com/facebook/meta-wearables-dat-ios/blob/1.0.0/CHANGELOG.md) and [current official audio guide](https://github.com/facebook/meta-wearables-dat-ios/blob/main/plugins/mwdat-ios/skills/audio-streaming/SKILL.md) document the API and access conditions.
 
-Native **Connection test only (no uploads)** starts real selected inputs and permits a manual Display cue, but skips ASR/model uploads. Full hardware analysis checks for a reachable live proxy before capture. This makes sensor/display acceptance possible without a model credential.
+Start checks for a reachable live proxy. If it is unreachable or not live, capture still starts in a camera-only state: preview and presence detection work, while ASR and cues wait until **Connect** in Settings succeeds, which re-enables them mid-session.
 
 ## Evidence and model contracts
 
@@ -77,6 +77,14 @@ Native conversation mode samples JPEGs every 8 seconds by default, configurable 
 The shared stream clock maps video/audio presentation timestamps to a session time base. HEVC dependencies are decoded off the UI actor; held decoder output is never retimestamped as a new frame. A bounded delivery gate prevents a backlog. New recognized speech, context edits, dismiss, pause, stop and failures invalidate previous cue generations. Response-time evidence freshness is checked again, so a late model result is dropped even if cancellation was too late upstream.
 
 Pause stops camera/audio and clears rolling context while keeping a Display Resume/Stop view. Stop also clears notes/consent, cancels audio listeners, clears Display and ends the session. Resume creates a fresh session deliberately. DAT/system failures invalidate work; there is no reconnect loop or speculative three-minute restart timer.
+
+## People and group profiles
+
+The wearer keeps profiles of individual people and friend groups (`phone-app/ios/Copilot/People.swift`), saved on the phone in `Application Support/people.json` with file protection. A person has groups, tags, topics and notes; a group has topics, slang, a style note (pace, humor, formality) and notes. **Who's here** fills in automatically (`PresenceTracker` in `FaceRecognizer.swift`): two on-device face matches within 10 seconds, a capitalized name heard in speech, or an introduction ("this is my friend Priya", which also creates the profile) adds a person. Face matching uses Vision feature prints of face crops compared against photos enrolled per person; frames are never uploaded for recognition. People drop off after 5 minutes without a face match or mention (2 minutes if only ever named). Long-pressing a name offers **Not here**, which keeps them out until they are introduced again. Voice identification is not implemented.
+
+Each `POST /api/cue` carries the present people and their groups as `people` / `groups`. Both prompts treat them as background memory, not current evidence: use them to suggest topics, follow up on earlier details, and match slang, pace and humor, without assuming who is speaking.
+
+Unlike the rest of the session, recognized speech is also kept in a whole-conversation log (at most 400 entries) until Stop. On Stop, if anyone was detected during the session (including people who have since dropped off), the phone sends that log, the present profiles, their groups, other group names and a measured words-per-minute to `POST /api/learn`. The model proposes new facts, topics, tags and group memberships per person (only when the transcript makes attribution clear) and topics, slang and style per group. The wearer approves each proposal in a review sheet before anything is saved. The log is then discarded. The offline simulated demo and mock server use a narrow fixture learner (name mentions become facts, "I love X" becomes a topic).
 
 ## Display and hardware limits
 

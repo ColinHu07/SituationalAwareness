@@ -9,7 +9,7 @@ enum DevelopmentConnection {
           let token = environment["ASIDE_PROXY_TOKEN"], token.count >= 32,
           let url = URL(string:endpoint), let host = url.host, !host.isEmpty,
           url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
-          url.scheme == "https" || (url.scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(host)) else { return nil }
+          url.scheme == "https" || (url.scheme == "http" && isLocalNetworkHost(host)) else { return nil }
     return Settings(endpoint:endpoint,token:token)
   }
 }

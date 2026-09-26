@@ -4,6 +4,7 @@ struct ContentView: View {
   @Bindable var model: SessionModel
   @State private var showSettings = false
   @State private var showCamera = false
+  @State private var showPeople = false
   private let ink = Color(red:0.05,green:0.14,blue:0.15)
   private let mint = Color(red:0.78,green:0.94,blue:0.83)
   var body: some View {
@@ -27,37 +28,28 @@ struct ContentView: View {
                 Text("Without display").tag(CaptureMode.regularGlasses)
               }.pickerStyle(.segmented).disabled(model.phase != .stopped)
             }
-            Text(model.captureMode.hasGlassesDisplay ? "Live glasses camera and nearby audio. Muse’s social cue appears as text here and is sent to your glasses display." : model.captureMode.description)
-              .font(.caption).foregroundStyle(.secondary)
             if model.captureMode == .phone {
               Toggle("Camera",isOn:$model.phoneCameraEnabled).disabled(model.phase != .stopped)
             }
           }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
+          with
           if model.captureMode.needsGlasses { hardware }
           if model.simulate {
-            Label("SIMULATED DEVICE & INPUT",systemImage:"testtube.2")
+            Label("SIMULATED",systemImage:"testtube.2")
               .font(.caption.bold()).padding(10).frame(maxWidth:.infinity,alignment:.leading)
               .background(Color.orange.opacity(0.16),in:RoundedRectangle(cornerRadius:10))
           }
-          if !model.simulate && model.connectionTestOnly {
-            Label("CAPTURE TEST · NO UPLOADS",systemImage:"cable.connector").font(.caption.bold()).foregroundStyle(.orange)
-          }
           VStack(alignment:.leading,spacing:16) {
             HStack {
-              Text(model.phase == .active && model.analyzesSurroundings ? "Analyzing surroundings" : model.phase.rawValue).font(.title2.weight(.semibold))
+              Text(model.phase == .active && model.analyzesSurroundings ? "Analyzing" : model.phase.rawValue).font(.title2.weight(.semibold))
               Spacer()
               if model.isThinking || model.isTranscribing { ProgressView() }
             }
-            Text(model.notice).font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-            if model.phase == .stopped {
-              Toggle("We are adults and everyone agrees to the selected capture and processing",isOn:$model.consent)
-                .font(.subheadline)
-              Text(model.simulate || model.connectionTestOnly ? "This selected test mode does not upload recordings. Stop if anyone withdraws consent." : "Brief audio and optional images go to your proxy and Meta. Standard API provider retention applies. Stop if anyone withdraws consent.")
-                .font(.caption).foregroundStyle(.secondary)
-            }
+            if let scene = model.currentScene { SceneChip(scene:scene) }
+            if !model.notice.isEmpty { Text(model.notice).font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true) }
             HStack(spacing:12) {
               if model.phase == .stopped || model.phase == .paused {
-                Button(model.captureMode.hasGlassesDisplay ? "Start glasses" : model.captureMode.needsGlasses && model.glasses.updateRequired ? "Retry after update" : model.phase == .paused ? "Resume" : "Start",systemImage:"play.fill") { model.startFromPhone() }
+                Button(model.captureMode.hasGlassesDisplay ? "Start glasses" : model.phase == .paused ? "Resume" : "Start",systemImage:"play.fill") { model.startFromPhone() }
                   .buttonStyle(.borderedProminent).tint(ink).disabled(!model.canStart)
               } else {
                 Button("Pause",systemImage:"pause.fill") { model.pause() }.buttonStyle(.borderedProminent).tint(ink)
@@ -66,10 +58,7 @@ struct ContentView: View {
                 Button("Stop",systemImage:"stop.fill",role:.destructive) { model.stop() }.buttonStyle(.bordered)
               }
             }.controlSize(.large)
-            if model.captureMode.hasGlassesDisplay && (model.phase == .stopped || model.phase == .paused) {
-              Text("Select Start on your glasses to stream. Muse updates automatically.")
-                .font(.caption).foregroundStyle(.secondary)
-            }
+            if model.glassesControlsReady { Text("Select Start on the glasses to stream.").font(.caption).foregroundStyle(.secondary) }
             if !model.simulate && model.phase != .stopped {
               Button("Live view",systemImage:"viewfinder") { showCamera = true }
             }
@@ -77,48 +66,41 @@ struct ContentView: View {
 
           VStack(alignment:.leading,spacing:16) {
             HStack {
-              Text(model.simulate ? "SIMULATED CUE" : model.captureMode.hasGlassesDisplay ? "SCENE RECOMMENDATION" : "CUE").font(.caption.bold()).tracking(1)
+              Text("CUE").font(.caption.bold()).tracking(1)
               Spacer(); Image(systemName:"sparkle")
             }.foregroundStyle(mint)
-            Text(model.cue ?? (model.sceneOnly ? model.analysisFeedback ?? "Start streaming to check the scene." : "Room to listen.")).font(.system(size:25,weight:.medium,design:.rounded)).foregroundStyle(.white)
+            Text(model.cue ?? (model.sceneOnly ? model.analysisFeedback ?? "Ready when you are." : "Room to listen.")).font(.system(size:25,weight:.medium,design:.rounded)).foregroundStyle(.white)
               .frame(maxWidth:.infinity,minHeight:64,alignment:.leading)
-            if model.cue == nil { Text(model.analyzesSurroundings ? "A brief cue for the room or conversation, when it helps." : "A cue will appear when there is enough clear context.").font(.caption).foregroundStyle(.white.opacity(0.6)) }
             if !model.sceneOnly { HStack {
-              Button(model.analyzesSurroundings ? "Analyze now" : "Help me respond") { model.requestCue(manual:true) }.disabled(model.phase != .active || model.isThinking || model.isTranscribing || model.connectionTestOnly)
+              Button("Analyze now") { model.requestCue(manual:true) }.disabled(model.phase != .active || model.isThinking || model.uploadsDisabled)
               Spacer()
               Button("Dismiss") { model.dismiss() }.disabled(model.cue == nil)
             }.font(.subheadline.weight(.semibold)).tint(mint) }
           }.padding(22).background(ink,in:RoundedRectangle(cornerRadius:20))
-
+          if model.cue != nil { Button("Not helpful",systemImage:"hand.thumbsdown") { model.markDistracting() }.font(.caption).tint(.secondary) }
           if !model.sceneOnly { VStack(alignment:.leading,spacing:12) {
-            Label(model.simulate ? "SIMULATED CAPTIONS" : "CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
-            Text(model.captionText ?? (model.connectionTestOnly ? "Capture test: no transcription." : "Speech will appear here."))
+            Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
+            Text(model.captionText ?? "—")
               .font(.system(size:25,weight:.medium,design:.rounded))
+              .foregroundStyle(model.captionText == nil ? .secondary : .primary)
               .frame(maxWidth:.infinity,minHeight:80,alignment:.leading)
-            Text("Completed speech chunks, not word-by-word streaming. Recognition can be wrong; no speaker identity is inferred.")
-              .font(.caption).foregroundStyle(.secondary)
           }.padding(22).background(.white,in:RoundedRectangle(cornerRadius:20))
 
+          }
           VStack(alignment:.leading,spacing:10) {
             Label("NOTES",systemImage:"note.text").font(.caption.bold()).tracking(1)
             TextField("Add a note",text:$model.contextText,axis:.vertical)
               .lineLimit(2...4).onChange(of:model.contextText) { _, _ in model.contextChanged() }
-            Text("Written by you. Kept for this session and cleared on Stop.").font(.caption).foregroundStyle(.secondary)
           }.padding(20).background(mint.opacity(0.45),in:RoundedRectangle(cornerRadius:18))
-          }
 
           if model.simulate { simulation }
           else if model.captureMode == .phone { phone }
           else if let image = model.glasses.preview {
-            VStack(alignment:.leading,spacing:10) {
-              Text("Glasses camera preview").font(.headline)
-              Image(uiImage:image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius:14))
-              Text("Glasses frame received · \(model.glasses.framesReceived) total").font(.caption)
-            }
+            Image(uiImage:image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius:14))
           }
-          if !model.sceneOnly { DisclosureGroup("Transcript") {
+          DisclosureGroup("Transcript") {
             VStack(alignment:.leading,spacing:10) {
-              if model.transcript.isEmpty { Text("No speech captured.").foregroundStyle(.secondary) }
+              if model.transcript.isEmpty { Text("—").foregroundStyle(.secondary) }
               ForEach(model.transcript) { entry in
                 VStack(alignment:.leading,spacing:3) {
                   Text(Date(timeIntervalSince1970:entry.endMs/1000),style:.time).font(.caption).foregroundStyle(.secondary)
@@ -126,7 +108,6 @@ struct ContentView: View {
                 }.frame(maxWidth:.infinity,alignment:.leading)
               }
             }.padding(.top,12)
-          }
           }
           DisclosureGroup("Stats") {
             Grid(alignment:.leading,horizontalSpacing:20,verticalSpacing:10) {
@@ -139,18 +120,36 @@ struct ContentView: View {
               metric("Stale / audio drops","\(model.staleDrops) / \(model.audioDrops)")
               metric("Microphone source rate",model.audioRate > 0 ? "\(Int(model.audioRate)) Hz" : "Unmeasured")
             }.font(.caption).padding(.top,12)
-            Text("Timing ends at phone cue readiness, not hardware display acknowledgment. Zero means no reported measurement. Cost includes ASR when reported. Defaults need hardware calibration.").font(.caption2).foregroundStyle(.secondary).padding(.top,8)
           }
-          Text(model.captureMode.hasGlassesDisplay ? "Suggestions use visible context and recognized words. They do not read minds or identify people." : "No face identification, emotion reading or medical claims. Regular glasses HFP favors the wearer; partner speech may be suppressed.").font(.caption).foregroundStyle(.secondary)
         }.padding(24)
       }.background(Color(red:0.95,green:0.97,blue:0.95))
-        .toolbar { ToolbarItem(placement:.topBarTrailing) { Button("Settings",systemImage:"slider.horizontal.3") { showSettings = true } } }
+        .toolbar {
+          ToolbarItem(placement:.topBarLeading) { Button("People",systemImage:"person.2") { showPeople = true } }
+          ToolbarItem(placement:.topBarTrailing) { Button("Settings",systemImage:"slider.horizontal.3") { showSettings = true } }
+        }
         .sheet(isPresented:$showSettings) { settings }
+        .sheet(isPresented:$showPeople) { PeopleView(store:model.people) }
+        .sheet(item:$model.learnReview) { review in LearnReviewView(model:model, review:review) }
     }.tint(ink)
       .fullScreenCover(isPresented:$showCamera) { PhoneCaptureView(model:model) }
       .onChange(of:model.phase) { _, phase in
         if phase == .starting && !model.simulate { showCamera = true }
       }
+  }
+  // Filled in automatically from face matches and names heard in conversation.
+  private var with: some View {
+    HStack(spacing:10) {
+      Image(systemName:"person.2.fill").foregroundStyle(ink)
+      if model.presentPeople.isEmpty {
+        Text("—").foregroundStyle(.secondary)
+      } else {
+        PresenceChips(model:model)
+      }
+      Spacer(minLength:0)
+      if model.isLearning { ProgressView() }
+    }.padding(16).frame(maxWidth:.infinity,alignment:.leading)
+      .background(.white,in:RoundedRectangle(cornerRadius:18))
+      .accessibilityIdentifier("people.present")
   }
   private func sourceButton(_ title: String, icon: String, mode: CaptureMode, selected: Bool) -> some View {
     Button { model.captureMode = mode } label: {
@@ -169,9 +168,7 @@ struct ContentView: View {
   @ViewBuilder private func metric(_ name:String,_ value:String) -> some View { GridRow { Text(name).foregroundStyle(.secondary); Text(value).monospacedDigit() } }
   private var simulation: some View {
     VStack(alignment:.leading,spacing:12) {
-      Text("Demo input").font(.headline)
-      Text("Typed fixtures are simulated speech. Nothing is recorded.").font(.caption).foregroundStyle(.secondary)
-      TextField("A partner’s line…",text:$model.simulationText,axis:.vertical).textFieldStyle(.roundedBorder)
+      TextField("Say something…",text:$model.simulationText,axis:.vertical).textFieldStyle(.roundedBorder)
       HStack {
         Button("Add line") { model.addSimulationLine() }
         Button("Change subject") { model.addSimulationLine("Let's talk about lunch instead.") }
@@ -179,6 +176,7 @@ struct ContentView: View {
       HStack {
         Button("Quiet library") { model.addSimulationScene("library") }
         Button("Group conversation") { model.addSimulationScene("group") }
+        Button("Funeral") { model.addSimulationScene("funeral") }
       }.buttonStyle(.bordered).disabled(model.phase != .active)
       Button("Someone needs space") {
         model.simulateSurroundings = true
@@ -190,54 +188,39 @@ struct ContentView: View {
   }
   private var phone: some View {
     VStack(alignment:.leading, spacing:12) {
-      Text("iPhone camera preview").font(.headline)
       if let image = model.phonePreview {
         Image(uiImage:image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius:14))
-        Text("Rear camera · \(model.phoneFramesReceived) received frames. Only occasional samples are sent for suggestions.").font(.caption)
-      } else {
-        Text(model.phoneCameraEnabled ? "Start a consented session to receive camera frames." : "Audio-only selected. No camera access.").font(.caption).foregroundStyle(.secondary)
       }
     }
   }
   private var hardware: some View {
     VStack(alignment:.leading,spacing:12) {
-      Text("Glasses connection").font(.headline)
       Button { Task { await model.glasses.register() } } label: {
         Label("Pair glasses",systemImage:"link").frame(maxWidth:.infinity)
       }.buttonStyle(.borderedProminent).controlSize(.large)
         .disabled(model.phase == .active || model.phase == .starting)
         .accessibilityIdentifier("glasses.pair")
       Text(model.glasses.devices).font(.subheadline)
-      if model.glasses.updateRequired {
-        Button("Update glasses app",systemImage:"arrow.up.forward.app") {
-          Task { await model.glasses.openGlassesAppUpdate() }
-        }.disabled(model.phase == .active || model.phase == .starting)
-      }
       if let error = model.glasses.lastError { Text(error).font(.caption).foregroundStyle(.red) }
       if model.captureMode == .regularGlasses {
-      Button("Refresh Bluetooth audio inputs") { model.refreshAudioPorts() }.disabled(model.phase == .active || model.phase == .starting)
-      Picker("Glasses microphone",selection:$model.selectedAudioUID) {
-        Text("Choose glasses HFP input").tag("")
-        ForEach(model.audioPorts) { Text($0.name).tag($0.id) }
-      }.disabled(model.phase == .active || model.phase == .starting)
-      Text("Choose your glasses, not another Bluetooth headset. Capture stops if this route changes.").font(.caption).foregroundStyle(.secondary)
+        HStack {
+          Picker("Microphone",selection:$model.selectedAudioUID) {
+            Text("Choose").tag("")
+            ForEach(model.audioPorts) { Text($0.name).tag($0.id) }
+          }
+          Button("Refresh",systemImage:"arrow.clockwise") { model.refreshAudioPorts() }.labelStyle(.iconOnly)
+        }.disabled(model.phase == .active || model.phase == .starting)
+      }
+      if model.captureMode.hasGlassesDisplay {
+        Button("Test display") { model.manualDisplayTest() }.disabled(model.phase != .active)
       }
     }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
   }
   private var settings: some View {
     NavigationStack {
       Form {
-        Section("Testing and diagnostics") {
+        Section("Development mode") {
           Toggle("Capture test only (no uploads)",isOn:$model.connectionTestOnly).disabled(model.phase != .stopped)
-          if model.captureMode.needsGlasses {
-            Text("Camera: \(model.glasses.cameraState) · Display: \(model.glasses.displayState)").font(.caption)
-            Button("Open Meta glasses app updater") { Task { await model.glasses.openGlassesAppUpdate() } }
-              .disabled(model.phase == .active || model.phase == .starting)
-          }
-          if model.captureMode.hasGlassesDisplay {
-            Button("Test display") { model.manualDisplayTest() }.disabled(model.phase != .active)
-          }
-
           Button("Use simulated demo",systemImage:"testtube.2") {
             model.captureMode = .simulated
             showSettings = false
@@ -247,29 +230,53 @@ struct ContentView: View {
           Text("The scripted model is a small fixture set, not Muse. Real capture modes use the proxy unless Capture test only is enabled.").font(.caption)
         }
         Section("Server") {
-          TextField("https://your-proxy.example",text:$model.endpoint).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+          TextField("Server URL (found automatically)",text:$model.endpoint).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
           SecureField("Token",text:$model.proxyToken).textInputAutocapitalization(.never).autocorrectionDisabled()
-          Button("Save and check connection") {
-            model.saveConnection()
-            Task { await model.checkBackend() }
+          Button { Task { await model.connect() } } label: {
+            HStack {
+              Text("Connect")
+              Spacer()
+              switch model.connectionStatus {
+              case .checking: ProgressView()
+              case .connected: Image(systemName:"checkmark.circle.fill").foregroundStyle(.green)
+              case .failed: Image(systemName:"xmark.circle.fill").foregroundStyle(.red)
+              case .unknown: EmptyView()
+              }
+            }
+          }.disabled(model.connectionStatus == .checking)
+          if case .failed(let message) = model.connectionStatus {
+            Text(message).font(.caption).foregroundStyle(.red)
+          } else if model.connectionStatus == .connected {
+            Text("Muse live").font(.caption).foregroundStyle(.green)
           }
-          Text("Model mode: \(model.modelMode)").font(.caption)
-          Text("Enter the proxy token, never the Muse Spark API key. Your model key belongs only in the backend environment.").font(.caption)
-        }.disabled(model.phase == .active || model.phase == .starting)
+        }
         Section("This conversation") {
+          if model.captureMode.hasGlassesDisplay {
+            Toggle("Conversation and captions",isOn:$model.glassesConversationEnabled).disabled(model.phase != .stopped)
+            Text("Off keeps automatic scene cues. On adds speech captions, name detection and conversation learning.").font(.caption)
+          }
           TextField("Things you chose to remember (one per line)",text:$model.contextText,axis:.vertical).lineLimit(3...5).onChange(of:model.contextText) { _, _ in model.contextChanged() }
           if model.analyzesSurroundings {
-            if model.captureMode.hasGlassesDisplay && !model.sceneOnly {
+            if model.captureMode.hasGlassesDisplay {
               Toggle("Captions on glasses",isOn:$model.displayCaptions).onChange(of:model.displayCaptions) { _, _ in model.refreshDisplay() }
             }
-            Text(model.sceneOnly ? "Scene-only test: Muse checks fresh camera images every 10 seconds (30 in reduced-power mode), with audio levels when available. No speech transcription. Recommendations update automatically." : "Muse checks about every 8 seconds near conversation, 20 seconds without recent speech, or 30 seconds in reduced-power mode. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
+            Text("Muse checks about every 8 seconds near conversation, 20 seconds without recent speech, or 30 seconds in reduced-power mode. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
           } else {
             Stepper("Image sample every \(Int(model.sampleInterval)) seconds",value:$model.sampleInterval,in:3...30,step:1)
           }
           Text("Keeps ≤60 seconds / 12 transcript entries and one sampled image. Stop erases session memory. No raw media files are saved.").font(.caption)
         }
+        Section("Recognizing friends") {
+          Toggle("Recognize enrolled faces",isOn:$model.recognizeFaces)
+          if model.recognizeFaces {
+            LabeledContent("Match distance ≤ \(String(format:"%.2f",model.faceThreshold))") {
+              Slider(value:$model.faceThreshold,in:0.2...1.0,step:0.01)
+            }
+          }
+          Text("Add face photos in People. Matching runs on this iPhone; unmatched faces are discarded. Two face matches within 10 seconds, or one plus their name spoken within 30 seconds, adds someone to Who's here. A name alone only suggests them. Introductions like \"my name is Priya\" or \"this is my friend Dev\" add a new person automatically. If exactly one unrecognized face is in view right after their name is heard, it is offered for their profile in the review when you stop; faces of people never named are not kept. Lower the distance if strangers match; raise it if friends are missed. The live view shows distances while the camera runs.").font(.caption)
+        }
         Section("Provisional cue rules") {
-          Text(model.sceneOnly ? "Muse checks every 10 seconds (30 in reduced-power mode). Recommendations stay until the next result. Pause and Stop clear captured context." : "Surroundings checks submit a frame ≤10 seconds old or recognized speech ≤15 seconds old, with 1.5 seconds after the last recognized speech. Scene results expire when their image is 20 seconds old. New recognized speech invalidates old cues; steady ambient noise does not block scene checks. Cue confidence ≥0.8, automatic cooldown 30 seconds, lifetime 8 seconds.").font(.caption)
+          Text("Surroundings checks submit a frame ≤10 seconds old or recognized speech ≤15 seconds old, with 1.5 seconds after the last recognized speech. Scene results expire when their image is 20 seconds old. New recognized speech invalidates old cues; steady ambient noise does not block scene checks. Cue confidence ≥0.8, automatic cooldown 30 seconds, lifetime 8 seconds.").font(.caption)
           Text("iPhone mode pauses when the app leaves the foreground. Glasses pocket operation and routing need hardware validation; a simulator cannot verify them.").font(.caption)
         }
       }.navigationTitle("Settings").toolbar { Button("Done") { showSettings = false } }
