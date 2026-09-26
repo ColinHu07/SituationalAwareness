@@ -40,6 +40,7 @@ struct ContentView: View {
               .background(Color.orange.opacity(0.16),in:RoundedRectangle(cornerRadius:10))
           }
           VStack(alignment:.leading,spacing:16) {
+            if model.phase != .stopped {
             HStack {
               Text(model.phase == .active && model.analyzesSurroundings ? "Analyzing" : model.phase.rawValue).font(.title2.weight(.semibold))
               Spacer()
@@ -47,9 +48,10 @@ struct ContentView: View {
             }
             if let scene = model.currentScene { SceneChip(scene:scene) }
             if !model.notice.isEmpty { Text(model.notice).font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true) }
+            }
             HStack(spacing:12) {
               if model.phase == .stopped || model.phase == .paused {
-                Button(model.captureMode.hasGlassesDisplay ? "Start glasses" : model.phase == .paused ? "Resume" : "Start",systemImage:"play.fill") { model.startFromPhone() }
+                Button(model.phase == .paused && !model.glassesControlsReady ? "Resume" : "Start",systemImage:"play.fill") { model.startFromPhone() }
                   .buttonStyle(.borderedProminent).tint(ink).disabled(!model.canStart)
               } else {
                 Button("Pause",systemImage:"pause.fill") { model.pause() }.buttonStyle(.borderedProminent).tint(ink)
