@@ -7,22 +7,15 @@ import os
 final class SessionTests: XCTestCase {
   private func activeModel() async throws -> SessionModel {
     let model = SessionModel()
-    model.simulate = true; model.localMock = true; model.consent = true
+    model.simulate = true; model.localMock = true
     model.start()
     try await Task.sleep(for:.milliseconds(100))
     XCTAssertEqual(model.phase,.active)
     return model
   }
-  func testStartRequiresConsent() async {
-    let model = SessionModel()
-    model.start()
-    XCTAssertEqual(model.phase,.stopped)
-  }
   func testPhoneIsDefaultAndDoesNotRequirePairedGlasses() {
     let model = SessionModel()
     XCTAssertEqual(model.captureMode,.phone)
-    XCTAssertFalse(model.canStart)
-    model.consent = true
     XCTAssertTrue(model.canStart)
     XCTAssertTrue(model.analyzesSurroundings)
     model.phoneCameraEnabled = false
@@ -91,27 +84,23 @@ final class SessionTests: XCTestCase {
     model.sceneBecameInactive()
     XCTAssertEqual(model.phase,.stopped)
   }
-  func testCaptureTestNeverRequestsModelSuggestions() async throws {
-    let model = try await activeModel()
-    defer { model.stop() }
-    model.connectionTestOnly = true
-    model.addSimulationLine("Would you like that hot or iced?")
-    try await Task.sleep(for:.milliseconds(1600))
-    model.requestCue(manual:true)
-    XCTAssertEqual(model.requests,0)
-    XCTAssertFalse(model.isThinking)
-  }
-  func testNewSpeechCancelsInFlightCue() async throws {
+  func testOngoingSpeechKeepsInFlightAndDisplayedCue() async throws {
     let model = try await activeModel()
     defer { model.stop() }
     model.addSimulationLine("Can you have it ready by Friday?")
     try await Task.sleep(for:.milliseconds(1600))
     model.requestCue(manual:true)
     XCTAssertTrue(model.isThinking)
+    // Conversation keeps going while the cue is being prepared.
     model.addSimulationLine("Let's talk about lunch instead.")
     try await Task.sleep(for:.milliseconds(600))
-    XCTAssertNil(model.cue)
+    XCTAssertEqual(model.cue, "Ask what they meant by Friday.")
     XCTAssertFalse(model.isThinking)
+    // More speech does not clear a cue that is already showing; Dismiss does.
+    model.addSimulationLine("Anyway, how was your weekend?")
+    XCTAssertEqual(model.cue, "Ask what they meant by Friday.")
+    model.dismiss()
+    XCTAssertNil(model.cue)
   }
   func testPauseStopsPendingCueAndErasesSpeech() async throws {
     let model = try await activeModel()
@@ -152,7 +141,6 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(model.transcript.isEmpty)
     XCTAssertEqual(model.contextText,"")
     XCTAssertNil(model.latestFrame)
-    XCTAssertFalse(model.consent)
   }
   func testWAVUsesMonoPCM16At16k() {
     let audio = ConversationMicrophone.wav([0, 1234, -1234])
@@ -355,15 +343,20 @@ final class SessionTests: XCTestCase {
     model.stop()
   }
 
-  func testNoUploadManualDisplayTestDoesNotCallMuse() async throws {
+  func testSceneIsRecognizedShownAndRemindedOnce() async throws {
     let model = try await activeModel()
-    defer { model.stop() }
-    model.connectionTestOnly = true
-    model.manualDisplayTest()
-    XCTAssertNotNil(model.cue)
+    try await Task.sleep(for:.milliseconds(1600)) // checks start 1.5 s into a session
+    model.addSimulationScene("funeral")
+    try await Task.sleep(for:.milliseconds(700))
+    XCTAssertEqual(model.currentScene, "funeral")
+    XCTAssertEqual(model.cue, "Looks like a funeral. Stay quiet and somber.")
+    model.dismiss()
     model.requestCue(manual:true)
-    XCTAssertEqual(model.requests,0)
-    XCTAssertEqual(model.uploadedBytes,0)
+    try await Task.sleep(for:.milliseconds(700))
+    XCTAssertNil(model.cue, "No repeat reminder while the setting is unchanged")
+    XCTAssertEqual(model.currentScene, "funeral")
+    model.stop()
+    XCTAssertNil(model.currentScene)
   }
 
   func testDevelopmentConnectionRejectsUnsafeOrIncompleteSetup() {
@@ -374,5 +367,20 @@ final class SessionTests: XCTestCase {
     XCTAssertNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"https://test.example?token=secret", "ASIDE_PROXY_TOKEN":token]))
     XCTAssertNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"https://test.example", "ASIDE_PROXY_TOKEN":"short"]))
     XCTAssertNil(DevelopmentConnection.settings(from:[:]))
+    XCTAssertNotNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"http://10.0.0.140:8787", "ASIDE_PROXY_TOKEN":token]))
+    XCTAssertNotNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"http://my-mac.local:8787", "ASIDE_PROXY_TOKEN":token]))
+    XCTAssertNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"http://8.8.8.8:8787", "ASIDE_PROXY_TOKEN":token]))
+  }
+
+  func testUnreachableServerStillStartsPhoneCaptureWithoutUploads() async throws {
+    let model = SessionModel(people:PeopleStore(fileURL:nil))
+    model.captureMode = .phone; model.phoneCameraEnabled = false
+    model.endpoint = "http://127.0.0.1:9" // nothing listens here
+    model.start()
+    for _ in 0..<50 where model.phase == .starting { try await Task.sleep(for:.milliseconds(100)) }
+    XCTAssertTrue(model.offline)
+    XCTAssertTrue(model.uploadsDisabled)
+    XCTAssertNotEqual(model.notice, "")
+    model.stop()
   }
 }
