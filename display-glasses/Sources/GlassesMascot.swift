@@ -6,8 +6,8 @@ enum GlassesMascot {
   static let ink = UIColor(red:0.05, green:0.14, blue:0.15, alpha:1)
   static let mint = UIColor(red:0.78, green:0.94, blue:0.83, alpha:1)
 
-  /// Drawn once and reused; the lens only needs a small icon.
-  static let image: UIImage = render(side:128)
+  /// Drawn once and reused, large enough to stay sharp at a third of the lens width.
+  static let image: UIImage = render(side:256)
 
   static func render(side: CGFloat) -> UIImage {
     let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = false

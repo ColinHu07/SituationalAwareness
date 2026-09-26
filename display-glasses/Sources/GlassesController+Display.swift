@@ -81,11 +81,12 @@ extension GlassesController {
         let content = FlexBox(direction:.column, spacing:8) {
           Text(screen.title, style:.meta, color:.secondary)
           // The mascot "says" the cue or status in a speech-bubble card beside it.
+          // The mascot takes about a third of the row; the speech bubble gets the rest.
           FlexBox(direction:.row, spacing:10, crossAlignment:.center) {
-            Image(image:GlassesMascot.image, sizePreset:.icon)
+            Image(image:GlassesMascot.image, sizePreset:.fill).flexGrow(1).flexShrink(0)
             FlexBox(direction:.column) {
               Text(screen.message, style:screen.cue == nil ? .meta : .body, color:screen.cue == nil ? .secondary : .primary)
-            }.padding(10).background(.card).flexShrink(1).flexGrow(1)
+            }.padding(10).background(.card).flexShrink(1).flexGrow(2)
           }
           // At most three short labels; never append Dismiss and widen the row.
           ButtonGroup {
