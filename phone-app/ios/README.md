@@ -62,7 +62,7 @@ The [pinned release notes](https://github.com/facebook/meta-wearables-dat-ios/bl
 
 | Layer | Display surroundings mode |
 |---|---|
-| Glasses transport | Low-resolution `.hvc1` HEVC, requested 2 FPS, direct 16 kHz mono PCM |
+| Glasses transport | Low-resolution `.hvc1` HEVC, requested 15 FPS, direct 16 kHz mono PCM |
 | Local image sampling | One JPEG refreshed every 2 seconds; maximum dimension 640 pixels, quality 0.6 |
 | Muse check eligibility | 8 seconds with recognized speech less than 30 seconds old; 20 seconds otherwise |
 | Reduced power | 30-second checks in Low Power Mode or serious phone thermal state; critical thermal state pauses |

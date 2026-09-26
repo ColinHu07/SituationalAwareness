@@ -10,7 +10,7 @@ These are app-generated completed speech chunks, not Meta's built-in Live Captio
 
 ## Capture and analysis
 
-DAT **1.0.0** carries low-resolution **2 FPS HEVC video and 16 kHz mono ambient PCM** in one camera stream; Display uses the same `DeviceSession`. Display mode does not use an HFP microphone picker. Regular Meta glasses retain their separate HFP route and phone output.
+DAT **1.0.0** carries low-resolution **15 FPS HEVC video and 16 kHz mono ambient PCM** in one camera stream; Display uses the same `DeviceSession`. Display mode does not use an HFP microphone picker. Regular Meta glasses retain their separate HFP route and phone output.
 
 The phone decodes frames, keeps one JPEG refreshed every **2 seconds**, chunks audio in memory, and, when conversation mode is enabled, sends speech to **Muse Voice Transcribe**. **Muse Spark** receives a fresh image, recent recognized words, and optional coarse audio-energy metadata. The phone handles capture, scheduling and cue validation; model inference runs through the backend and Muse. No full-video upload or local glasses model is implemented.
 
