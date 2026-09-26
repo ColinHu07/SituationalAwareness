@@ -6,14 +6,12 @@ import MWDATCore
 
 @MainActor
 final class SessionTests: XCTestCase {
-  func testSceneOnlyStartsAnalysisWithoutSpeechAndSkipsASR() {
+  func testSceneOnlyStartsAnalysisWithoutSpeech() {
     let model = SessionModel()
     model.captureMode = .displayGlasses
     model.phase = .active
     model.consent = true
-    model.endpoint = "invalid-endpoint" // Never contact a real service in this test.
     model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:nowMs())
-    model.transcribe(AudioChunk(audioBase64:"test",startedAtMs:nowMs()-1000,endedAtMs:nowMs()))
     XCTAssertFalse(model.isTranscribing)
     XCTAssertTrue(model.transcript.isEmpty)
     model.requestCue(manual:false)
@@ -104,7 +102,7 @@ final class SessionTests: XCTestCase {
     let screen = GlassesScreen(cue:nil,caption:"Hello there",note:nil,paused:false,captionsEnabled:true,
       ready:false,starting:false,testOnly:false,feedback:"Analyzing…")
     XCTAssertEqual(screen.title,"Analyzing…")
-    XCTAssertEqual(screen.detail,"Heard: Hello there")
+    XCTAssertEqual(screen.detail,"Hello there")
     XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
   }
 
@@ -179,7 +177,7 @@ final class SessionTests: XCTestCase {
       captionsEnabled:true,ready:false,starting:false,testOnly:false)
     XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
     XCTAssertEqual(screen.cue?.count,90)
-    XCTAssertEqual(screen.detail,"Heard: Caption text","A social cue must not hide enabled captions; newlines must not crowd out controls")
+    XCTAssertEqual(screen.detail,"Caption text","A social cue must not hide enabled captions; newlines must not crowd out controls")
     let test = GlassesScreen(cue:nil,caption:nil,note:nil,paused:false,captionsEnabled:false,ready:false,starting:false,testOnly:true)
     XCTAssertEqual(test.labels,["Pause","Test cue","Stop"])
   }
@@ -192,10 +190,10 @@ final class SessionTests: XCTestCase {
     controller.show("Ask what they meant.",caption:"Friday afternoon works.",captionsEnabled:true)
     XCTAssertEqual(controller.displayRevision,revision+1,"New captions must reach the lens while a cue is visible")
     XCTAssertEqual(controller.requestedScreen?.cue,"Ask what they meant.")
-    XCTAssertEqual(controller.requestedScreen?.detail,"Heard: Friday afternoon works.")
+    XCTAssertEqual(controller.requestedScreen?.detail,"Friday afternoon works.")
     controller.show(nil,caption:"Friday afternoon works.",captionsEnabled:true)
     XCTAssertNil(controller.requestedScreen?.cue)
-    XCTAssertEqual(controller.requestedScreen?.detail,"Heard: Friday afternoon works.")
+    XCTAssertEqual(controller.requestedScreen?.detail,"Friday afternoon works.")
     controller.show("Ask what they meant.",caption:"Friday afternoon works.",captionsEnabled:false)
     XCTAssertEqual(controller.requestedScreen?.cue,"Ask what they meant.")
     XCTAssertNil(controller.requestedScreen?.detail,"Turning captions off must still work during a cue")
@@ -210,7 +208,7 @@ final class SessionTests: XCTestCase {
     }
     let excerpt = GlassesScreen(cue:"A cue",caption:String(repeating:"a",count:100),note:nil,
       paused:false,captionsEnabled:true,ready:false,starting:false,testOnly:false)
-    XCTAssertEqual(excerpt.detail,"Heard: …" + String(repeating:"a",count:60))
+    XCTAssertEqual(excerpt.detail,String(repeating:"a",count:64) + "…")
   }
 
   func testPhoneStartGlassesOnlyOpensControls() {
@@ -694,5 +692,75 @@ final class SessionTests: XCTestCase {
                              receivedAtMs:timestamp+20)
     XCTAssertEqual(model.captionText,"P2: new turn")
     XCTAssertEqual(model.transcript.last?.speaker,"P1")
+  }
+
+  func testDisplaySceneModeCanShowSpeakerCaptionWithoutChangingControls() {
+    let screen = GlassesScreen(cue:"This looks like a library.",caption:"P1: I probably can't make it tomorrow.",
+      note:nil,paused:false,captionsEnabled:true,ready:false,starting:false,testOnly:false,sceneOnly:true)
+    XCTAssertEqual(screen.labels,["Pause","Stop"])
+    XCTAssertEqual(screen.actions,[.pause,.stop])
+    XCTAssertEqual(screen.detail,"P1: I probably can't make it tomorrow.")
+  }
+
+  func testLocalizationKeepsOriginalAndUsesNaturalMeaningForLatestCaption() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.targetLanguage = "English"
+    let timestamp = nowMs()
+    let entry = TranscriptEntry(text:"कल मिलना थोड़ा मुश्किल होगा।",
+                                startMs:timestamp-1000,endMs:timestamp,confidence:nil,speaker:"P1")
+    model.transcript = [entry]
+    let result = LocalizationResult(sourceLanguage:"Hindi",targetLanguage:"English",
+      translation:"I probably won't be able to meet tomorrow.",
+      literalMeaning:"Meeting tomorrow will be a little difficult.",
+      pragmaticNote:"Indirect polite decline.",confidence:0.95,changedForPragmatics:true)
+    model.applyLocalization(result,to:entry.id,completedAtMs:timestamp+10)
+    XCTAssertEqual(model.transcript[0].text,"कल मिलना थोड़ा मुश्किल होगा।")
+    XCTAssertEqual(model.transcript[0].localization,result)
+    XCTAssertEqual(model.captionText,"P1: I probably won't be able to meet tomorrow.")
+  }
+
+  func testUncertainLocalizationNeverReplacesOriginalCaption() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.targetLanguage = "English"
+    let timestamp = nowMs()
+    let entry = TranscriptEntry(text:"Maybe tomorrow.",startMs:timestamp-1000,endMs:timestamp,confidence:nil,speaker:"P1")
+    model.transcript = [entry]
+    model.setCaption("P1: Maybe tomorrow.",capturedAtMs:timestamp)
+    let result = LocalizationResult(sourceLanguage:"English",targetLanguage:"English",
+      translation:"Definitely tomorrow.",literalMeaning:"Maybe tomorrow.",pragmaticNote:"",
+      confidence:0.4,changedForPragmatics:false)
+    model.applyLocalization(result,to:entry.id,completedAtMs:timestamp+10)
+    XCTAssertNil(model.transcript[0].localization)
+    XCTAssertEqual(model.captionText,"P1: Maybe tomorrow.")
+  }
+
+  func testDelayedLocalizationDoesNotOverwriteNewerPartial() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.targetLanguage = "English"
+    let timestamp = nowMs()
+    let first = TranscriptEntry(text:"पहली बात",startMs:timestamp-1000,endMs:timestamp,confidence:nil,speaker:"P1")
+    model.transcript = [first]
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:2,speaker:"P2",text:"new turn"),
+                             receivedAtMs:timestamp+10)
+    let result = LocalizationResult(sourceLanguage:"Hindi",targetLanguage:"English",
+      translation:"First thing.",literalMeaning:"First thing.",pragmaticNote:"",
+      confidence:0.95,changedForPragmatics:false)
+    model.applyLocalization(result,to:first.id,completedAtMs:timestamp+20)
+    XCTAssertEqual(model.captionText,"P2: new turn")
+    XCTAssertEqual(model.transcript[0].localization,result)
+  }
+
+  func testDerivedLocalizationNeverEncodesIntoCueTranscript() throws {
+    var entry = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speaker:"P1")
+    entry.localization = LocalizationResult(sourceLanguage:"English",targetLanguage:"Hindi",
+      translation:"नमस्ते",literalMeaning:"नमस्ते",pragmaticNote:"",
+      confidence:0.9,changedForPragmatics:false)
+    let json = try XCTUnwrap(String(data:JSONEncoder().encode(entry),encoding:.utf8))
+    XCTAssertFalse(json.contains("localization"))
+    XCTAssertFalse(json.contains("नमस्ते"))
+    XCTAssertTrue(json.contains("\"speaker\":\"P1\""))
   }
 }

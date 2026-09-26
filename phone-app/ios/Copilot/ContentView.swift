@@ -90,16 +90,28 @@ struct ContentView: View {
             }.font(.subheadline.weight(.semibold)).tint(mint) }
           }.padding(22).background(ink,in:RoundedRectangle(cornerRadius:20))
 
-          if !model.sceneOnly { VStack(alignment:.leading,spacing:12) {
+          VStack(alignment:.leading,spacing:12) {
             Label(model.simulate ? "SIMULATED CAPTIONS" : "CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
             Text(model.captionText ?? (model.connectionTestOnly ? "Capture test: no transcription." : "Speech will appear here."))
               .font(.system(size:25,weight:.medium,design:.rounded))
               .frame(maxWidth:.infinity,minHeight:80,alignment:.leading)
-            Text("Completed speech chunks, not word-by-word streaming. Recognition can be wrong; no speaker identity is inferred.")
+            if let entry = model.transcript.last, let localized = entry.localization {
+              Text("\(localized.sourceLanguage) → \(localized.targetLanguage)").font(.caption.bold()).foregroundStyle(.secondary)
+              Text("Original: \(entry.text)").font(.subheadline)
+              if localized.changedForPragmatics {
+                Text("Literal: \(localized.literalMeaning)").font(.caption).foregroundStyle(.secondary)
+                if !localized.pragmaticNote.isEmpty {
+                  Text(localized.pragmaticNote).font(.caption).foregroundStyle(.secondary)
+                }
+              }
+            }
+            Text(model.translationEnabled
+                 ? "Live speech appears immediately; finalized turns are localized when possible. P1/P2 are session-local speakers, not identities."
+                 : "Live speaker-aware transcription. P1/P2 are session-local speakers, not identities.")
               .font(.caption).foregroundStyle(.secondary)
           }.padding(22).background(.white,in:RoundedRectangle(cornerRadius:20))
 
-          VStack(alignment:.leading,spacing:10) {
+          if !model.sceneOnly { VStack(alignment:.leading,spacing:10) {
             Label("NOTES",systemImage:"note.text").font(.caption.bold()).tracking(1)
             TextField("Add a note",text:$model.contextText,axis:.vertical)
               .lineLimit(2...4).onChange(of:model.contextText) { _, _ in model.contextChanged() }
@@ -116,17 +128,26 @@ struct ContentView: View {
               Text("Glasses frame received · \(model.glasses.framesReceived) total").font(.caption)
             }
           }
-          if !model.sceneOnly { DisclosureGroup("Transcript") {
+          DisclosureGroup("Transcript") {
             VStack(alignment:.leading,spacing:10) {
               if model.transcript.isEmpty { Text("No speech captured.").foregroundStyle(.secondary) }
               ForEach(model.transcript) { entry in
                 VStack(alignment:.leading,spacing:3) {
-                  Text(Date(timeIntervalSince1970:entry.endMs/1000),style:.time).font(.caption).foregroundStyle(.secondary)
+                  HStack {
+                    Text(Date(timeIntervalSince1970:entry.endMs/1000),style:.time)
+                    if let speaker = entry.speaker { Text(speaker).fontWeight(.semibold) }
+                  }.font(.caption).foregroundStyle(.secondary)
                   Text(entry.text).font(.subheadline)
+                  if let localized = entry.localization {
+                    Text(localized.translation).font(.subheadline.weight(.semibold))
+                    if localized.changedForPragmatics {
+                      Text("Literal: \(localized.literalMeaning)").font(.caption).foregroundStyle(.secondary)
+                      if !localized.pragmaticNote.isEmpty { Text(localized.pragmaticNote).font(.caption).foregroundStyle(.secondary) }
+                    }
+                  }
                 }.frame(maxWidth:.infinity,alignment:.leading)
               }
             }.padding(.top,12)
-          }
           }
           DisclosureGroup("Stats") {
             Grid(alignment:.leading,horizontalSpacing:20,verticalSpacing:10) {
@@ -257,16 +278,28 @@ struct ContentView: View {
           Text("Enter the proxy token, never the Muse Spark API key. Your model key belongs only in the backend environment.").font(.caption)
         }.disabled(model.phase == .active || model.phase == .starting)
         Section("This conversation") {
+          Toggle("Pragmatic translation",isOn:$model.translationEnabled)
+            .onChange(of:model.translationEnabled) { _, _ in model.translationSettingsChanged() }
+            .disabled(model.phase == .active || model.phase == .starting)
+          Picker("Caption language",selection:$model.targetLanguage) {
+            ForEach(SessionModel.translationLanguages,id:\.self) { Text($0).tag($0) }
+          }.onChange(of:model.targetLanguage) { _, _ in model.translationSettingsChanged() }
+            .disabled(model.phase == .active || model.phase == .starting)
+          Text("Translation sends only each finalized utterance and up to two preceding text turns. It does not send camera frames, audio, names, or your notes.")
+            .font(.caption)
           TextField("Things you chose to remember (one per line)",text:$model.contextText,axis:.vertical).lineLimit(3...5).onChange(of:model.contextText) { _, _ in model.contextChanged() }
           if model.analyzesSurroundings {
-            if model.captureMode.hasGlassesDisplay && !model.sceneOnly {
+            if model.captureMode.hasGlassesDisplay {
               Toggle("Captions on glasses",isOn:$model.displayCaptions).onChange(of:model.displayCaptions) { _, _ in model.refreshDisplay() }
             }
-            Text(model.sceneOnly ? "Scene-only test: Muse checks fresh camera images every 10 seconds (30 in reduced-power mode), with audio levels when available. No speech transcription. Recommendations update automatically." : "Muse checks about every 8 seconds near conversation, 20 seconds without recent speech, or 30 seconds in reduced-power mode. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
+            Text(model.sceneOnly
+                 ? "Display glasses keep scene analysis separate from live captions. Muse checks fresh camera images every 10 seconds (30 in reduced-power mode); speech is transcribed independently."
+                 : "Muse checks about every 8 seconds near conversation, 20 seconds without recent speech, or 30 seconds in reduced-power mode. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.")
+              .font(.caption)
           } else {
             Stepper("Image sample every \(Int(model.sampleInterval)) seconds",value:$model.sampleInterval,in:3...30,step:1)
           }
-          Text("Keeps ≤60 seconds / 12 transcript entries and one sampled image. Stop erases session memory. No raw media files are saved.").font(.caption)
+          Text("Keeps ≤60 seconds / 12 transcript entries and one sampled image. Translation details stay in session memory only. Stop erases them. No raw media files are saved.").font(.caption)
         }
         Section("Provisional cue rules") {
           Text(model.sceneOnly ? "Muse checks every 10 seconds (30 in reduced-power mode). Recommendations stay until the next result. Pause and Stop clear captured context." : "Surroundings checks submit a frame ≤10 seconds old or recognized speech ≤15 seconds old, with 1.5 seconds after the last recognized speech. Scene results expire when their image is 20 seconds old. New recognized speech invalidates old cues; steady ambient noise does not block scene checks. Cue confidence ≥0.8, automatic cooldown 30 seconds, lifetime 8 seconds.").font(.caption)

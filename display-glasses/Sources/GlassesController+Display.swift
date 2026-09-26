@@ -24,7 +24,7 @@ struct GlassesScreen: Equatable, Sendable {
       detail = caption.flatMap { text in
         let text = text.split(whereSeparator: { $0.isWhitespace }).joined(separator:" ")
         guard !text.isEmpty else { return nil }
-        return "Heard: " + (text.count > 60 ? "…" : "") + String(text.suffix(60))
+        return String(text.prefix(64)) + (text.count > 64 ? "…" : "")
       }
     } else if mode == .streaming && self.cue == nil {
       detail = note.map { String($0.prefix(60)) }

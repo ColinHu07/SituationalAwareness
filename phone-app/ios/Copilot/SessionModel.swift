@@ -18,6 +18,9 @@ final class SessionModel {
   var phoneCameraEnabled = true
   var localMock = true
   var connectionTestOnly = false
+  static let translationLanguages = ["English", "Hindi"]
+  var translationEnabled = UserDefaults.standard.object(forKey:"copilot.translationEnabled") as? Bool ?? true
+  var targetLanguage = UserDefaults.standard.string(forKey:"copilot.targetLanguage") ?? "English"
   var endpoint = UserDefaults.standard.string(forKey:"copilot.endpoint") ?? "http://127.0.0.1:8787"
   var proxyToken = TokenStore.read()
   var selectedAudioUID = ""
@@ -74,6 +77,7 @@ final class SessionModel {
   @ObservationIgnored private var startTask: Task<Void, Never>?
   @ObservationIgnored private var loopTask: Task<Void, Never>?
   @ObservationIgnored private var realtimeASR: RealtimeASRClient?
+  @ObservationIgnored private var localizationTasks: [UUID:Task<Void, Never>] = [:]
   @ObservationIgnored private var realtimeClock = RealtimeSpeechClock()
   @ObservationIgnored private var realtimePartials: [Int:(text:String, speaker:String?)] = [:]
   @ObservationIgnored private let speechLanguageBias = ["English", "Hindi"]
@@ -173,7 +177,7 @@ final class SessionModel {
   }
   private func publishDisplay() {
     guard captureMode.hasGlassesDisplay, phase == .active else { return }
-    glasses.show(cue, caption:sceneOnly ? nil : captionText, note:sceneOnly ? nil : savedNote, captionsEnabled:displayCaptions && !sceneOnly, testOnly:connectionTestOnly, feedback:analysisFeedback, sceneOnly:sceneOnly)
+    glasses.show(cue, caption:captionText, note:sceneOnly ? nil : savedNote, captionsEnabled:displayCaptions, testOnly:connectionTestOnly, feedback:analysisFeedback, sceneOnly:sceneOnly)
   }
   private func feedback(_ message: String) {
     analysisFeedback = message
@@ -313,6 +317,7 @@ final class SessionModel {
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeASR()
+    cancelLocalization()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     latestFrame = nil; latestAudioContext = nil; latestSampleAt = 0; transcript.removeAll(); lastVoiceAt = 0; captionText = nil; captionAtMs = 0
@@ -336,6 +341,7 @@ final class SessionModel {
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeASR()
+    cancelLocalization()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
@@ -431,8 +437,9 @@ final class SessionModel {
       let speaker = event.speaker ?? prior?.speaker
       let timing = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:receivedAtMs)
       if analyzesSurroundings { lastVoiceAt = timing.endMs }
-      transcript.append(TranscriptEntry(text:String(text.prefix(500)), startMs:timing.startMs, endMs:timing.endMs,
-                                        confidence:nil, speaker:speaker))
+      let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:timing.startMs, endMs:timing.endMs,
+                                  confidence:nil, speaker:speaker)
+      transcript.append(entry)
       transcript.sort { $0.endMs < $1.endMs }
       trimTranscript()
       if !sceneOnly { invalidateCue() }
@@ -441,16 +448,67 @@ final class SessionModel {
       if realtimePartials.isEmpty {
         setCaption(Self.speakerCaption(speaker, text), capturedAtMs:receivedAtMs)
       }
+      localize(entry.id)
     default: break
     }
   }
   private static func speakerCaption(_ speaker: String?, _ text: String) -> String {
     speaker.map { "\($0): \(text)" } ?? text
   }
+  private func localize(_ entryID: UUID) {
+    guard translationEnabled, !simulate, !connectionTestOnly, localizationTasks[entryID] == nil,
+          let index = transcript.firstIndex(where: { $0.id == entryID }) else { return }
+    let entry = transcript[index]
+    let context = transcript[..<index].suffix(2).map {
+      LocalizationContextTurn(text:$0.text, speaker:$0.speaker)
+    }
+    let request = LocalizationRequest(text:entry.text, speaker:entry.speaker,
+                                      targetLanguage:targetLanguage, context:Array(context))
+    let thisEpoch = epoch
+    let connection = client
+    localizationTasks[entryID] = Task { [weak self] in
+      guard let self else { return }
+      defer { if self.epoch == thisEpoch { self.localizationTasks[entryID] = nil } }
+      do {
+        let (response, bytes): (LocalizationResponse, Int) = try await connection.post("api/localize", request)
+        guard self.epoch == thisEpoch, self.phase == .active, !Task.isCancelled else { return }
+        self.uploadedBytes += bytes
+        self.recordCost(response.metrics?.estimatedCostUsd)
+        self.applyLocalization(response.result, to:entryID)
+      } catch {
+        guard self.epoch == thisEpoch, self.phase == .active, !Task.isCancelled else { return }
+        if self.transcript.last?.id == entryID {
+          self.notice = "Translation unavailable; showing original speech."
+        }
+      }
+    }
+  }
+  private func cancelLocalization() {
+    localizationTasks.values.forEach { $0.cancel() }
+    localizationTasks.removeAll()
+  }
+  func applyLocalization(_ result: LocalizationResult, to entryID: UUID, completedAtMs: Double = nowMs()) {
+    guard phase == .active, result.targetLanguage == targetLanguage,
+          let index = transcript.firstIndex(where: { $0.id == entryID }) else { return }
+    guard result.confidence >= 0.65 else {
+      if transcript.last?.id == entryID { notice = "Translation uncertain; showing original speech." }
+      return
+    }
+    transcript[index].localization = result
+    guard transcript.last?.id == entryID, realtimePartials.isEmpty else { return }
+    let entry = transcript[index]
+    setCaption(Self.speakerCaption(entry.speaker, result.translation), capturedAtMs:completedAtMs)
+  }
+  func translationSettingsChanged() {
+    guard phase == .stopped else { return }
+    if !Self.translationLanguages.contains(targetLanguage) { targetLanguage = "English" }
+    UserDefaults.standard.set(translationEnabled, forKey:"copilot.translationEnabled")
+    UserDefaults.standard.set(targetLanguage, forKey:"copilot.targetLanguage")
+  }
   func transcribe(_ chunk: AudioChunk) {
     // The file endpoint remains an explicit fallback if the realtime relay could
     // not start or disconnects mid-session.
-    guard realtimeASR == nil, !sceneOnly, !connectionTestOnly, phase == .active,
+    guard realtimeASR == nil, !connectionTestOnly, phase == .active,
           chunk.startedAtMs >= captureStartedAt - 200 else { return }
     guard asrTask == nil else { audioDrops += 1; return }
     let thisEpoch = epoch
@@ -469,9 +527,13 @@ final class SessionModel {
           transcript.removeAll(); captionText = nil; invalidateCue(); publishDisplay(); notice = "Speech was unclear; waiting for fresh speech."; return
         }
         if analyzesSurroundings { lastVoiceAt = chunk.endedAtMs }
-        transcript.append(TranscriptEntry(text:String(text.prefix(500)), startMs:chunk.startedAtMs, endMs:chunk.endedAtMs, confidence:result.confidence))
-        trimTranscript(); invalidateCue()
+        let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:chunk.startedAtMs,
+                                    endMs:chunk.endedAtMs, confidence:result.confidence)
+        transcript.append(entry)
+        trimTranscript()
+        if !sceneOnly { invalidateCue() }
         setCaption(text, capturedAtMs:chunk.endedAtMs)
+        localize(entry.id)
       } catch {
         guard epoch == thisEpoch, !Task.isCancelled else { return }
         // Fail closed: missing transcription cannot be quietly replaced by a fixture.
