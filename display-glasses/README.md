@@ -8,9 +8,11 @@ Tap **Start glasses** on the phone, then **Start** on the lens to begin capture.
 
 Muse summarizes roughly the last 10 seconds and bases its cue on that summary in one request. Streaming partials are included before a sentence is finalized; corrections and finals do not refresh old words. Word timing is approximate because ASR supplies stream progress, not individual word timestamps. The phone's **Recent context** card shows the summary, while its captions continue updating independently. Without clear conversation, Muse uses the fresh camera scene and averaged audio energy to describe the setting or suggest a considerate action.
 
+New social cues are also spoken once through the selected Bluetooth output. Captions and summaries remain silent. Choose the glasses in Control Center if the phone shows an audio-route notice. **Settings → Speak social cues** turns playback off. Transcription briefly pauses during cue playback to avoid capturing its own voice. See [audio implementation and hardware checks](../docs/CUE_AUDIO.md).
+
 ## Capture and analysis
 
-DAT **1.0.0** carries low-resolution **15 FPS HEVC video and 16 kHz mono ambient PCM** in one camera stream; Display uses the same `DeviceSession`. Display mode does not use an HFP microphone picker. Regular Meta glasses retain their separate HFP route and phone output.
+DAT **1.0.0** carries low-resolution HEVC video and **16 kHz mono ambient PCM** in one camera stream; Display uses the same `DeviceSession`. With spoken cues enabled, video requests **2 FPS** to leave Bluetooth capacity for the HFP voice connection. Sessions started with spoken cues disabled request **15 FPS**. Display mode matches the selected glasses' voice route automatically, without an HFP microphone picker. Regular Meta glasses retain their separate HFP route and phone output.
 
 The phone decodes frames and keeps one JPEG refreshed every **2 seconds**. Conversation audio streams to **Muse Voice Transcribe** for partial captions; six-second HTTP chunks are a fallback if the realtime connection fails. **Muse Spark** receives the recent speech window, fresh image and up to 10 seconds of averaged capture energy. No full-video upload or local glasses model is implemented.
 

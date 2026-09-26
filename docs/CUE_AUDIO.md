@@ -1,0 +1,31 @@
+# Spoken social cues
+
+New accepted social cues are read once with `AVSpeechSynthesizer`. Captions, summaries, person names, debugging, and status messages never enter the speech service. Pause, Stop, Dismiss, a beginning audio interruption, or an actual output-device change cancels speech. Benign category/activation route notifications do not cancel speech when the output remains the same. Speech is enabled by default; Settings → Speak social cues disables it. The simulated demo stays silent.
+
+## SDK research (September 26, 2026)
+
+The pinned DAT 1.0.0 `MWDATSpeech` public interface provides recognition (`transcriptionPublisher`, `Speech.start/stop`), not speech synthesis. Meta's [microphones and speakers guide](https://wearables.developer.meta.com/docs/develop/dat/microphones-and-speakers) explicitly recommends standard iOS playback APIs, including `AVSpeechSynthesizer`, over A2DP. The web page requires login; its A2DP section was retrieved from the official public [Meta documentation MCP](https://mcp.developer.meta.com/wearables) using `search_dat_docs`, query `iOS glasses speaker playback text to speech AVSpeechSynthesizer A2DP camera streaming`.
+
+Physical testing on Meta RB Display showed A2DP speech `didStart` / `didFinish` at 60% output volume, but the wearer heard nothing while DAT camera capture ran. This matches a reported [iOS SDK A2DP/streaming issue](https://github.com/facebook/meta-wearables-dat-ios/issues/256); a successful synthesis callback is not proof of audible glasses output.
+
+Display mode now uses `.playAndRecord`, `.default`, `.allowBluetoothHFP` for cue output. After `addCamera` and before `stream.start`, it matches the currently selected Bluetooth output to its HFP input, starts voice I/O, waits two seconds, and verifies the input/output route. The HFP input is discarded: captions and ambient summaries still consume the separate DAT ambient PCM feed. Each cue reasserts session activation without changing profiles under the running camera. Regular glasses reuse their existing HFP category and input; phone mode retains its built-in microphone route. The synthesizer uses the application's audio session. See Meta's microphone/speaker ordering guidance and Apple's [speech synthesis](https://developer.apple.com/documentation/avfoundation/speech-synthesis) documentation.
+
+HFP uses a lower-fidelity voice channel and consumes Bluetooth bandwidth even between utterances. The wearer confirmed audible HFP cues, but at 15 FPS the DAT ambient audio fell roughly nine seconds behind within fourteen seconds of streaming, near the capture watchdog's ten-second freshness limit. Voice-enabled Display sessions now request low-resolution HEVC at 2 FPS, preserving 16 kHz mono ambient PCM; Display sessions started with spoken cues off still request 15 FPS. This is a bandwidth tradeoff, so the preview is less smooth.
+
+Physical-device log verification on September 26 at 19:26–19:27: the 2 FPS/HFP stream delivered 48.384 seconds of ambient audio over 48.533 seconds, with a final capture age of 482 ms. Two cue utterances started and completed in that interval, with no SDK pause, application pause, or delayed-capture warning. The wearer also confirmed that streaming continues after spoken cues. This establishes short-run continuity on this device; it is not a guarantee across all Bluetooth conditions.
+
+Capture health tracks actual frame/audio arrival separately from capture timestamps. If required data is still arriving but is stale, the app reports the delay, removes old advice, blocks new inference/delivery on stale input, and lets transport recover. It does not relabel old data as fresh. A real ten-second arrival gap or explicit SDK pause/disconnect still pauses capture. The timing log now records SDK session/camera transitions and the exact application pause reason.
+
+If setup cannot match the selected glasses, visual capture continues and the phone reports the voice-route failure; another headset or phone speaker is not substituted. Enabling speech after starting with it disabled requires restarting the glasses session to establish HFP before the camera.
+
+Display glasses require an active HFP output before speech begins. A cue waits up to five seconds for route activation/volume to settle; it does not intentionally substitute the phone speaker. If no usable route appears, the phone reports the problem. Only synthesis completion deduplicates a cue; failed/cancelled audio may retry when Muse validates that the same visible cue still fits. There is no queue of old advice. Enabling speech during a session submits the current cue immediately if the voice route was already prepared.
+
+Both the main screen and Live view show audio status. “Starting” means submission, “Speaking” requires the synthesizer's `didStart` callback, and “finished” requires `didFinish`; none proves physical audibility at the glasses. The existing timing logger also records route-event reasons, output port type/name, output volume, activation failure, start, completion, cancellation, and timeout, without cue/transcript text. Bluetooth routing is selected by iOS/the wearer, not by the DAT device identifier. This is a system iOS voice, not the consumer Meta AI voice.
+
+## Capture during playback
+
+The transcription feed receives equal-length silent PCM during cue playback and for a 600 ms echo tail, preserving stream timing without feeding the assistant's voice back into captions or conversation context. This intentionally misses speech spoken over the cue. Those windows are also excluded from ambient-energy summaries so silence inserted by the app is not treated as a quiet room. Capture-health checks continue using incoming PCM timestamps. An eight-second playback timeout prevents a missing synthesis callback from masking capture indefinitely.
+
+## Hardware check
+
+Select the glasses as audio output, start a glasses session, and produce a new social cue. Verify that the cue is both visible and audible, captions/summaries remain silent, an unchanged cue is not repeated, camera streaming continues, and Pause/Dismiss stops playback. Repeat with regular glasses/HFP and test disconnect and phone lock. Simulator tests exercise gating and lifecycle behavior; they do not establish audible output or simultaneous camera/audio behavior on hardware.

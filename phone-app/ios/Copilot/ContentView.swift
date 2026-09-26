@@ -85,6 +85,7 @@ struct ContentView: View {
               Button("Dismiss") { model.dismiss() }.disabled(model.cue == nil)
             }.font(.subheadline.weight(.semibold)).tint(mint) }
           }.padding(22).background(ink,in:RoundedRectangle(cornerRadius:20))
+          if let status = model.cueAudioStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
           if model.cue != nil { Button("Not helpful",systemImage:"hand.thumbsdown") { model.markDistracting() }.font(.caption).tint(.secondary) }
           if let feedback = model.toneFeedback { RecoveryCard(feedback:feedback) { model.dismissTone() } }
           if !model.sceneOnly { VStack(alignment:.leading,spacing:12) {
@@ -272,6 +273,8 @@ struct ContentView: View {
           }
         }
         Section("This conversation") {
+          Toggle("Speak social cues",isOn:$model.spokenCuesEnabled)
+          Text("Reads only new social cues. For glasses audio, select your glasses in Control Center. Captions and summaries stay silent.").font(.caption)
           if model.captureMode.hasGlassesDisplay {
             Toggle("Conversation and captions",isOn:$model.glassesConversationEnabled).disabled(model.phase != .stopped)
             Text("Off keeps automatic scene cues. On adds phone captions, conversation summaries, name detection and conversation learning.").font(.caption)

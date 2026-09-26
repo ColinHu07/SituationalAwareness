@@ -23,6 +23,7 @@ struct PhoneCaptureView: View {
           PresenceStrip(model:model)
           cueCard
           if let feedback = model.toneFeedback { RecoveryCard(feedback:feedback) { model.dismissTone() } }
+          if let status = model.cueAudioStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
           sessionStatus
           if !model.sceneOnly { captions }
           if model.lastSceneSummary != nil || model.lastAnalysisOutcome != nil {

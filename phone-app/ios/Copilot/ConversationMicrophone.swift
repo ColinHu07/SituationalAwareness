@@ -16,6 +16,8 @@ final class ConversationMicrophone: @unchecked Sendable {
     var energySamples = 0
     var activeSamples = 0
     var streamPCM = false
+    var cueMuteUntil = 0.0
+    var contextIncludesCue = false
   }
   private let lock = OSAllocatedUnfairLock(initialState: State())
   private let engine = AVAudioEngine()
@@ -61,6 +63,11 @@ final class ConversationMicrophone: @unchecked Sendable {
   @MainActor func prepareStreamPCM() {
     lock.withLockUnchecked { $0 = State(); $0.started = true; $0.streamPCM = true }
     actualSampleRate = 16000 // The DAT configuration explicitly requests 16 kHz mono PCM.
+  }
+
+  /// Keep ASR timing continuous with silence while our own cue plays, plus a short echo tail.
+  func setCuePlaybackActive(_ active: Bool) {
+    lock.withLockUnchecked { $0.cueMuteUntil = active ? .infinity : nowMs() + 600 }
   }
 
   func receiveStreamPCM(_ buffer: AVAudioPCMBuffer, at timestamp: Double) {
@@ -135,8 +142,9 @@ final class ConversationMicrophone: @unchecked Sendable {
         supplied = true; status.pointee = .haveData; return buffer
       }
       guard error == nil, let pointer = output.int16ChannelData?[0], output.frameLength > 0 else { return }
-      let samples = Array(UnsafeBufferPointer(start:pointer, count:Int(output.frameLength)))
-      pcm = Data(bytes:pointer, count:Int(output.frameLength) * MemoryLayout<Int16>.size)
+      let muted = timestamp <= state.cueMuteUntil
+      let samples = muted ? [Int16](repeating:0,count:Int(output.frameLength)) : Array(UnsafeBufferPointer(start:pointer, count:Int(output.frameLength)))
+      pcm = samples.withUnsafeBytes { Data($0) }
       var cursor = 0
       while cursor < samples.count {
         // Split at both bounds: SDK callback sizes need not divide one/six seconds.
@@ -148,11 +156,13 @@ final class ConversationMicrophone: @unchecked Sendable {
         if voice { state.lastVoice = endedAt; latestVoice = endedAt }
         state.energySum += energy; state.energySamples += count
         if voice { state.activeSamples += count }
+        state.contextIncludesCue = state.contextIncludesCue || muted
         if state.energySamples == 16000 {
-          contexts.append(AudioContext(capturedAtMs:endedAt, windowMs:1000,
+          if !state.contextIncludesCue { contexts.append(AudioContext(capturedAtMs:endedAt, windowMs:1000,
             activityRatio:Double(state.activeSamples) / 16000,
             rmsDbFS:max(-120, min(0, 10 * log10(max(1e-12, state.energySum / 16000)))),
-            source:state.streamPCM ? "glasses_pcm" : selectedPortType == .bluetoothHFP ? "glasses_hfp" : "phone"))
+            source:state.streamPCM ? "glasses_pcm" : selectedPortType == .bluetoothHFP ? "glasses_hfp" : "phone")) }
+          state.contextIncludesCue = false
           state.energySum = 0; state.energySamples = 0; state.activeSamples = 0
         }
         if state.samples.isEmpty { state.chunkStart = endedAt - Double(count) / 16 }

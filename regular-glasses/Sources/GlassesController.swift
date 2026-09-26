@@ -74,6 +74,7 @@ final class GlassesController {
   }
   var onFrame: ((UIImage, Double) -> Void)?
   var onFailure: ((String) -> Void)?
+  var onDiagnostic: ((String) -> Void)?
   var onHelp: (() -> Void)?
   var onPause: (() -> Void)?
   var onStop: (() -> Void)?
@@ -184,6 +185,7 @@ final class GlassesController {
     tokens.append(deviceSession.statePublisher.listen { [weak self] state in
       Task { @MainActor in
         guard let self, self.sessionRevision == revision else { return }
+        self.onDiagnostic?("Glasses session state: \(state)")
         if state == .started { self.sessionHasStarted = true }
         if (state == .paused || state == .stopped) && self.sessionHasStarted && !self.stopping { self.fail("Glasses session \(state). Resume deliberately after reconnecting.") }
       }
@@ -221,7 +223,17 @@ final class GlassesController {
     return deviceSession
   }
 
-  func start(microphone: ConversationMicrophone, audioUID: String, withDisplay: Bool = true) async throws {
+  static func cameraConfiguration(withDisplay: Bool, voiceAudioEnabled: Bool) -> StreamConfiguration {
+    // HFP reserves Bluetooth bandwidth even between utterances. At 15 FPS the
+    // user's ambient PCM accumulated ~9 seconds of backlog in 14 seconds.
+    // Keep the ambient feed; reduce visual sampling while voice is enabled.
+    withDisplay
+      ? StreamConfiguration(videoCodec:.hvc1, audioCodec:.pcm(sampleRate:.rate16000, numberOfChannels:1), resolution:.low, frameRate:voiceAudioEnabled ? 2 : 15)
+      : StreamConfiguration(videoCodec:.hvc1, resolution:.low, frameRate:15)
+  }
+
+  func start(microphone: ConversationMicrophone, audioUID: String, withDisplay: Bool = true, voiceAudioEnabled: Bool = false,
+             prepareCueAudio: (@MainActor () async throws -> Void)? = nil) async throws {
     guard let wearables else { throw CopilotError(message:"DAT configuration missing.") }
     let permissions: [Permission] = withDisplay ? [.camera, .microphone] : [.camera]
     for permission in permissions {
@@ -246,9 +258,8 @@ final class GlassesController {
     preview = nil; previewAtMs = 0; cameraHasStreamed = false
     // Display uses DAT 1.0 ambient PCM alongside preview video. Regular glasses
     // retain their existing HFP path: add camera, settle HFP, then start video.
-    let configuration = withDisplay
-      ? StreamConfiguration(videoCodec:.hvc1, audioCodec:.pcm(sampleRate:.rate16000, numberOfChannels:1), resolution:.low, frameRate:15)
-      : StreamConfiguration(videoCodec:.hvc1, resolution:.low, frameRate:15)
+    let configuration = Self.cameraConfiguration(withDisplay:withDisplay, voiceAudioEnabled:voiceAudioEnabled)
+    onDiagnostic?("Glasses camera requested \(configuration.frameRate) FPS; ambient PCM \(withDisplay ? "on" : "off"); voice route \(voiceAudioEnabled ? "on" : "off")")
     guard let camera = try deviceSession.addCamera(config:configuration) else { throw CopilotError(message:"Could not attach camera.") }
     self.camera = camera
     let clock = GlassesStreamClock()
@@ -257,6 +268,7 @@ final class GlassesController {
       Task { @MainActor in
         guard let self, self.sessionRevision == revision, self.cameraRevision == captureRevision else { return }
         self.cameraState = String(describing:state)
+        self.onDiagnostic?("Glasses camera state: \(state)")
         if state == .streaming { self.cameraHasStreamed = true }
         if (state == .paused || state == .stopped) && self.cameraHasStreamed && !self.stopping { self.fail("Camera \(state); cues paused. Resume creates a fresh supported stream.") }
       }
@@ -292,6 +304,8 @@ final class GlassesController {
     }
     if withDisplay { try await microphone.startStreamPCM() }
     else { try await microphone.start(uid:audioUID) }
+    // Bluetooth voice playback must settle after addCamera, before stream.start.
+    if withDisplay { try await prepareCueAudio?() }
     try Task.checkCancellation()
     guard sessionRevision == revision, cameraRevision == captureRevision else { throw CancellationError() }
     camera.stream.start()
@@ -358,5 +372,9 @@ final class GlassesController {
     displayReady = false; cameraState = "Stopped"; displayState = "Stopped"
     preview = nil; previewAtMs = 0
   }
-  func fail(_ message: String) { lastError = message; if !stopping { onFailure?(message) } }
+  func fail(_ message: String) {
+    lastError = message
+    onDiagnostic?("Glasses failure: \(message)")
+    if !stopping { onFailure?(message) }
+  }
 }
