@@ -75,6 +75,12 @@ struct ContentView: View {
                 Button("Stop",systemImage:"stop.fill",role:.destructive) { model.stop() }.buttonStyle(.bordered)
               }
             }.controlSize(.large)
+            if model.captureMode.hasGlassesDisplay && (model.phase == .stopped || model.phase == .paused) {
+              Button("Open controls on glasses",systemImage:"hand.point.up.left") { model.openGlassesControls() }
+                .buttonStyle(.bordered).disabled(!model.canStart)
+              Text("Opens Start streaming on the lens. Use your wristband to select it; camera and microphone stay off until then.")
+                .font(.caption).foregroundStyle(.secondary)
+            }
             if !model.simulate && model.phase != .stopped {
               Button("Open live capture view",systemImage:"viewfinder") { showCamera = true }
             }

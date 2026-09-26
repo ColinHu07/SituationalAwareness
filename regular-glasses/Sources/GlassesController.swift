@@ -79,6 +79,7 @@ final class GlassesController {
   var onStop: (() -> Void)?
   var onDismiss: (() -> Void)?
   var onResume: (() -> Void)?
+  var onDisconnect: (() -> Void)?
   @ObservationIgnored private var wearables: WearablesInterface?
   @ObservationIgnored private var selector: AutoDeviceSelector?
   @ObservationIgnored private var session: DeviceSession?
@@ -87,7 +88,10 @@ final class GlassesController {
   @ObservationIgnored private var tokens: [AnyListenerToken] = []
   @ObservationIgnored private var audioToken: AnyListenerToken?
   @ObservationIgnored private var streamClock: GlassesStreamClock?
-  @ObservationIgnored private var captureStopTask: Task<Void, Never>?
+  @ObservationIgnored private var captureStopTask: Task<Bool, Never>?
+  @ObservationIgnored private var cameraTokens: [AnyListenerToken] = []
+  @ObservationIgnored private var cameraRevision = 0
+  @ObservationIgnored private var sessionUsesDisplay = false
   @ObservationIgnored private var observers: [Task<Void, Never>] = []
   @ObservationIgnored private let frameGate = FrameDeliveryGate()
   @ObservationIgnored private var stopping = false
@@ -131,27 +135,26 @@ final class GlassesController {
     do { _ = try await wearables.handleUrl(url) } catch { fail(error.localizedDescription) }
   }
 
-  func start(microphone: ConversationMicrophone, audioUID: String, withDisplay: Bool = true) async throws {
+  // Display stays connected while camera capture is stopped or restarted.
+  func connectDisplayOnly() async throws {
+    _ = try await connect(withDisplay:true)
+  }
+
+  private func connect(withDisplay: Bool) async throws -> DeviceSession {
+    if let session, session.state == .started, sessionUsesDisplay == withDisplay,
+       !withDisplay || displayReady { return session }
+    await stop()
+    try Task.checkCancellation()
+    guard session == nil else { throw CopilotError(message:"Previous glasses connection is still closing. Retry shortly.") }
     guard let wearables else { throw CopilotError(message:lastError ?? "DAT configuration missing.") }
     let selector = AutoDeviceSelector(wearables:wearables, filter:{ withDisplay ? $0.supportsDisplay() : !$0.supportsDisplay() })
     self.selector = selector
     stopping = false
     sessionRevision += 1
     let revision = sessionRevision
-    lastPreviewAt = 0
-    framesReceived = 0; lastError = nil; updateRequired = false
-    preview = nil; previewAtMs = 0
-    sessionHasStarted = false; cameraHasStreamed = false; displayHasStarted = false
-    let permissions: [Permission] = withDisplay ? [.camera, .microphone] : [.camera]
-    for permission in permissions {
-      if try await wearables.checkPermissionStatus(permission) != .granted {
-        guard try await wearables.requestPermission(permission) == .granted else {
-          throw CopilotError(message:"Glasses \(permission) permission denied in Meta AI.")
-        }
-      }
-      try Task.checkCancellation()
-      guard sessionRevision == revision, !stopping else { throw CancellationError() }
-    }
+    sessionUsesDisplay = withDisplay
+    lastError = nil; updateRequired = false
+    sessionHasStarted = false; displayHasStarted = false
     // AutoDeviceSelector resolves asynchronously. Poll its public snapshot so a
     // quiet discovery stream cannot leave Start or its cancellation hanging.
     let selectionDeadline = ContinuousClock.now.advanced(by:.seconds(15))
@@ -194,6 +197,53 @@ final class GlassesController {
       try await Task.sleep(for:.milliseconds(100))
       guard Date() < deadline, sessionRevision == revision else { throw CopilotError(message:"Glasses session did not start. Check pairing, DAT glasses app and firmware.") }
     }
+    if withDisplay {
+    let cap = try deviceSession.addDisplay()
+    display = cap
+    tokens.append(cap.statePublisher.listen { [weak self] state in
+      Task { @MainActor in
+        guard let self, self.sessionRevision == revision else { return }
+        self.displayState = String(describing:state)
+        self.displayReady = state == .started
+        if state == .started { self.displayHasStarted = true }
+        if state == .stopped && self.displayHasStarted && !self.stopping { self.fail("Display control ended; recording and cues paused.") }
+      }
+    })
+    cap.start()
+    } else { displayState = "Phone output (no glasses display)" }
+    let displayDeadline = ContinuousClock.now.advanced(by:.seconds(12))
+    while withDisplay && !displayReady {
+      try await Task.sleep(for:.milliseconds(100))
+      guard sessionRevision == revision, ContinuousClock.now < displayDeadline else {
+        throw CopilotError(message:"Glasses display did not become ready. Check the connection and retry.")
+      }
+    }
+    return deviceSession
+  }
+
+  func start(microphone: ConversationMicrophone, audioUID: String, withDisplay: Bool = true) async throws {
+    guard let wearables else { throw CopilotError(message:"DAT configuration missing.") }
+    let permissions: [Permission] = withDisplay ? [.camera, .microphone] : [.camera]
+    for permission in permissions {
+      if try await wearables.checkPermissionStatus(permission) != .granted {
+        guard try await wearables.requestPermission(permission) == .granted else {
+          throw CopilotError(message:"Glasses \(permission) permission denied in Meta AI.")
+        }
+      }
+      try Task.checkCancellation()
+    }
+    let deviceSession = try await connect(withDisplay:withDisplay)
+    let revision = sessionRevision
+    let stopped = await captureStopTask?.value ?? true
+    try Task.checkCancellation()
+    guard stopped else { throw CopilotError(message:"Previous camera is still stopping. Close the glasses controls and reconnect.") }
+    captureStopTask = nil
+    guard sessionRevision == revision else { throw CancellationError() }
+    stopping = false
+    cameraRevision += 1
+    let captureRevision = cameraRevision
+    lastPreviewAt = 0; framesReceived = 0; lastError = nil; updateRequired = false
+    preview = nil; previewAtMs = 0; cameraHasStreamed = false
     // Display uses DAT 1.0 ambient PCM alongside low-rate video. Regular glasses
     // retain their existing HFP path: add camera, settle HFP, then start video.
     let configuration = withDisplay
@@ -203,27 +253,27 @@ final class GlassesController {
     self.camera = camera
     let clock = GlassesStreamClock()
     streamClock = clock
-    tokens.append(camera.stream.statePublisher.listen { [weak self] state in
+    cameraTokens.append(camera.stream.statePublisher.listen { [weak self] state in
       Task { @MainActor in
-        guard let self, self.sessionRevision == revision else { return }
+        guard let self, self.sessionRevision == revision, self.cameraRevision == captureRevision else { return }
         self.cameraState = String(describing:state)
         if state == .streaming { self.cameraHasStreamed = true }
         if (state == .paused || state == .stopped) && self.cameraHasStreamed && !self.stopping { self.fail("Camera \(state); cues paused. Resume creates a fresh supported stream.") }
       }
     })
-    tokens.append(camera.stream.errorPublisher.listen { [weak self] error in
-      Task { @MainActor in guard self?.sessionRevision == revision else { return }; self?.fail(error.localizedDescription) }
+    cameraTokens.append(camera.stream.errorPublisher.listen { [weak self] error in
+      Task { @MainActor in guard self?.sessionRevision == revision, self?.cameraRevision == captureRevision else { return }; self?.fail(error.localizedDescription) }
     })
     let decoder = VideoFrameDecoder()
     let frameGate = self.frameGate
-    tokens.append(camera.stream.videoFramePublisher.listen { [weak self] frame in
+    cameraTokens.append(camera.stream.videoFramePublisher.listen { [weak self] frame in
       // Decode every HEVC dependency but publish at most 2 Hz to the UI/sampler.
       guard let image = decoder.decode(frame.sampleBuffer),
             let captured = clock.timestamp(for:CMSampleBufferGetPresentationTimeStamp(frame.sampleBuffer), audio:false),
             frameGate.begin() else { return }
       Task { @MainActor in
         defer { frameGate.finish() }
-        guard let self, self.sessionRevision == revision, !self.stopping else { return }
+        guard let self, self.sessionRevision == revision, self.cameraRevision == captureRevision, !self.stopping else { return }
         self.framesReceived += 1
         guard captured - self.lastPreviewAt >= 500 else { return }
         self.lastPreviewAt = captured
@@ -241,29 +291,15 @@ final class GlassesController {
         microphone.receiveStreamPCM(buffer, at:captured)
       }
     }
-    if withDisplay {
-    let cap = try deviceSession.addDisplay()
-    display = cap
-    tokens.append(cap.statePublisher.listen { [weak self] state in
-      Task { @MainActor in
-        guard let self, self.sessionRevision == revision else { return }
-        self.displayState = String(describing:state)
-        self.displayReady = state == .started
-        if state == .started { self.displayHasStarted = true }
-        if state == .stopped && self.displayHasStarted && !self.stopping { self.fail("Display control ended; recording and cues paused.") }
-      }
-    })
-    cap.start()
-    } else { displayState = "Phone output (no glasses display)" }
     if withDisplay { try await microphone.startStreamPCM() }
     else { try await microphone.start(uid:audioUID) }
     try Task.checkCancellation()
-    guard sessionRevision == revision else { throw CancellationError() }
+    guard sessionRevision == revision, cameraRevision == captureRevision else { throw CancellationError() }
     camera.stream.start()
     let streamDeadline = Date().addingTimeInterval(12)
     while !clock.hasVideo || (withDisplay && (!displayReady || !clock.hasAudio)) || camera.stream.state != .streaming {
       try await Task.sleep(for:.milliseconds(100))
-      guard Date() < streamDeadline, sessionRevision == revision else {
+      guard Date() < streamDeadline, sessionRevision == revision, cameraRevision == captureRevision else {
         throw CopilotError(message:withDisplay
           ? "Decoded camera frames, ambient audio or display not ready. Check DAT 1.0 audio permission and development/beta access. No conversation data has been sent."
           : "No decoded camera frames received. Check the glasses connection. No conversation data has been sent.")
@@ -271,34 +307,49 @@ final class GlassesController {
     }
   }
 
-  func pauseCapture() {
+  // Cleanup runs to completion even if the user cancels a pending start.
+  static func waitForStop(timeout: Duration = .seconds(10), stopped: @MainActor () -> Bool) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by:timeout)
+    while !stopped() {
+      guard ContinuousClock.now < deadline else { return false }
+      do { try await Task.sleep(for:.milliseconds(50)) } catch { return false }
+    }
+    return true
+  }
+
+  func pauseCapture(ready: Bool = false, renderControls: Bool = true) {
     stopping = true
+    cameraRevision += 1
     streamClock?.stop()
     let previousStop = captureStopTask
-    let camera = self.camera, audioToken = self.audioToken
-    self.camera = nil; self.audioToken = nil
+    let camera = self.camera, audioToken = self.audioToken, oldTokens = cameraTokens
+    self.camera = nil; self.audioToken = nil; cameraTokens = []
     captureStopTask = Task {
-      await previousStop?.value
+      let previousStopped = await previousStop?.value ?? true
       await audioToken?.cancel()
       camera?.stop()
+      for token in oldTokens { await token.cancel() }
+      let cameraStopped = await Self.waitForStop { camera == nil || camera?.state == .stopped }
+      return previousStopped && cameraStopped
     }
-    preview = nil; previewAtMs = 0
-    show(nil, paused:true)
+    preview = nil; previewAtMs = 0; cameraState = "Stopped"
+    if renderControls { show(nil, paused:true, ready:ready) }
   }
 
   func stop() async {
     stopping = true
     sessionRevision += 1
-    streamClock?.stop()
-    await captureStopTask?.value
-    captureStopTask = nil
-    await audioToken?.cancel(); audioToken = nil
-    camera?.stop(); camera = nil
-    preview = nil; previewAtMs = 0
+    pauseCapture(renderControls:false)
     clear()
+    _ = await captureStopTask?.value
+    captureStopTask = nil
     await operation?.value
-    camera?.stop(); display?.stop(); session?.stop()
-    camera = nil; display = nil; session = nil
+    display?.stop()
+    let oldSession = session
+    oldSession?.stop()
+    let stopped = await Self.waitForStop { oldSession == nil || oldSession?.state == .stopped }
+    camera = nil; display = nil
+    if stopped { session = nil }
     for token in tokens { await token.cancel() }
     tokens.removeAll()
     streamClock = nil

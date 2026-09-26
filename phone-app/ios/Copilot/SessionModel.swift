@@ -7,6 +7,8 @@ final class SessionModel {
   enum Phase: String { case stopped = "Stopped", starting = "Starting", active = "Listening", paused = "Paused" }
   var phase: Phase = .stopped
   var consent = false
+  var glassesControlsReady = false
+  var openingGlassesControls = false
   var captureMode: CaptureMode = .phone
   var simulate: Bool {
     get { captureMode == .simulated }
@@ -113,7 +115,8 @@ final class SessionModel {
     glasses.onFailure = { [weak self] message in self?.pause(message) }
     glasses.onHelp = { [weak self] in self?.requestCue(manual:true) }
     glasses.onPause = { [weak self] in self?.pause() }
-    glasses.onStop = { [weak self] in self?.stop() }
+    glasses.onStop = { [weak self] in self?.stopStreaming() }
+    glasses.onDisconnect = { [weak self] in self?.stop() }
     glasses.onDismiss = { [weak self] in self?.dismiss() }
     glasses.onResume = { [weak self] in self?.start() }
   }
@@ -168,33 +171,51 @@ final class SessionModel {
     do { audioPorts = try microphone.availablePorts(); notice = audioPorts.isEmpty ? "No Bluetooth HFP inputs found. Pair glasses in iOS / Meta AI, then refresh." : "Select the glasses microphone by its Bluetooth name." }
     catch { notice = error.localizedDescription }
   }
-  func start() {
-    guard canStart else { return }
+  func openGlassesControls() {
+    guard captureMode.hasGlassesDisplay else { return }
+    start(displayOnly:true)
+  }
+  func start(displayOnly: Bool = false) {
+    guard canStart, !displayOnly || captureMode.hasGlassesDisplay else { return }
+    let previousStart = startTask
+    openingGlassesControls = displayOnly
+    glassesControlsReady = false
     epoch += 1
     let thisEpoch = epoch
     phase = .starting
     captureStartedAt = nowMs()
     lastAnalysisAt = 0; nextAnalysisAt = 0
     invalidateCue()
-    notice = simulate ? "SIMULATED INPUT. No camera or microphone recording." : captureMode == .phone ? "Starting the selected iPhone inputs…" : captureMode.hasGlassesDisplay ? "Opening glasses camera and ambient microphone permissions…" : "Opening glasses permissions, then selecting HFP microphone…"
+    notice = displayOnly ? "Opening controls on glasses. Camera and microphone stay off." : simulate ? "SIMULATED INPUT. No camera or microphone recording." : captureMode == .phone ? "Starting the selected iPhone inputs…" : captureMode.hasGlassesDisplay ? "Opening glasses camera and ambient microphone permissions…" : "Opening glasses permissions, then selecting HFP microphone…"
     startTask = Task { [weak self] in
       guard let self else { return }
+      await previousStart?.value
       await transportTask?.value
+      guard epoch == thisEpoch, !Task.isCancelled else { return }
       if !simulate {
-        if !connectionTestOnly {
+        if !connectionTestOnly && !displayOnly {
         do {
           let health = try await client.health()
           modelMode = health.modelMode ?? "Unknown"
           guard modelMode == "live" else { throw CopilotError(message:"Real transcription needs a live Muse proxy. Configure your server, or enable Capture test only for a no-upload hardware check.") }
         } catch {
-          if epoch == thisEpoch, !Task.isCancelled { phase = .paused; notice = error.localizedDescription }
+          if epoch == thisEpoch, !Task.isCancelled { phase = .paused; openingGlassesControls = false; notice = error.localizedDescription }
           return
         }
         }
         guard epoch == thisEpoch, !Task.isCancelled else { return }
-        if captureMode.needsGlasses { await glasses.stop(); configureGlassesCallbacks() }
+        if captureMode.needsGlasses { configureGlassesCallbacks() }
         guard epoch == thisEpoch, !Task.isCancelled else { return }
         do {
+          if displayOnly {
+            try await glasses.connectDisplayOnly()
+            guard epoch == thisEpoch, !Task.isCancelled else { return }
+            phase = .paused; openingGlassesControls = false; glassesControlsReady = true
+            notice = "Controls ready on glasses. Select Start streaming with your wristband. Camera and microphone are off."
+            glasses.show(nil, paused:true, ready:true)
+            return
+          }
+          if captureMode.hasGlassesDisplay { glasses.show(nil, starting:true) }
           if captureMode == .phone {
             try await microphone.startPhone()
             guard epoch == thisEpoch, !Task.isCancelled else { microphone.stop(); return }
@@ -209,13 +230,14 @@ final class SessionModel {
           microphone.stop(); phoneCamera.stop()
           if captureMode.needsGlasses { await glasses.stop() }
           guard epoch == thisEpoch else { return }
-          phase = .paused
+          phase = .paused; openingGlassesControls = false
           if needsGlassesUpdate { glasses.report(error) }
           notice = needsGlassesUpdate ? GlassesController.updateInstructions : error.localizedDescription
           return
         }
       }
       guard epoch == thisEpoch, !Task.isCancelled else { return }
+      openingGlassesControls = false
       phase = .active
       captureActiveAtMs = nowMs()
       notice = simulate ? "SIMULATED SESSION — choose a scene or add a demo line below." : connectionTestOnly ? "CAPTURE TEST — selected inputs active; no uploads or transcription." : analyzesSurroundings ? "Analyzing started. Camera and microphone are active; Muse checks samples periodically. Pause or Stop any time." : captureMode == .phone ? "iPhone microphone active. Captions appear after each speech chunk; notes stay separate." : "Recording selected glasses HFP microphone. Everyone can ask you to stop."
@@ -242,6 +264,7 @@ final class SessionModel {
     guard phase == .active || phase == .starting else { return }
     epoch += 1
     phase = .paused
+    openingGlassesControls = false; glassesControlsReady = false
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
@@ -250,9 +273,19 @@ final class SessionModel {
     if captureMode.needsGlasses { glasses.pauseCapture() }
     notice = reason
   }
+  // Stop capture and clear session context, retaining the consented control connection.
+  func stopStreaming() {
+    guard captureMode.hasGlassesDisplay, consent, phase != .stopped else { return }
+    pause()
+    contextText = ""; recentCues = []; lastCueAt = 0
+    glassesControlsReady = true
+    glasses.pauseCapture(ready:true)
+    notice = "Streaming stopped and session context cleared. Select Start streaming on glasses, or Stop on the phone to disconnect."
+  }
   func stop() {
     epoch += 1
     phase = .stopped
+    openingGlassesControls = false; glassesControlsReady = false
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil

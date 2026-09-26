@@ -6,6 +6,63 @@ import MWDATCore
 
 @MainActor
 final class SessionTests: XCTestCase {
+  func testStoppedStreamingKeepsControlsAndConsentButClearsContext() async throws {
+    let model = try await activeModel()
+    model.contextText = "Private session note"
+    model.addSimulationLine("Some private speech")
+    model.manualDisplayTest()
+    model.captureMode = .displayGlasses
+    model.stopStreaming()
+    XCTAssertEqual(model.phase,.paused)
+    XCTAssertTrue(model.glassesControlsReady)
+    XCTAssertTrue(model.canStart)
+    XCTAssertTrue(model.consent)
+    XCTAssertNil(model.cue)
+    XCTAssertNil(model.latestFrame)
+    XCTAssertNil(model.latestAudioContext)
+    XCTAssertTrue(model.transcript.isEmpty)
+    XCTAssertTrue(model.contextText.isEmpty)
+    model.stop()
+    XCTAssertFalse(model.consent)
+    XCTAssertFalse(model.glassesControlsReady)
+  }
+
+  func testOldDisplayButtonsCannotControlNewScreen() {
+    let controller = GlassesController()
+    var starts = 0
+    var stops = 0
+    controller.onResume = { starts += 1 }
+    controller.onStop = { stops += 1 }
+    let oldRevision = controller.displayRevision
+    controller.show(nil,paused:true,ready:true)
+    controller.perform(.start,revision:oldRevision)
+    controller.perform(.stop,revision:oldRevision)
+    XCTAssertEqual(starts,0)
+    XCTAssertEqual(stops,0)
+    controller.perform(.start,revision:controller.displayRevision)
+    XCTAssertEqual(starts,1)
+  }
+
+  func testCameraStopWaitsForCompletionAndHasBoundedFailure() async {
+    var stopped = false
+    let finish = Task { @MainActor in
+      try? await Task.sleep(for:.milliseconds(80))
+      stopped = true
+    }
+    let completed = await GlassesController.waitForStop(timeout:.seconds(1)) { stopped }
+    XCTAssertTrue(completed)
+    await finish.value
+    let timedOut = await GlassesController.waitForStop(timeout:.milliseconds(60)) { false }
+    XCTAssertFalse(timedOut)
+  }
+
+  func testOpeningGlassesControlsRequiresConsent() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    model.openGlassesControls()
+    XCTAssertEqual(model.phase,.stopped)
+    XCTAssertFalse(model.openingGlassesControls)
+  }
   func testGlassesAppUpdateErrorPreservesActionableRecovery() {
     let controller = GlassesController()
     var failure: String?

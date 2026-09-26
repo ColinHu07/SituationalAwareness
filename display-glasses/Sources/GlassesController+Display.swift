@@ -6,7 +6,7 @@ import MWDATDisplay
 extension GlassesController {
   // Serialize all display writes: a dismissal/stop queued behind an in-flight send always wins.
   func show(_ cue: String?, caption: String? = nil, note: String? = nil, paused: Bool = false,
-            status: String? = nil, captionsEnabled: Bool = false) {
+            status: String? = nil, captionsEnabled: Bool = false, ready: Bool = false, starting: Bool = false) {
     displayRevision += 1
     let revision = displayRevision
     let previous = operation
@@ -17,8 +17,10 @@ extension GlassesController {
         try await display.clearDisplay()
         guard self.displayRevision == revision else { return }
         let content = FlexBox(direction:.column, spacing:12) {
-          if paused {
-            Text("Analysis paused", style:.body)
+          if starting {
+            Text("Starting stream…", style:.body)
+          } else if paused {
+            Text(ready ? "Ready to stream" : "Streaming paused", style:.body)
             Text("Camera and microphone are off.", style:.meta, color:.secondary)
           } else {
             if let cue {
@@ -40,19 +42,45 @@ extension GlassesController {
             }
           }
           ButtonGroup {
-            if paused {
-              Button(label:"Resume analysis", onClick:{ [weak self] in Task { @MainActor in self?.onResume?() } })
+            if starting {
+              Button(label:"Stop streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.stop, revision:revision) } })
+                .actionRole(.primary)
+            } else if paused {
+              Button(label:ready ? "Start streaming" : "Resume streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.start, revision:revision) } })
+                .actionRole(.primary)
+              if !ready {
+                Button(label:"Stop streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.stop, revision:revision) } })
+              }
+              Button(label:"Close controls", onClick:{ [weak self] in Task { @MainActor in self?.perform(.close, revision:revision) } })
             } else {
-              if cue != nil { Button(label:"Dismiss", onClick:{ [weak self] in Task { @MainActor in self?.onDismiss?() } }) }
-              Button(label:"Analyze now", onClick:{ [weak self] in Task { @MainActor in self?.onHelp?() } })
-              Button(label:"Pause", onClick:{ [weak self] in Task { @MainActor in self?.onPause?() } })
+              Button(label:"Pause streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.pause, revision:revision) } })
+                .actionRole(.primary)
+              Button(label:"Analyze now", onClick:{ [weak self] in Task { @MainActor in self?.perform(.help, revision:revision) } })
+              if cue != nil { Button(label:"Dismiss", onClick:{ [weak self] in Task { @MainActor in self?.perform(.dismiss, revision:revision) } }) }
+              Button(label:"Stop streaming", onClick:{ [weak self] in Task { @MainActor in self?.perform(.stop, revision:revision) } })
             }
-            Button(label:"Stop", onClick:{ [weak self] in Task { @MainActor in self?.onStop?() } })
           }
         }
         try await display.send(content)
         if self.displayRevision != revision { try await display.clearDisplay() }
-      } catch { self.fail("Display write failed: \(error.localizedDescription)") }
+      } catch {
+        guard self.displayRevision == revision else { return }
+        self.fail("Display write failed: \(error.localizedDescription)")
+      }
+    }
+  }
+
+  enum ControlAction { case start, pause, stop, close, help, dismiss }
+  func perform(_ action: ControlAction, revision: Int) {
+    // A click queued by an old screen must never act on a new capture session.
+    guard displayRevision == revision else { return }
+    switch action {
+    case .start: onResume?()
+    case .pause: onPause?()
+    case .stop: onStop?()
+    case .close: onDisconnect?()
+    case .help: onHelp?()
+    case .dismiss: onDismiss?()
     }
   }
 

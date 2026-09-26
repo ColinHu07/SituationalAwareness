@@ -22,6 +22,24 @@ For this development build, the installer can supply `ASIDE_PROXY_URL` and `ASID
 
 ## Test the real inputs and outputs
 
+### Start from the glasses with Meta Neural Band
+
+In **Glasses → With display**, select the desired no-upload/live mode, confirm consent, then tap **Open controls on glasses** on the phone. This connects only the display: no camera, microphone, transcription, or analysis starts yet.
+
+The lens shows **Start streaming** as the default focused action. Tap index finger against thumb to select; swipe your thumb along your index finger to move between controls. See the [official gesture guide](https://www.ray-ban.com/usa/c/frequently-asked-questions-meta-ray-ban-display). First-time camera/microphone permissions may still require the phone.
+
+- **Start streaming / Resume streaming:** starts camera and microphone, and Muse checks unless no-upload mode was selected.
+- **Pause streaming:** stops capture and uploads while retaining the display controls and user notes.
+- **Stop streaming:** stops capture, clears the session's notes and context, and returns to Start on the lens. The existing consent remains in effect for this open control session.
+- **Analyze now / Dismiss:** requests a cue or clears it while streaming.
+- **Close controls:** disconnects the display and clears consent. The phone's **Stop** also fully disconnects.
+
+The app reuses the device/display connection for Start and Resume and waits for the old camera to finish stopping before attaching a new camera. Old-screen button events and old-camera callbacks cannot control the new stream. Keep the phone app open for the first wristband test; background operation still needs physical validation.
+
+Wristband-controls update validation: 31 native tests passed, the signed iPhone build passed, and the update was installed on the connected iPhone. The new physical wristband-to-button path still needs the wearer to confirm Start, Pause, Resume, Stop streaming, and Close controls.
+
+### Verify capture and cues
+
 1. Pair the Display glasses with this iPhone in Meta AI, enable developer mode, and ensure Camera and Audio Streaming access is available for the app. Ambient PCM is a DAT 1.0 development/beta capability. In this app, select **Glasses → With display**. The **Glasses connection** section is directly below those source controls, above Start. Tap **Pair / register with Meta AI** and complete its registration if needed.
 2. For an initial hardware check, enable **Connection test only (no uploads)**, confirm participant consent, and **Start analyzing**.
 3. The same app opens **Glasses live capture**. Confirm a moving glasses-camera preview and green camera/audio activity indicators. Startup now waits for a connected, compatible device and an actually decoded video frame, not just a stream-state label. Audio status uses received samples, not the configured sample rate.
