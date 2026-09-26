@@ -164,7 +164,8 @@ final class ConversationMicrophone: @unchecked Sendable {
         let silenceAfterSpeech = state.samples.count >= 16000 && endedAt - state.lastVoice > 450
         if state.samples.count == 96000 || (silenceAfterSpeech && (!state.streamPCM || hasEnergy)) {
           if state.streamPCM || hasEnergy {
-            chunks.append(AudioChunk(audioBase64:Self.wav(state.samples).base64EncodedString(), startedAtMs:state.chunkStart, endedAtMs:state.streamPCM ? endedAt : state.lastVoice))
+            chunks.append(AudioChunk(audioBase64:Self.wav(state.samples).base64EncodedString(), startedAtMs:state.chunkStart,
+                                     endedAtMs:state.streamPCM ? endedAt : state.lastVoice, speechDbFS:Self.speechLevel(state.samples)))
           }
           state.samples.removeAll(keepingCapacity:true)
         }
@@ -190,6 +191,21 @@ final class ConversationMicrophone: @unchecked Sendable {
     }
   }
 
+  /// Loudness of the voiced 20 ms frames in dBFS (-120 when none). The nearest talker, usually the
+  /// wearer, is loudest at the microphone; this is a heuristic, not speaker identification.
+  static func speechLevel(_ samples: [Int16]) -> Double {
+    var voiced = 0.0, frames = 0
+    var index = 0
+    while index + 320 <= samples.count {
+      var energy = 0.0
+      for sample in samples[index..<(index + 320)] { let value = Double(sample) / 32768; energy += value * value }
+      let rms = (energy / 320).squareRoot()
+      if rms > 0.012 { voiced += rms * rms; frames += 1 }
+      index += 320
+    }
+    guard frames > 0 else { return -120 }
+    return max(-120, 10 * log10(voiced / Double(frames)))
+  }
   static func wav(_ samples: [Int16]) -> Data {
     var data = Data()
     func text(_ value: String) { data.append(Data(value.utf8)) }

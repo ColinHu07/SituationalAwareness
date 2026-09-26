@@ -159,3 +159,13 @@ See [dated research and sources](docs/RESEARCH.md), [architecture and alternativ
 | `docs/` | Research, architecture, acceptance script and recorded measurements |
 
 The HEVC decoder is adapted from Meta's official sample; attribution and license are retained under `phone-app/ios/ThirdParty/`.
+
+## September 26: persistent cues and tone coaching
+
+William's `daba7fe` update is integrated with the existing phone and glasses flows. Cues persist until replaced or dismissed, with a five-second minimum dwell and a ten-second quiet period after dismissal. Checks run every three seconds near recent speech, five seconds otherwise, four seconds in scene-only Display mode, or fifteen seconds in reduced-power mode; requests remain serialized. The phone keeps up to eight short model summaries as session memory and sends the current cue so unchanged advice need not be redrawn. Native cue confidence eligibility is now 0.6. These settings supersede older timing descriptions elsewhere in this repository.
+
+**Coach my wording** adds a separate recovery suggestion for potentially blunt speech. **That was me** calibrates a microphone-level heuristic; it is separate from the provider's speaker labels in multi-speaker captions. The backend adds `/api/tone` and allows up to 120 requests per minute.
+
+The integration preserves realtime multi-speaker phone captions and timing diagnostics, the camera preview frame-rate fix, glasses scene/conversation switching, wristband controls, no-upload capture testing, and conversation learning when glasses streaming stops. Physical hardware and live-provider behavior still require validation.
+
+Merge validation: all 124 Node tests passed. Native simulator testing was attempted twice but blocked by local disk exhaustion while Xcode wrote module/index caches (`No space left on device`); native test results are not confirmed for this merge.

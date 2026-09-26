@@ -13,8 +13,9 @@ export const cueSchema = {
     type: { type: 'string', enum: ['clarify', 'follow_up', 'reminder', 'respond', 'abstain'] },
     should_display: { type: 'boolean' },
     scene: { type: 'string' },
+    summary: { type: 'string' },
   },
-  required: ['cue', 'reason', 'confidence', 'type', 'should_display', 'scene'],
+  required: ['cue', 'reason', 'confidence', 'type', 'should_display', 'scene', 'summary'],
 };
 
 const stringList = { type: 'array', items: { type: 'string' } };
@@ -46,6 +47,29 @@ export function validateLearn(value, input) {
   return { people, groups };
 }
 
+export const toneSchema = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    flag: { type: 'boolean' },
+    severity: { type: 'string', enum: ['none', 'mild', 'strong'] },
+    issue: { type: 'string' }, recovery: { type: 'string' }, rephrase: { type: 'string' },
+  },
+  required: ['flag', 'severity', 'issue', 'recovery', 'rephrase'],
+};
+const NO_TONE_ISSUE = Object.freeze({ flag: false, severity: 'none', issue: '', recovery: '', rephrase: '' });
+
+/** Coaching on how the wearer's own line may land. Too-long advice is dropped rather than shown cut off. */
+export function validateTone(value) {
+  if (!value || typeof value !== 'object' || typeof value.flag !== 'boolean' ||
+      !toneSchema.properties.severity.enum.includes(value.severity) ||
+      ['issue', 'recovery', 'rephrase'].some(k => typeof value[k] !== 'string')) throw new Error('Invalid structured tone response');
+  const fits = (s, words, chars) => s.trim() && s.trim().length <= chars && s.trim().split(/\s+/).length <= words;
+  if (!value.flag || value.severity === 'none' || !fits(value.recovery, 20, 140)) return { ...NO_TONE_ISSUE };
+  if (/\b(autis\w*|diagnos\w*|disorder)\b/i.test(value.recovery + value.rephrase + value.issue)) return { ...NO_TONE_ISSUE };
+  return { flag: true, severity: value.severity, issue: value.issue.trim().slice(0, 80),
+    recovery: value.recovery.trim(), rephrase: fits(value.rephrase, 20, 140) ? value.rephrase.trim() : '' };
+}
+
 export function abstain(reason = 'Insufficient concrete conversational evidence.', scene = '') {
   return { cue: '', reason, confidence: 0, type: 'abstain', should_display: false, scene };
 }
@@ -57,9 +81,11 @@ export function normalizeScene(value) {
 
 export function validateCue(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      // scene is optional for fixtures and older providers.
-      ![cueSchema.required, cueSchema.required.filter(k => k !== 'scene')].some(keys => Object.keys(value).sort().join() === [...keys].sort().join()) ||
+      // scene and summary are optional for fixtures and older providers.
+      !Object.keys(value).every(k => cueSchema.required.includes(k)) ||
+      !cueSchema.required.filter(k => !['scene', 'summary'].includes(k)).every(k => k in value) ||
       (value.scene !== undefined && (typeof value.scene !== 'string' || value.scene.length > 60)) ||
+      (value.summary !== undefined && typeof value.summary !== 'string') ||
       typeof value.cue !== 'string' || typeof value.reason !== 'string' ||
       typeof value.should_display !== 'boolean' ||
       !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1 ||
@@ -68,13 +94,17 @@ export function validateCue(value) {
     throw new Error('Invalid structured cue response');
   }
   const scene = normalizeScene(value.scene);
-  if (!value.should_display) return abstain(value.reason, scene);
+  // A one-sentence memory of this moment, sent back on later checks. Kept even when abstaining.
+  const summary = typeof value.summary === 'string' ? value.summary.trim().slice(0, 200) : '';
+  const withSummary = result => summary ? { ...result, summary } : result;
+  if (!value.should_display) return withSummary(abstain(value.reason, scene));
   if (!value.cue.trim() || value.type === 'abstain') throw new Error('Inconsistent cue response');
   // This guard is additional defense, not a substitute for model evaluation.
   if (/\b(autis\w*|alzheimer\w*|diagnos\w*|depress\w*|angry|anxious|lying|attracted|emotion|facial expression)\b/i.test(value.cue)) {
-    return abstain('Unsupported personal inference blocked.', scene);
+    return withSummary(abstain('Unsupported personal inference blocked.', scene));
   }
-  return { ...value, cue: value.cue.trim(), scene };
+  const { summary: _, ...rest } = value;
+  return withSummary({ ...rest, cue: value.cue.trim(), scene });
 }
 
 export function boundedTranscript(items, now = Date.now()) {
