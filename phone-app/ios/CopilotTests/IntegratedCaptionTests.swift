@@ -15,12 +15,14 @@ final class IntegratedCaptionTests: XCTestCase {
     relay.onEvent?(.init(type:"transcript.partial",turnId:2,speaker:"P2",text:"Hi"))
     relay.onEvent?(.init(type:"transcript.partial",turnId:2,speaker:"P2",text:"Hi there"))
     XCTAssertEqual(model.captionText,"P1: Hello\nP2: Hi there")
+    XCTAssertEqual(model.recentCueTranscript().count,2,"Cue context must include both unfinished speaker turns")
     XCTAssertTrue(model.transcript.isEmpty,"Partial captions must show before final transcription")
     model.transcribe(.init(audioBase64:"unused",startedAtMs:nowMs()-1000,endedAtMs:nowMs()))
     XCTAssertFalse(model.isTranscribing,"Healthy realtime must not send duplicate chunk requests")
     relay.onEvent?(.init(type:"transcript.final",turnId:1,speaker:"P1",text:"Hello"))
     relay.onEvent?(.init(type:"transcript.final",turnId:1,speaker:"P1",text:"Hello"))
     XCTAssertEqual(model.transcript.count,1)
+    XCTAssertEqual(model.recentCueTranscript().count,2,"Finalization must not duplicate partial context")
     XCTAssertEqual(model.transcript.first?.speaker,"P1")
     XCTAssertTrue(model.captionText?.contains("P2: Hi there") == true)
     let lateEvent = relay.onEvent
@@ -53,9 +55,10 @@ final class IntegratedCaptionTests: XCTestCase {
     XCTAssertEqual(model.speechMode,"Not started")
   }
 
-  func testGlassesKeepBothSpeakerLabels() {
+  func testGlassesOmitBothSpeakerCaptions() {
     let screen = GlassesScreen(cue:"A cue",caption:"P1: Hello\nP2: Hi there",note:nil,paused:false,captionsEnabled:true,ready:false,starting:false,testOnly:false)
-    XCTAssertEqual(screen.detail,"P1: Hello\nP2: Hi there")
+    XCTAssertNil(screen.detail)
+    XCTAssertEqual(screen.cue,"A cue")
   }
 }
 

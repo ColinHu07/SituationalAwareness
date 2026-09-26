@@ -1,8 +1,7 @@
 import Foundation
 import MWDATDisplay
 
-// Only visible content participates in equality. Enabled captions update even
-// while a cue is visible; hidden captions do not redraw the lens.
+// Only visible content participates in equality. Speech updates never redraw the lens.
 struct GlassesScreen: Equatable, Sendable {
   enum Mode: Sendable { case ready, paused, starting, streaming }
   let mode: Mode
@@ -20,26 +19,8 @@ struct GlassesScreen: Equatable, Sendable {
     self.status = mode == .paused ? status.map { String($0.prefix(80)) } : nil
     self.feedback = mode == .streaming ? feedback.map { String($0.prefix(64)) } : nil
     self.cue = mode == .streaming ? cue.map { String($0.prefix(90)) } : nil
-    if mode == .streaming && captionsEnabled {
-      detail = caption.flatMap { text in
-        let lines = text.split(separator:"\n")
-        if lines.count > 1 && lines.allSatisfy({ line in
-          let label = line.split(separator:":", maxSplits:1).first ?? ""
-          return label == "Speaker…" || (label.first == "P" && Int(label.dropFirst()) != nil)
-        }) {
-          return lines.prefix(3).map { line in
-            let parts = line.split(separator:":", maxSplits:1)
-            guard parts.count == 2 else { return String(line.suffix(60)) }
-            return "\(parts[0]): \(parts[1].trimmingCharacters(in:.whitespaces).suffix(60))"
-          }.joined(separator:"\n")
-        }
-        let text = text.split(whereSeparator: { $0.isWhitespace }).joined(separator:" ")
-        guard !text.isEmpty else { return nil }
-        return "Heard: " + (text.count > 60 ? "…" : "") + String(text.suffix(60))
-      }
-    } else if mode == .streaming && self.cue == nil {
-      detail = note.map { String($0.prefix(60)) }
-    } else { detail = nil }
+    // Captions stay on the phone. Keep the arguments for older callers, but never render them.
+    detail = nil
   }
   var title: String {
     switch mode {
@@ -95,7 +76,7 @@ extension GlassesController {
             Text("Cue: " + cue, style:screen.detail == nil ? .body : .meta)
           }
           if screen.cue == nil && screen.detail == nil {
-            Text(screen.status ?? (screen.mode == .ready ? "Select Start to stream." : screen.mode == .paused ? "Select Resume when ready." : screen.mode == .starting ? "Connecting camera and audio." : screen.sceneOnly ? "Watching the scene automatically." : "Say a sentence, then Analyze."), style:.body)
+            Text(screen.status ?? (screen.mode == .ready ? "Select Start to stream." : screen.mode == .paused ? "Select Resume when ready." : screen.mode == .starting ? "Connecting camera and audio." : screen.sceneOnly ? "Watching the scene automatically." : "Listening for context automatically."), style:.body)
           }
           // At most three short labels; never append Dismiss and widen the row.
           ButtonGroup {

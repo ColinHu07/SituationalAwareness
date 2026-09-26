@@ -32,7 +32,7 @@ for (const [label, change] of [
   ['unknown audio source', b => { b.audioContext.source = 'video'; return b; }],
   ['future audio energy', b => { b.audioContext.capturedAtMs = NOW + 1001; return b; }],
   ['invalid audio timestamp', b => { b.audioContext.capturedAtMs = 'now'; return b; }],
-  ['overlong energy window', b => { b.audioContext.windowMs = 6001; return b; }],
+  ['overlong energy window', b => { b.audioContext.windowMs = 10001; return b; }],
   ['empty energy window', b => { b.audioContext.windowMs = 0; return b; }],
   ['activity ratio below zero', b => { b.audioContext.activityRatio = -0.1; return b; }],
   ['activity ratio above one', b => { b.audioContext.activityRatio = 1.1; return b; }],

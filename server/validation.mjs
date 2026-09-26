@@ -39,7 +39,7 @@ export function validateInput(body, now = Date.now()) {
     require(audio && typeof audio === 'object' && !Array.isArray(audio) &&
       Object.keys(audio).sort().join() === ['activityRatio', 'capturedAtMs', 'rmsDbFS', 'source', 'windowMs'].sort().join(), 'Invalid audioContext');
     require(Number.isFinite(audio.capturedAtMs) && audio.capturedAtMs <= now + 1000, 'Invalid audio context timestamp');
-    require(Number.isFinite(audio.windowMs) && audio.windowMs > 0 && audio.windowMs <= 6000 &&
+    require(Number.isFinite(audio.windowMs) && audio.windowMs > 0 && audio.windowMs <= 10000 &&
       Number.isFinite(audio.activityRatio) && audio.activityRatio >= 0 && audio.activityRatio <= 1 &&
       Number.isFinite(audio.rmsDbFS) && audio.rmsDbFS >= -120 && audio.rmsDbFS <= 0 &&
       ['glasses_hfp', 'glasses_pcm', 'phone'].includes(audio.source), 'Invalid audio context statistics');

@@ -135,6 +135,10 @@ final class PeopleStore {
   func groupNames(for person: Person) -> [String] {
     person.groupIDs.compactMap { id in groups.first { $0.id == id }?.name }
   }
+  func addFace(_ sample: FaceSample, to id: UUID) {
+    guard let index = people.firstIndex(where: { $0.id == id }) else { return }
+    people[index].faces = FaceRecognizer.trimmed(people[index].faces + [sample])
+  }
   func markSeen(_ ids: Set<UUID>) {
     let now = Date()
     for index in people.indices where ids.contains(people[index].id) { people[index].lastSeen = now }
@@ -185,7 +189,7 @@ final class PeopleStore {
         guard let index = people.firstIndex(where: { $0.id == id }) else { continue }
         switch item.field {
         case .face:
-          if let face = item.face { people[index].faces = Array((people[index].faces + [face]).suffix(8)) }
+          if let face = item.face { people[index].faces = FaceRecognizer.trimmed(people[index].faces + [face]) }
         case .fact, .slang, .style: people[index].notes = Self.merged(people[index].notes, item.value, cap:40)
         case .topic: people[index].topics = Self.merged(people[index].topics, item.value, cap:20)
         case .tag: people[index].tags = Self.merged(people[index].tags, item.value.lowercased(), cap:12)

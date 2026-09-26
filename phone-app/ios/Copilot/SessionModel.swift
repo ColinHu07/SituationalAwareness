@@ -38,10 +38,11 @@ final class SessionModel {
   var contextText = ""
   var sampleInterval = 8.0
   var simulateSurroundings = false
-  var displayCaptions = true
   var analysisFeedback: String?
   var pendingManualAnalysisAt: Double?
   var latestAudioContext: AudioContext?
+  @ObservationIgnored private var ambientWindow = AmbientWindow()
+  @ObservationIgnored private var conversationWindow = ConversationWindow()
   var reducedPower = false
   var nextAnalysisAt: Double = 0
   var transcript: [TranscriptEntry] = []
@@ -103,6 +104,21 @@ final class SessionModel {
   /// In-memory face seen while a just-introduced person had no enrolled face. Proposed at Stop; never saved unless approved.
   struct FaceCandidate { var sample: FaceSample; var embedding: [Float]; var area: CGFloat; var sightings: Int }
   private(set) var faceCandidates: [UUID: FaceCandidate] = [:]
+  /// Save new stills of recognized friends from live video to improve matching.
+  var saveFaceStills = true
+  /// Stills saved during this conversation, shown on the live screen.
+  private(set) var stillsSaved = 0
+  @ObservationIgnored private var lastStillAt: [UUID: Double] = [:]
+  @ObservationIgnored private var stillsThisSession: [UUID: Int] = [:]
+  static let stillIntervalMs = 20_000.0
+  /// An unrecognized face seen during this conversation. Held in memory only; saved only once linked to a name.
+  struct UnknownFace { var embedding: [Float]; var sample: FaceSample; var area: CGFloat; var sightings: Int; var lastSeen: Double }
+  @ObservationIgnored private var unknownFaces: [UnknownFace] = []
+  /// Names said to someone who isn't saved yet, waiting for an unambiguous face.
+  @ObservationIgnored private var pendingNames: [(name: String, at: Double)] = []
+  static let unknownFaceMemoryMs = 60_000.0
+  static let nameFaceWindowMs = 15_000.0
+  static let maxStillsPerSession = 3
   @ObservationIgnored lazy var glasses = GlassesController()
   @ObservationIgnored private let phoneCamera = PhoneCamera()
   @ObservationIgnored private let microphone = ConversationMicrophone()
@@ -158,6 +174,7 @@ final class SessionModel {
     microphone.onContext = { [weak self] context in Task { @MainActor in
       guard let self, self.phase == .active, context.capturedAtMs >= self.captureStartedAt else { return }
       self.latestAudioContext = context
+      self.ambientWindow.append(context)
     } }
     microphone.onFailure = { [weak self] message in Task { @MainActor in self?.captureFailed(message) } }
   }
@@ -208,12 +225,11 @@ final class SessionModel {
     return analyzesSurroundings ? "Watching surroundings" : "Listening for context"
   }
   func analysisInterval(at timestamp: Double = nowMs(), reducedPower: Bool) -> Double {
-    if sceneOnly { return reducedPower ? 15 : 4 }
     return SurroundingsPolicy.analysisInterval(recentSpeech:lastVoiceAt > 0 && timestamp - lastVoiceAt < 30000, reducedPower:reducedPower)
   }
   private func publishDisplay() {
     guard captureMode.hasGlassesDisplay, phase == .active else { return }
-    glasses.show(cue, caption:sceneOnly ? nil : captionText, note:sceneOnly ? nil : savedNote, captionsEnabled:displayCaptions && !sceneOnly, testOnly:connectionTestOnly, feedback:analysisFeedback, sceneOnly:sceneOnly)
+    glasses.show(cue, testOnly:connectionTestOnly, feedback:cue == nil ? analysisFeedback : "Social cue", sceneOnly:sceneOnly)
   }
   private func feedback(_ message: String) {
     analysisFeedback = message
@@ -398,6 +414,7 @@ final class SessionModel {
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeCaptions()
+    ambientWindow = AmbientWindow()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     latestFrame = nil; latestAudioContext = nil; latestSampleAt = 0; transcript.removeAll(); lastVoiceAt = 0; captionText = nil; captionAtMs = 0
@@ -423,6 +440,7 @@ final class SessionModel {
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeCaptions()
+    ambientWindow = AmbientWindow()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
@@ -439,6 +457,7 @@ final class SessionModel {
     learn(from:log)
     // Who's here is per conversation; the next session starts from scratch.
     faceTask?.cancel(); faceTask = nil; faceReadout = nil; faceCandidates = [:]
+    lastStillAt = [:]; stillsThisSession = [:]; stillsSaved = 0; unknownFaces = []; pendingNames = []
     presence.reset(); presentIDs = []
   }
   private func learn(from log: [TranscriptEntry]) {
@@ -493,23 +512,24 @@ final class SessionModel {
     guard recognizeFaces, phase == .active, faceTask == nil, time - lastFaceCheckAt >= 1000 else { return }
     let enrolled = people.people
     if faceGallery.key != FaceGallery.key(for:enrolled) { faceGallery = FaceGallery(people:enrolled) }
-    guard !faceGallery.isEmpty || presentPeople.contains(where: { $0.faces.isEmpty }) else {
-      faceReadout = enrolled.contains(where: { !$0.faces.isEmpty }) ? "Add new face photos in People to enable FaceNet" : "Add face photos in People"
-      return
-    }
+    // Runs even with no saved faces: unknown faces can become new friends when named.
     lastFaceCheckAt = time
     let gallery = faceGallery, thisEpoch = epoch, threshold = Float(faceThreshold)
     faceTask = Task { [weak self] in
-      let result = await Task.detached(priority:.utility) { () -> (matches: [FaceMatch], unmatched: [FaceRecognizer.DetectedFace], error: String?) in
+      let result = await Task.detached(priority:.utility) { () -> (matches: [FaceMatch], unmatched: [FaceRecognizer.DetectedFace], matched: [(FaceMatch, FaceRecognizer.DetectedFace)], error: String?) in
         do {
           let faces = try FaceRecognizer.faces(in:image)
           let matches = FaceRecognizer.match(faces, gallery:gallery, threshold:threshold)
+          // Pair each unambiguous match with its face so confident ones can be saved as stills.
+          let matched = faces.compactMap { face in
+            FaceRecognizer.match([face], gallery:gallery, threshold:threshold).first.flatMap { matches.contains($0) ? ($0, face) : nil }
+          }
           // Ambiguous near-matches must never become new enrollment candidates.
           let unmatched = faces.filter { face in
             FaceRecognizer.rank(face, gallery:gallery).first.map { $0.distance > threshold + FaceRecognizer.ambiguityMargin } ?? true
           }
-          return (matches, unmatched, nil)
-        } catch { return ([], [], error.localizedDescription) }
+          return (matches, unmatched, matched, nil)
+        } catch { return ([], [], [], error.localizedDescription) }
       }.value
       guard let self, !Task.isCancelled else { return }
       faceTask = nil
@@ -521,7 +541,21 @@ final class SessionModel {
         return "\(name) · distance \(String(format:"%.2f", match.distance))"
       }.joined(separator:" · ")
       applyFaceMatches(result.matches.map(\.personID), at:time)
+      saveStills(result.matched, at:time)
       considerFaceCandidate(result.unmatched, at:time)
+      trackUnknownFaces(result.unmatched, at:time)
+    }
+  }
+  /// Adds confident, new-looking stills of friends who are confirmed here to their photos.
+  func saveStills(_ matched: [(FaceMatch, FaceRecognizer.DetectedFace)], at time: Double) {
+    guard saveFaceStills else { return }
+    for (match, face) in matched where presentIDs.contains(match.personID) {
+      let id = match.personID
+      guard time - (lastStillAt[id] ?? -.infinity) >= Self.stillIntervalMs,
+            (stillsThisSession[id] ?? 0) < Self.maxStillsPerSession,
+            let sample = FaceRecognizer.stillWorthKeeping(face, personID:id, distance:match.distance, people:people.people) else { continue }
+      people.addFace(sample, to:id)
+      lastStillAt[id] = time; stillsThisSession[id, default:0] += 1; stillsSaved += 1
     }
   }
   /// Links an unrecognized face to someone only when it is unambiguous: exactly one unmatched face
@@ -540,6 +574,13 @@ final class SessionModel {
     } else if let sample = FaceRecognizer.sample(from:face) {
       faceCandidates[id] = FaceCandidate(sample:sample, embedding:face.embedding, area:face.area, sightings:1)
     }
+    // Two consistent sightings: save right away so they're recognized later in this conversation.
+    if saveFaceStills, var candidate = faceCandidates[id], candidate.sightings >= 2 {
+      candidate.sample.capturedAt = Date()
+      guard (try? FaceRecognizer.validateEnrollment(candidate.sample, personID:id, people:people.people)) != nil else { return }
+      people.addFace(candidate.sample, to:id)
+      faceCandidates[id] = nil; lastStillAt[id] = time; stillsThisSession[id, default:0] += 1; stillsSaved += 1
+    }
   }
   func applyFaceMatches(_ ids: [UUID], at time: Double) { _ = presence.recordFaces(ids, at:time); syncPresence() }
   func noteNames(in entry: TranscriptEntry) {
@@ -555,6 +596,54 @@ final class SessionModel {
     }
     let ids = PresenceTracker.mentionedPeople(in:entry.text, people:people.people)
     _ = presence.recordNames(ids, at:entry.endMs)
+    // A name said to someone new: wait for the one unknown face it belongs to.
+    for name in PresenceTracker.addressedNames(in:entry.text) where person(named:name) == nil {
+      pendingNames.removeAll { $0.name == name }
+      pendingNames.append((name, entry.endMs))
+    }
+    linkNamesToFaces(at:entry.endMs)
+    syncPresence()
+  }
+  private func person(named name: String) -> Person? {
+    people.people.first { person in
+      person.name.caseInsensitiveCompare(name) == .orderedSame
+        || person.name.split(separator:" ").first.map { $0.caseInsensitiveCompare(name) == .orderedSame } == true
+    }
+  }
+  /// Groups unrecognized faces across frames so one stranger counts as one face.
+  func trackUnknownFaces(_ unmatched: [FaceRecognizer.DetectedFace], at time: Double) {
+    unknownFaces.removeAll { time - $0.lastSeen > Self.unknownFaceMemoryMs }
+    for face in unmatched {
+      if let index = unknownFaces.firstIndex(where: { FaceEmbedding.distance(face.embedding, $0.embedding).map { $0 <= Float(faceThreshold) } ?? false }) {
+        unknownFaces[index].sightings += 1; unknownFaces[index].lastSeen = time
+        if face.area > unknownFaces[index].area, let sample = FaceRecognizer.sample(from:face) {
+          unknownFaces[index].sample = sample; unknownFaces[index].embedding = face.embedding; unknownFaces[index].area = face.area
+        }
+      } else if let sample = FaceRecognizer.sample(from:face) {
+        unknownFaces.append(UnknownFace(embedding:face.embedding, sample:sample, area:face.area, sightings:1, lastSeen:time))
+      }
+    }
+    linkNamesToFaces(at:time)
+  }
+  /// Creates a new friend when a name said to someone new lines up with exactly one unknown face
+  /// (seen at least twice) within 15 seconds, and no other unknown face or new name competes.
+  private func linkNamesToFaces(at time: Double) {
+    guard saveFaceStills, phase == .active else { return }
+    pendingNames.removeAll { time - $0.at > Self.nameFaceWindowMs }
+    guard pendingNames.count == 1, let pending = pendingNames.first else { return }
+    let nearby = unknownFaces.filter { abs($0.lastSeen - pending.at) <= Self.nameFaceWindowMs }
+    guard nearby.count == 1, let face = nearby.first, face.sightings >= 2, person(named:pending.name) == nil else { return }
+    var sample = face.sample
+    sample.capturedAt = Date()
+    guard let id = people.addPerson(pending.name) else { return }
+    guard (try? FaceRecognizer.validateEnrollment(sample, personID:id, people:people.people)) != nil else {
+      people.people.removeAll { $0.id == id }; pendingNames = []; return // looks like someone already saved
+    }
+    people.addFace(sample, to:id)
+    pendingNames = []
+    unknownFaces.removeAll { $0.embedding == face.embedding }
+    presence.introduce(id, at:time)
+    notice = "Met \(pending.name)."
     syncPresence()
   }
   // MARK: Tone check — coaching on the wearer's own words
@@ -704,6 +793,7 @@ final class SessionModel {
     realtimeRelay?.onEvent = nil; realtimeRelay?.onFailure = nil; realtimeRelay?.onSend = nil
     realtimeRelay?.stop(); realtimeRelay = nil
     realtimeRoster = PhoneCaptionRoster(); realtimeClock.reset()
+    conversationWindow = ConversationWindow()
     finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []
     speechMode = "Not started"
   }
@@ -721,11 +811,12 @@ final class SessionModel {
           ["transcript.partial", "speaker.updated", "transcript.final"].contains(event.type) else { return }
     let time = nowMs()
     if let speaker = event.speaker { realtimeSpeakers[id] = speaker }
+    let range = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:time)
+    conversationWindow.consume(event, at:min(time, realtimeClock.captureTime(audioProcessedMs:event.audioProcessedMs) ?? range.endMs))
     realtimeRoster.consume(event, at:time)
     captionRows = realtimeRoster.rows
     captionText = captionRows.isEmpty ? nil : captionRows.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
     captionAtMs = time
-    publishDisplay()
     guard event.type == "transcript.final", !finalizedTurns.contains(id) else { return }
     finalizedTurns.insert(id)
     // Bound deduplication bookkeeping during long sessions.
@@ -733,7 +824,6 @@ final class SessionModel {
       finalizedTurns.remove(oldest); realtimeSpeakers[oldest] = nil
     }
     guard let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty else { return }
-    let range = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:time)
     let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:range.startMs, endMs:range.endMs,
                                 confidence:nil, speaker:realtimeSpeakers[id])
     transcript.append(entry); transcript.sort { $0.endMs < $1.endMs }
@@ -812,7 +902,6 @@ final class SessionModel {
   func setCaption(_ text: String, capturedAtMs: Double) {
     guard phase == .active, capturedAtMs >= captionAtMs, nowMs()-capturedAtMs <= 15000, capturedAtMs <= nowMs()+1000 else { return }
     captionText = String(text.suffix(240)); captionAtMs = capturedAtMs
-    publishDisplay()
   }
   func expireCaption(at timestamp: Double = nowMs()) {
     if realtimeRelay != nil {
@@ -821,15 +910,19 @@ final class SessionModel {
       if updated != captionRows {
         captionRows = updated
         captionText = updated.isEmpty ? nil : updated.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
-        publishDisplay()
       }
       return
     }
-    if captionText != nil, timestamp-captionAtMs > 15000 { captionText = nil; publishDisplay() }
+    if captionText != nil, timestamp-captionAtMs > 15000 { captionText = nil }
   }
   func sceneBecameInactive() {
     // Phone camera is a foreground experience. Do not claim pocket camera support.
     if captureMode == .phone { pause("Phone session paused when the app left the foreground. Resume deliberately.") }
+  }
+  func recentCueTranscript(at timestamp: Double = nowMs()) -> [TranscriptEntry] {
+    guard !sceneOnly else { return [] }
+    if realtimeRelay != nil { return conversationWindow.entries(at:timestamp) }
+    return transcript.filter { timestamp - $0.endMs <= SurroundingsPolicy.contextWindowMs && $0.endMs <= timestamp + 1000 && ($0.confidence ?? 1) >= 0.65 }
   }
   func requestCue(manual: Bool) {
     guard !uploadsDisabled else { if manual { notice = "Connection test makes no API requests. Use Manual display test." }; return }
@@ -844,8 +937,9 @@ final class SessionModel {
       return
     }
     if let issue = liveInputIssue(at:timestamp) { if manual { queueManualAnalysis(issue, at:timestamp) }; return }
-    let last = sceneOnly ? nil : transcript.last
-    let freshSpeech = last.flatMap { timestamp - $0.endMs <= 15000 ? $0 : nil }
+    let entries = recentCueTranscript(at:timestamp)
+    let last = entries.last
+    let freshSpeech = last
     let frame = latestFrame.flatMap { timestamp - $0.capturedAtMs <= SurroundingsPolicy.frameFreshnessMs && $0.capturedAtMs <= timestamp ? $0 : nil }
     // Silence does not imply missing context: a fresh library image can support a cue.
     guard timestamp - captureStartedAt >= 1500,
@@ -865,9 +959,7 @@ final class SessionModel {
     }
     let revision = generation, thisEpoch = epoch
     let context = (sceneOnly ? "" : contextText).split(separator:"\n").prefix(5).map { String($0.prefix(160)) }
-    // Older lines in the 60-second window are background; the model is told to weigh recent speech most.
-    let entries = sceneOnly ? [] : transcript
-    let audio = surroundings ? latestAudioContext.flatMap { timestamp - $0.capturedAtMs <= 10000 ? $0 : nil } : nil
+    let audio = surroundings ? (ambientWindow.context(at:timestamp) ?? latestAudioContext.flatMap { timestamp - $0.capturedAtMs <= 10000 ? $0 : nil }) : nil
     let present = presentPeople
     let request = CueRequest(transcript:entries, frame:frame, context:context, manual:manual,
                              analysisMode:surroundings ? "surroundings" : "conversation", audioContext:audio,
@@ -909,7 +1001,7 @@ final class SessionModel {
           }
           // Always-on display: ongoing speech with no specific fixture gets a steady listening cue.
           if message.isEmpty, freshSpeech != nil { message = "Keep listening, then ask a follow-up question." }
-          response = CueResponse(result:CueResult(cue:message, reason:"Local scripted demo fixture", confidence:message.isEmpty ? 0 : 0.95, type:surroundings ? "reminder" : "clarify", should_display:!message.isEmpty,
+          response = CueResponse(result:CueResult(cue:message, reason:"Local scripted demo fixture", confidence:message.isEmpty ? 0 : 0.95, type:message.isEmpty ? "abstain" : surroundings ? "reminder" : "clarify", should_display:!message.isEmpty,
                                                   scene:["library", "funeral"].contains(fixtureScene) ? fixtureScene : "",
                                                   summary:freshSpeech.map { "SIMULATED: conversation mentioning \"\($0.text.prefix(60))\"." }), metrics:nil)
           modelMode = "LOCAL SCRIPTED MOCK"
@@ -932,10 +1024,22 @@ final class SessionModel {
         apiMs = response.metrics?.apiMs ?? 0; recordCost(response.metrics?.estimatedCostUsd ?? (simulate && localMock ? 0 : nil))
         let result = response.result
         if let scene = result.scene?.trimmingCharacters(in:.whitespaces), !scene.isEmpty, scene != currentScene { currentScene = scene }
-        lastSceneSummary = String(result.reason.prefix(400))
+        let summary = result.summary?.trimmingCharacters(in:.whitespacesAndNewlines)
+        lastSceneSummary = summary.flatMap { $0.isEmpty ? nil : String($0.prefix(200)) }
         remember(result.summary, at:evidenceAt)
         lastAnalysisOutcome = "No new social cue needed."
         lastAnalysisAtMs = completedAt
+        if !result.should_display && result.type == "abstain" {
+          // No supported current context: do not leave an earlier conversation's advice on the lens.
+          let wait = lastCueAt + SurroundingsPolicy.minimumDwellMs - nowMs()
+          if cue != nil, wait > 0 { try await Task.sleep(for:.milliseconds(Int(wait))) }
+          guard epoch == thisEpoch, generation == revision, phase == .active else { return }
+          cue = nil
+          lastAnalysisOutcome = "Waiting for clearer context."
+          feedback("Listening for context…")
+          notice = ""
+          return
+        }
         let text = result.cue.trimmingCharacters(in:.whitespacesAndNewlines)
         let normalized = text.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace }
         guard result.should_display, result.confidence.isFinite, result.confidence >= 0.6, result.confidence <= 1,

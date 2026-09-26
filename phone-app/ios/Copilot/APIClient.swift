@@ -31,7 +31,7 @@ struct CueRequest: Encodable {
   var people: [PersonContext] = []
   var groups: [GroupContext] = []
   var currentScene = ""
-  /// Earlier one-sentence summaries from this session, oldest first: memory beyond the 60-second transcript.
+  /// Earlier one-sentence summaries from this session, oldest first: background beyond the recent 10-second window.
   var recentMoments: [Moment] = []
   /// The cue on screen now, so the model can keep it when it's still the best advice.
   var previousCue = ""

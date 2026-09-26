@@ -215,6 +215,10 @@ struct PresenceStrip: View {
       if model.recognizeFaces, let readout = model.faceReadout {
         Label(readout, systemImage:"faceid").font(.caption).foregroundStyle(.secondary).lineLimit(1)
       }
+      if model.stillsSaved > 0 {
+        Label("\(model.stillsSaved)", systemImage:"camera.viewfinder").font(.caption).foregroundStyle(.secondary)
+          .accessibilityLabel("\(model.stillsSaved) face stills saved this conversation")
+      }
     }
   }
 }
@@ -235,6 +239,13 @@ struct FaceEnrollmentSection: View {
               Group {
                 if let image = UIImage(data:face.thumbnail) { Image(uiImage:image).resizable() } else { Color.gray }
               }.frame(width:64, height:64).clipShape(RoundedRectangle(cornerRadius:10))
+                .overlay(alignment:.bottomTrailing) {
+                  if face.fromVideo {
+                    Image(systemName:"video.fill").font(.caption2).padding(4).foregroundStyle(.white)
+                      .background(.black.opacity(0.55), in:Circle()).padding(3)
+                  }
+                }
+                .accessibilityLabel(face.fromVideo ? "Saved from live video" : "Uploaded photo")
                 .contextMenu {
                   Button("Remove", systemImage:"trash", role:.destructive) { store.people[index].faces.removeAll { $0.id == face.id } }
                 }
@@ -247,13 +258,13 @@ struct FaceEnrollmentSection: View {
           Label("Add face photo", systemImage:"person.crop.square.badge.camera")
           if working { Spacer(); ProgressView() }
         }
-      }.disabled(working || store.people[index].faces.filter(\.isCompatible).count >= 8)
+      }.disabled(working || store.people[index].faces.filter { $0.isCompatible && !$0.fromVideo }.count >= FaceRecognizer.maxUploadedFaces)
       if store.people[index].faces.contains(where: { !$0.isCompatible }) {
         Text("These older photos need to be added again for face matching.").font(.caption).foregroundStyle(.orange)
       }
       if let error { Text(error).font(.caption).foregroundStyle(.red) }
     } header: { Text("Face") } footer: {
-      Text("Add 3–5 clear photos of just this person, with both eyes visible, in different lighting. Faces are compared on this iPhone only. Long-press a photo to remove it.")
+      Text("Add 3–5 clear photos of just this person. Stills marked \(Image(systemName:"video.fill")) were saved from live video. Long-press to remove.")
     }
     .onChange(of:selection) { _, item in
       guard let item else { return }
@@ -267,10 +278,10 @@ struct FaceEnrollmentSection: View {
           }
           let sample = try await Task.detached(priority:.userInitiated) { try FaceRecognizer.enroll(from:image) }.value
           guard let current = store.people.firstIndex(where: { $0.id == personID }),
-                store.people[current].faces.filter(\.isCompatible).count < 8 else { return }
+                store.people[current].faces.filter { $0.isCompatible && !$0.fromVideo }.count < FaceRecognizer.maxUploadedFaces else { return }
           try FaceRecognizer.validateEnrollment(sample, personID:personID, people:store.people)
           store.people[current].faces.removeAll { !$0.isCompatible }
-          store.people[current].faces.append(sample)
+          store.people[current].faces = FaceRecognizer.trimmed(store.people[current].faces + [sample])
         } catch { self.error = error.localizedDescription }
       }
     }

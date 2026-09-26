@@ -274,19 +274,15 @@ struct ContentView: View {
         Section("This conversation") {
           if model.captureMode.hasGlassesDisplay {
             Toggle("Conversation and captions",isOn:$model.glassesConversationEnabled).disabled(model.phase != .stopped)
-            Text("Off keeps automatic scene cues. On adds speech captions, name detection and conversation learning.").font(.caption)
+            Text("Off keeps automatic scene cues. On adds phone captions, conversation summaries, name detection and conversation learning.").font(.caption)
           }
           TextField("Things you chose to remember (one per line)",text:$model.contextText,axis:.vertical).lineLimit(3...5).onChange(of:model.contextText) { _, _ in model.contextChanged() }
           if model.analyzesSurroundings {
-            if model.captureMode.hasGlassesDisplay {
-              Toggle("Captions on glasses",isOn:$model.displayCaptions).onChange(of:model.displayCaptions) { _, _ in model.refreshDisplay() }
-              Text("In conversation mode, recognized words stay visible alongside a social cue. Longer captions are shortened on the glasses; see the phone for more.").font(.caption).foregroundStyle(.secondary)
-            }
-            Text(model.sceneOnly ? "Scene-only test: Muse checks fresh camera images every 4 seconds (15 in reduced-power mode), with audio levels when available. No speech transcription. Recommendations update automatically." : "Muse checks about every 3 seconds during conversation, 5 seconds otherwise, or 15 seconds in reduced-power mode; one check runs at a time. The current cue stays on screen until a better one arrives. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
+            Text("Muse summarizes roughly the last 10 seconds and suggests one short cue. With no clear recent speech, it uses the camera scene and ambient audio levels. Checks run about every 10 seconds (15 in reduced-power mode), one at a time. Captions stay on the phone; the glasses show only the cue.").font(.caption)
           } else {
             Stepper("Image sample every \(Int(model.sampleInterval)) seconds",value:$model.sampleInterval,in:3...30,step:1)
           }
-          Text("Keeps ≤60 seconds / 12 transcript entries and one sampled image. Stop erases session memory. No raw media files are saved.").font(.caption)
+          Text("Keeps ≤60 seconds / 12 transcript entries and one sampled image. Stop erases session memory. Face stills saved to People remain until removed; raw audio/video is not saved.").font(.caption)
         }
         Section("Recognizing friends") {
           Toggle("Recognize enrolled faces",isOn:$model.recognizeFaces)
@@ -294,11 +290,12 @@ struct ContentView: View {
             LabeledContent("Match distance ≤ \(String(format:"%.2f",model.faceThreshold))") {
               Slider(value:$model.faceThreshold,in:0.5...1.1,step:0.01)
             }
+            Toggle("Save stills from video",isOn:$model.saveFaceStills)
           }
-          Text("Add face photos in People. Matching runs on this iPhone; unmatched faces are discarded. Two face matches within 10 seconds, or one plus their name spoken within 30 seconds, adds someone to Who's here. A name alone only suggests them. Introductions like \"my name is Priya\" or \"this is my friend Dev\" add a new person automatically. If exactly one unrecognized face is in view right after their name is heard, it is offered for their profile in the review when you stop; faces of people never named are not kept. Lower the distance if strangers match; raise it if friends are missed. FaceNet distances are not confidence percentages. Similar-looking or unclear faces remain unknown. Thresholds need testing with your camera and enrolled friends.").font(.caption)
+          Text("Matching runs on this iPhone. Confident, new-looking stills of friends who are here are saved to their photos automatically (up to 3 per conversation). Saying a new name to someone (\"Hey Marcus\") while one unknown face is in view adds them as a new friend. Lower the distance if strangers match; raise it if friends are missed.").font(.caption)
         }
         Section("Provisional cue rules") {
-          Text(model.sceneOnly ? "Muse checks every 4 seconds (15 in reduced-power mode). Recommendations stay until the next result. Pause and Stop clear captured context." : "Surroundings checks submit a frame ≤10 seconds old or recognized speech ≤15 seconds old, with 1.5 seconds after the last recognized speech. Scene results expire when their image is 20 seconds old. Each check also sends up to 8 one-sentence summaries of earlier moments. A cue stays until replaced, at least 5 seconds; an unchanged cue is not redrawn. Cue confidence ≥0.6. Dismiss pauses automatic checks for 10 seconds.").font(.caption)
+          Text("Muse uses recent speech and camera images up to 10 seconds old. Earlier summaries provide background only. A cue stays readable for at least 10 seconds; unchanged cues are not redrawn. Dismiss pauses automatic checks for 10 seconds. Pause and Stop clear captured context.").font(.caption)
           Text("iPhone mode pauses when the app leaves the foreground. Glasses pocket operation and routing need hardware validation; a simulator cannot verify them.").font(.caption)
         }
       }.navigationTitle("Settings").toolbar { Button("Done") { showSettings = false } }
