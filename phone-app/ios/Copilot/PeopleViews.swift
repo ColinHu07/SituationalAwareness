@@ -281,3 +281,40 @@ struct SceneChip: View {
       .accessibilityLabel("Setting: \(scene)")
   }
 }
+
+// Shown when something the wearer said may have come across too blunt.
+struct RecoveryCard: View {
+  let feedback: SessionModel.ToneFeedback
+  let dismiss: () -> Void
+  var body: some View {
+    VStack(alignment:.leading, spacing:12) {
+      HStack {
+        Label("SOFTEN IT", systemImage:"bubble.left.and.exclamationmark.bubble.right").font(.caption.bold()).tracking(1)
+        Spacer()
+        Button("Dismiss", systemImage:"xmark", action:dismiss).labelStyle(.iconOnly)
+      }
+      Text("“\(feedback.recovery)”").font(.system(size:23, weight:.semibold, design:.rounded))
+        .frame(maxWidth:.infinity, alignment:.leading)
+      if !feedback.rephrase.isEmpty {
+        Label(feedback.rephrase, systemImage:"arrow.uturn.forward").font(.subheadline).opacity(0.8)
+      }
+    }.padding(20).foregroundStyle(.white)
+      .background(feedback.strong ? Color(red:0.78, green:0.33, blue:0.12) : Color(red:0.85, green:0.52, blue:0.12), in:RoundedRectangle(cornerRadius:20))
+      .accessibilityElement(children:.combine)
+      .accessibilityLabel("Soften it. Say: \(feedback.recovery). Next time: \(feedback.rephrase)")
+  }
+}
+
+// Teaches the app how loud the wearer's voice is, so only their own lines get a tone check.
+struct ThatWasMeButton: View {
+  @Bindable var model: SessionModel
+  @State private var confirmed = false
+  var body: some View {
+    if model.captionText != nil, model.transcript.last?.levelDbFS != nil {
+      Button { model.markLastLineAsMine(); confirmed = true } label: {
+        Image(systemName:confirmed ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
+      }.accessibilityLabel("That was me")
+        .onChange(of:model.captionText) { _, _ in confirmed = false }
+    }
+  }
+}

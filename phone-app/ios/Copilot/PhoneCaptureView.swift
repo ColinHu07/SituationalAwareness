@@ -33,6 +33,7 @@ struct PhoneCaptureView: View {
           if let scene = model.currentScene { SceneChip(scene:scene) }
           PresenceStrip(model:model)
           cueCard
+          if let feedback = model.toneFeedback { RecoveryCard(feedback:feedback) { model.dismissTone() } }
           sessionStatus
           if model.lastSceneSummary != nil || model.lastAnalysisOutcome != nil {
             VStack(alignment:.leading,spacing:8) {
@@ -195,7 +196,11 @@ struct PhoneCaptureView: View {
 
   private var captions: some View {
     VStack(alignment:.leading,spacing:10) {
-      Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
+      HStack {
+        Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
+        Spacer()
+        ThatWasMeButton(model:model)
+      }
       Text(model.captionText ?? "—")
         .font(.title3).foregroundStyle(model.captionText == nil ? .secondary : .primary)
         .frame(maxWidth:.infinity,minHeight:45,alignment:.leading)

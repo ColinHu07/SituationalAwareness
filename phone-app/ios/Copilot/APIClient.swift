@@ -7,7 +7,11 @@ struct TranscriptEntry: Codable, Identifiable {
   let startMs: Double
   let endMs: Double
   let confidence: Double?
-  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence }
+  /// "wearer" or "other" once the wearer's voice level is calibrated; nil when unknown.
+  var speaker: String? = nil
+  /// Loudness of the voiced parts of this chunk at the microphone (dBFS), used to tell the wearer apart.
+  var levelDbFS: Double? = nil
+  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence, speaker }
 }
 struct SampledFrame: Codable { let dataUrl: String; let capturedAtMs: Double }
 struct AudioContext: Encodable, Sendable {
@@ -27,11 +31,18 @@ struct CueRequest: Encodable {
   var people: [PersonContext] = []
   var groups: [GroupContext] = []
   var currentScene = ""
+  /// Earlier one-sentence summaries from this session, oldest first: memory beyond the 60-second transcript.
+  var recentMoments: [Moment] = []
+  /// The cue on screen now, so the model can keep it when it's still the best advice.
+  var previousCue = ""
 }
+struct Moment: Codable, Equatable { let atMs: Double; let summary: String }
 struct CueResult: Decodable {
   let cue: String; let reason: String; let confidence: Double; let type: String; let should_display: Bool
   /// Where the wearer seems to be ("library", "funeral"), or "" when unclear.
   var scene: String? = nil
+  /// One neutral sentence about what is happening now, kept as session memory.
+  var summary: String? = nil
 }
 struct CueResponse: Decodable {
   struct Metrics: Decodable { let apiMs: Double?; let inputTokens: Int?; let outputTokens: Int?; let estimatedCostUsd: Double? }
@@ -44,7 +55,24 @@ struct AudioChunk: Encodable, Sendable {
   let sampleRate = 16000
   let startedAtMs: Double
   let endedAtMs: Double
+  /// Voiced loudness (dBFS); kept on the phone, not uploaded.
+  var speechDbFS: Double = -120
+  enum CodingKeys: String, CodingKey { case audioBase64, mimeType, sampleRate, startedAtMs, endedAtMs }
 }
+
+// Checks how the wearer's own line may land (POST /api/tone).
+struct ToneRequest: Encodable {
+  struct Line: Encodable { let text: String; let endMs: Double }
+  struct Recent: Encodable { let text: String; let speaker: String? }
+  let line: Line
+  let recent: [Recent]
+  let scene: String
+  let speakerKnown: Bool
+  let people: [PersonContext]
+  let groups: [GroupContext]
+}
+struct ToneResult: Decodable { let flag: Bool; let severity: String; let issue: String; let recovery: String; let rephrase: String }
+struct ToneResponse: Decodable { let result: ToneResult }
 struct TranscriptionResponse: Decodable { let text: String; let confidence: Double?; let transcriptionMs: Double?; let estimatedCostUsd: Double? }
 struct HealthResponse: Decodable { let modelMode: String?; let tokenValid: Bool? }
 struct CopilotError: LocalizedError { let message: String; var errorDescription: String? { message } }

@@ -8,6 +8,14 @@ final class SessionModel {
   enum Phase: String { case stopped = "Stopped", starting = "Starting", active = "Listening", paused = "Paused" }
   var phase: Phase = .stopped
   var consent = false
+  /// Coach the wearer when something they said may come across too blunt.
+  var toneCheckEnabled = true
+  /// The wearer's calibrated voice level at the mic (dBFS); nil until they tap "That was me".
+  var wearerVoiceDbFS: Double? = UserDefaults.standard.object(forKey:"copilot.wearerVoiceDbFS") as? Double
+  var toneFeedback: ToneFeedback?
+  @ObservationIgnored private var toneTask: Task<Void, Never>?
+  @ObservationIgnored private var pendingToneEntry: TranscriptEntry?
+  @ObservationIgnored private var toneTTLTask: Task<Void, Never>?
   var glassesControlsReady = false
   var openingGlassesControls = false
   var captureMode: CaptureMode = .phone
@@ -92,12 +100,14 @@ final class SessionModel {
   @ObservationIgnored private var lastRequestedGeneration = -1
   @ObservationIgnored private var lastCueAt: Double = 0
   @ObservationIgnored private var lastRequestedSpeechAt: Double = 0
-  @ObservationIgnored private var recentCues: [String] = []
+  /// Rolling memory of earlier moments in this session, from the model's own summaries.
+  private(set) var moments: [Moment] = []
+  @ObservationIgnored private var dismissedAt: Double = 0
+  @ObservationIgnored private var ttlTask: Task<Void, Never>?
   @ObservationIgnored private var cueTask: Task<Void, Never>?
   @ObservationIgnored private var asrTask: Task<Void, Never>?
   @ObservationIgnored private var startTask: Task<Void, Never>?
   @ObservationIgnored private var loopTask: Task<Void, Never>?
-  @ObservationIgnored private var ttlTask: Task<Void, Never>?
   @ObservationIgnored private var latestSampleAt: Double = 0
   @ObservationIgnored private var transportTask: Task<Void, Never>?
   @ObservationIgnored private var captureStartedAt: Double = 0
@@ -178,7 +188,7 @@ final class SessionModel {
     return analyzesSurroundings ? "Watching surroundings" : "Listening for context"
   }
   func analysisInterval(at timestamp: Double = nowMs(), reducedPower: Bool) -> Double {
-    if sceneOnly { return reducedPower ? 30 : 10 }
+    if sceneOnly { return reducedPower ? 15 : 4 }
     return SurroundingsPolicy.analysisInterval(recentSpeech:lastVoiceAt > 0 && timestamp - lastVoiceAt < 30000, reducedPower:reducedPower)
   }
   private func publishDisplay() {
@@ -364,6 +374,7 @@ final class SessionModel {
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     latestFrame = nil; latestAudioContext = nil; latestSampleAt = 0; transcript.removeAll(); lastVoiceAt = 0; captionText = nil; captionAtMs = 0
+    clearTone()
     nextAnalysisAt = 0; simulatedScene = ""
     if captureMode.needsGlasses { glasses.pauseCapture() }
     notice = reason
@@ -372,7 +383,7 @@ final class SessionModel {
   func stopStreaming() {
     guard captureMode.hasGlassesDisplay, consent, phase != .stopped else { return }
     pause()
-    contextText = ""; recentCues = []; lastCueAt = 0
+    contextText = ""; moments = []; lastCueAt = 0; dismissedAt = 0
     glassesControlsReady = true
     glasses.pauseCapture(ready:true)
     notice = "Streaming stopped and session context cleared. Select Start on glasses, or Stop on the phone to disconnect."
@@ -387,7 +398,8 @@ final class SessionModel {
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
     nextAnalysisAt = 0; simulatedScene = ""; currentScene = nil
-    consent = false; lastVoiceAt = 0; recentCues = []; lastCueAt = 0; lastRequestedSpeechAt = 0
+    consent = false; lastVoiceAt = 0; moments = []; lastCueAt = 0; dismissedAt = 0; lastRequestedSpeechAt = 0
+    clearTone()
     captionText = nil; captionAtMs = 0
     if captureMode.needsGlasses { transportTask = Task { await glasses.stop() } }
     notice = ""
@@ -505,9 +517,88 @@ final class SessionModel {
     _ = presence.recordNames(ids, at:entry.endMs)
     syncPresence()
   }
+  // MARK: Tone check — coaching on the wearer's own words
+
+  struct ToneFeedback: Identifiable, Equatable {
+    let id = UUID()
+    let said: String
+    let recovery: String
+    let rephrase: String
+    let strong: Bool
+  }
+  /// Speech this loud relative to the wearer's calibrated level counts as the wearer (6 dB ≈ half as loud).
+  static let wearerLevelMarginDb = 6.0
+  func speaker(forLevel level: Double?) -> String? {
+    guard let calibrated = wearerVoiceDbFS, let level, level > -120 else { return nil }
+    return level >= calibrated - Self.wearerLevelMarginDb ? "wearer" : "other"
+  }
+  /// "That was me": learn the wearer's voice level from the most recent caption, then relabel speech.
+  func markLastLineAsMine() {
+    guard let level = transcript.last(where: { $0.levelDbFS.map { $0 > -120 } ?? false })?.levelDbFS else { return }
+    let updated = wearerVoiceDbFS.map { ($0 + level) / 2 } ?? level
+    wearerVoiceDbFS = updated
+    UserDefaults.standard.set(updated, forKey:"copilot.wearerVoiceDbFS")
+    transcript = transcript.map { entry in var entry = entry; entry.speaker = speaker(forLevel:entry.levelDbFS); return entry }
+  }
+  func resetWearerVoice() {
+    wearerVoiceDbFS = nil
+    UserDefaults.standard.removeObject(forKey:"copilot.wearerVoiceDbFS")
+  }
+  /// Checks one line the wearer said. Until the voice is calibrated every line is treated as possibly theirs.
+  func checkTone(_ entry: TranscriptEntry) {
+    guard toneCheckEnabled, phase == .active, entry.speaker != "other",
+          entry.text.split(whereSeparator:\.isWhitespace).count >= 3 else { return }
+    let offline = simulate && localMock
+    guard offline || !uploadsDisabled else { return }
+    guard toneTask == nil else { pendingToneEntry = entry; return }
+    let recent = transcript.suffix(6).map { ToneRequest.Recent(text:$0.text, speaker:$0.speaker) }
+    let present = presentPeople
+    let request = ToneRequest(line:.init(text:entry.text, endMs:entry.endMs), recent:recent, scene:currentScene ?? "",
+                              speakerKnown:entry.speaker == "wearer", people:present.prefix(8).map { people.context(for:$0) },
+                              groups:people.groups(of:present).prefix(8).map(people.context(for:)))
+    let connection = client, thisEpoch = epoch
+    toneTask = Task { [weak self] in
+      let result: ToneResult?
+      if offline {
+        try? await Task.sleep(for:.milliseconds(300))
+        result = Self.mockTone(entry.text)
+      } else {
+        result = try? await (connection.post("api/tone", request) as (ToneResponse, Int)).0.result
+      }
+      guard let self, epoch == thisEpoch else { return }
+      toneTask = nil
+      if let result, result.flag, phase == .active {
+        showTone(ToneFeedback(said:entry.text, recovery:result.recovery, rephrase:result.rephrase, strong:result.severity == "strong"))
+      }
+      if let next = pendingToneEntry { pendingToneEntry = nil; checkTone(next) }
+    }
+  }
+  private func showTone(_ feedback: ToneFeedback) {
+    toneFeedback = feedback
+    toneTTLTask?.cancel()
+    toneTTLTask = Task { [weak self] in
+      try? await Task.sleep(for:.seconds(25))
+      guard let self, !Task.isCancelled, self.toneFeedback?.id == feedback.id else { return }
+      self.toneFeedback = nil
+    }
+  }
+  func dismissTone() { toneTTLTask?.cancel(); toneFeedback = nil }
+  private func clearTone() {
+    toneTask?.cancel(); toneTask = nil; pendingToneEntry = nil
+    dismissTone()
+  }
+  /// Offline demo fixture mirroring the server's mockTone.
+  static func mockTone(_ text: String) -> ToneResult {
+    let blunt = text.range(of:#"\b(stupid|dumb|idiotic|pointless|terrible|useless|makes no sense|waste of time|you're wrong|that's wrong|shut up|whatever|not listening|ridiculous|awful)\b"#,
+                           options:[.regularExpression, .caseInsensitive]) != nil
+    return blunt ? ToneResult(flag:true, severity:"strong", issue:"Blunt wording", recovery:"Sorry, that came out harsh. Let me explain my concern.",
+                              rephrase:"I'm not sure this works yet. Could we talk through the risks?")
+                 : ToneResult(flag:false, severity:"none", issue:"", recovery:"", rephrase:"")
+  }
+
   func dismiss() {
     invalidateCue()
-    lastCueAt = nowMs() // dismissal also buys a quiet interval
+    dismissedAt = nowMs() // dismissal also buys a quiet interval
     publishDisplay()
     notice = ""
   }
@@ -550,8 +641,9 @@ final class SessionModel {
         let text = result.text.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !text.isEmpty else { return } // Noise or unclear audio is not new conversation.
         lastVoiceAt = chunk.endedAtMs
-        let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:chunk.startedAtMs, endMs:chunk.endedAtMs, confidence:result.confidence)
-        transcript.append(entry); logSpeech(entry); noteNames(in:entry)
+        let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:chunk.startedAtMs, endMs:chunk.endedAtMs, confidence:result.confidence,
+                                    speaker:speaker(forLevel:chunk.speechDbFS), levelDbFS:chunk.speechDbFS)
+        transcript.append(entry); logSpeech(entry); noteNames(in:entry); checkTone(entry)
         // New speech updates captions but leaves a pending or displayed cue alone:
         // cues take longer than the gap between sentences in a real conversation.
         setCaption(text, capturedAtMs:chunk.endedAtMs)
@@ -570,7 +662,7 @@ final class SessionModel {
     let timestamp = nowMs()
     lastVoiceAt = timestamp
     let entry = TranscriptEntry(text:String(value.prefix(500)), startMs:timestamp-2500, endMs:timestamp, confidence:nil)
-    transcript.append(entry); logSpeech(entry); noteNames(in:entry)
+    transcript.append(entry); logSpeech(entry); noteNames(in:entry); checkTone(entry)
     setCaption(value, capturedAtMs:timestamp)
     trimTranscript()
     // Render an original synthetic scene, clearly labeled, to exercise image serialization in proxy mode.
@@ -634,25 +726,25 @@ final class SessionModel {
     }
     if surroundings {
       nextAnalysisAt = max(lastAnalysisAt + analysisInterval(at:timestamp, reducedPower:reducedPower) * 1000,
-                           sceneOnly ? 0 : lastCueAt + SurroundingsPolicy.cueCooldownMs)
+                           dismissedAt + SurroundingsPolicy.dismissQuietMs)
       guard manual || timestamp >= nextAnalysisAt else { return }
     } else {
-      // Automatic checks need new speech since the last check, plus the usual cooldown.
-      guard manual || (timestamp - lastCueAt >= SurroundingsPolicy.cueCooldownMs
-                       && timestamp - lastAnalysisAt >= sampleInterval * 1000
+      // Without a camera, only new speech can change the answer; the current cue stays up meanwhile.
+      guard manual || (timestamp - dismissedAt >= SurroundingsPolicy.dismissQuietMs
+                       && timestamp - lastAnalysisAt >= analysisInterval(at:timestamp, reducedPower:reducedPower) * 1000
                        && (last?.endMs ?? 0) > lastRequestedSpeechAt) else { return }
     }
     let revision = generation, thisEpoch = epoch
     let context = (sceneOnly ? "" : contextText).split(separator:"\n").prefix(5).map { String($0.prefix(160)) }
-    // When speech has aged out, don't let it dominate the current visual setting.
-    let entries = sceneOnly || (surroundings && freshSpeech == nil) ? [] : transcript
+    // Older lines in the 60-second window are background; the model is told to weigh recent speech most.
+    let entries = sceneOnly ? [] : transcript
     let audio = surroundings ? latestAudioContext.flatMap { timestamp - $0.capturedAtMs <= 10000 ? $0 : nil } : nil
     let present = presentPeople
     let request = CueRequest(transcript:entries, frame:frame, context:context, manual:manual,
                              analysisMode:surroundings ? "surroundings" : "conversation", audioContext:audio,
                              people:present.prefix(8).map { people.context(for:$0) },
                              groups:people.groups(of:present).prefix(8).map(people.context(for:)),
-                             currentScene:currentScene ?? "")
+                             currentScene:currentScene ?? "", recentMoments:moments, previousCue:cue ?? "")
     let connection = client
     let fixtureScene = simulatedScene
     let evidenceAt = freshSpeech?.endMs ?? frame?.capturedAtMs ?? timestamp
@@ -686,8 +778,11 @@ final class SessionModel {
             let suggestion = "Ask \(person.name) about \(topic)."
             if suggestion.count <= 90 && suggestion.split(separator:" ").count <= 14 { message = suggestion }
           }
+          // Always-on display: ongoing speech with no specific fixture gets a steady listening cue.
+          if message.isEmpty, freshSpeech != nil { message = "Keep listening, then ask a follow-up question." }
           response = CueResponse(result:CueResult(cue:message, reason:"Local scripted demo fixture", confidence:message.isEmpty ? 0 : 0.95, type:surroundings ? "reminder" : "clarify", should_display:!message.isEmpty,
-                                                  scene:["library", "funeral"].contains(fixtureScene) ? fixtureScene : ""), metrics:nil)
+                                                  scene:["library", "funeral"].contains(fixtureScene) ? fixtureScene : "",
+                                                  summary:freshSpeech.map { "SIMULATED: conversation mentioning \"\($0.text.prefix(60))\"." }), metrics:nil)
           modelMode = "LOCAL SCRIPTED MOCK"
         } else {
           let result: (CueResponse, Int) = try await connection.post("api/cue", request)
@@ -701,52 +796,69 @@ final class SessionModel {
               completedAt - timestamp <= SurroundingsPolicy.responseMaxAgeMs,
               evidenceStillFresh else {
           staleDrops += 1
-          if epoch == thisEpoch && generation == revision { if sceneOnly { cue = nil }; feedback(sceneOnly ? "Scene changed. Checking again shortly…" : "Context expired. Tap Analyze again.") }
+          // The current cue stays up; the next check replaces it.
+          if epoch == thisEpoch && generation == revision { feedback(cue == nil ? "Checking again shortly…" : "Streaming") }
           return
         }
         apiMs = response.metrics?.apiMs ?? 0; recordCost(response.metrics?.estimatedCostUsd ?? (simulate && localMock ? 0 : nil))
         let result = response.result
         if let scene = result.scene?.trimmingCharacters(in:.whitespaces), !scene.isEmpty, scene != currentScene { currentScene = scene }
         lastSceneSummary = String(result.reason.prefix(400))
+        remember(result.summary, at:evidenceAt)
         lastAnalysisOutcome = "No new social cue needed."
         lastAnalysisAtMs = completedAt
         let text = result.cue.trimmingCharacters(in:.whitespacesAndNewlines)
         let normalized = text.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace }
-        guard result.should_display, result.confidence.isFinite, result.confidence >= 0.8, result.confidence <= 1,
+        guard result.should_display, result.confidence.isFinite, result.confidence >= 0.6, result.confidence <= 1,
               ["clarify", "follow_up", "reminder", "respond"].contains(result.type),
-              !text.isEmpty, text.count <= 90, text.split(whereSeparator: { $0.isWhitespace }).count <= 14,
-              (sceneOnly || !recentCues.contains(normalized)) else {
-          if sceneOnly { cue = nil }
+              !text.isEmpty, text.count <= 90, text.split(whereSeparator: { $0.isWhitespace }).count <= 14 else {
+          // Abstaining keeps whatever is on screen rather than blanking it.
+          lastAnalysisOutcome = cue == nil ? "No cue yet." : "Keeping the current cue."
           notice = ""
-          feedback("No new cue needed. See phone for why.")
+          feedback(cue == nil ? "Listening…" : "Streaming")
           return
+        }
+        let current = cue.map { $0.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace } }
+        if normalized == current {
+          lastAnalysisOutcome = "Current cue still fits."
+          return
+        }
+        // Let the current cue be read before swapping it; a newer check cancels this wait.
+        let wait = lastCueAt + SurroundingsPolicy.minimumDwellMs - nowMs()
+        if cue != nil, wait > 0 {
+          try await Task.sleep(for:.milliseconds(Int(wait)))
+          guard epoch == thisEpoch, generation == revision, phase == .active else { return }
         }
         cue = text; shown += 1; lastCueAt = nowMs(); contextToDisplayMs = lastCueAt - evidenceAt
         lastAnalysisOutcome = "Social cue ready."
         analysisFeedback = "Social cue"
-        recentCues = Array((recentCues + [normalized]).suffix(20))
         publishDisplay()
         notice = ""
-        if !sceneOnly { ttlTask = Task { [weak self] in
-          try? await Task.sleep(for:SurroundingsPolicy.cueLifetime)
-          guard let self, !Task.isCancelled, self.generation == revision else { return }
-          // Expiry clears the cue without extending the automatic cooldown.
-          self.cue = nil; self.analysisFeedback = "Streaming"; self.publishDisplay()
-        } }
       } catch {
         if epoch == thisEpoch, generation == revision, !Task.isCancelled {
-          if sceneOnly { cue = nil }
-          notice = "Cue failed. " + (sceneOnly ? "Retrying automatically." : "Try again.")
+          notice = "Cue check failed. Retrying automatically."
           feedback("Analysis failed. Check phone for details.")
         }
       }
     }
   }
+  /// Adds the model's summary of this moment to session memory, skipping repeats.
+  func remember(_ summary: String?, at time: Double) {
+    guard let summary = summary?.trimmingCharacters(in:.whitespacesAndNewlines), !summary.isEmpty,
+          summary.caseInsensitiveCompare(moments.last?.summary ?? "") != .orderedSame else { return }
+    moments = Array((moments + [Moment(atMs:time, summary:String(summary.prefix(200)))]).suffix(SurroundingsPolicy.momentCount))
+  }
   private func recordCost(_ value: Double?) {
     if let value { knownCostTotal += value } else { missingCost = true }
     estimatedCost = missingCost ? nil : knownCostTotal
   }
-  func contextChanged() { invalidateCue(); publishDisplay() }
+  /// Notes or people changed: drop the in-flight check and re-check soon, but keep the cue on screen.
+  func contextChanged() {
+    generation += 1
+    cueTask?.cancel(); cueTask = nil; isThinking = false
+    lastAnalysisAt = 0; lastRequestedSpeechAt = 0
+    publishDisplay()
+  }
   func refreshDisplay() { publishDisplay() }
   func manualDisplayTest() {
     guard phase == .active else { return }

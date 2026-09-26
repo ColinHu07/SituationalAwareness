@@ -6,7 +6,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
 import { createProvider } from './model.mjs';
-import { validateInput, validateAudio, validateLearnInput } from './validation.mjs';
+import { validateInput, validateAudio, validateLearnInput, validateToneInput } from './validation.mjs';
 import { abstain, LIMITS } from '../shared/protocol.mjs';
 
 export function createServer({ env = process.env, provider = createProvider(env) } = {}) {
@@ -16,7 +16,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
     throw new Error('A separate COPILOT_PROXY_TOKEN of at least 32 characters is required for live or non-loopback use.');
   let active = 0;
   // Four slots: the phone transcribes and asks for a cue at the same time, with headroom for cancelled work.
-  const recent = [], MAX_PER_MINUTE = 60, MAX_ACTIVE = 4;
+  const recent = [], MAX_PER_MINUTE = 120, MAX_ACTIVE = 4;
   const files = { '/': '../web/index.html', '/app.mjs': '../web/app.mjs', '/style.css': '../web/style.css', '/shared/protocol.mjs': '../shared/protocol.mjs' };
   return http.createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -40,7 +40,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
         const data = await readFile(new URL(files[path], import.meta.url));
         res.writeHead(200, { 'Content-Type': path.endsWith('.mjs') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html' }); return res.end(data);
       }
-      if (req.method !== 'POST' || !['/api/cue','/api/transcribe','/api/learn'].includes(path)) return json(404, { error: 'Not found' });
+      if (req.method !== 'POST' || !['/api/cue','/api/transcribe','/api/learn','/api/tone'].includes(path)) return json(404, { error: 'Not found' });
       if (!tokenValid) return json(401, { error: 'Enter the proxy token, not the model API key.' });
       if (!(req.headers['content-type'] || '').startsWith('application/json')) return json(415, { error: 'Expected application/json' });
       while (recent.length && recent[0] < Date.now() - 60000) recent.shift();
@@ -58,6 +58,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
         return json(200, await provider.cue(input, controller.signal));
       }
       if (path === '/api/learn') return json(200, await provider.learn(validateLearnInput(body), controller.signal));
+      if (path === '/api/tone') return json(200, await provider.tone(validateToneInput(body), controller.signal));
       return json(200, await provider.transcribe(validateAudio(body), controller.signal));
     } catch (error) {
       const status = error.name === 'TimeoutError' || error.name === 'AbortError' ? 504 : error.status || 502;
