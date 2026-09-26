@@ -1,0 +1,11 @@
+{
+  "model_id": "facenet-vggface2-512-vision-eyes-v1",
+  "source": "https://github.com/timesler/facenet-pytorch",
+  "weights_sha256": "281cebca8662831adb987a874bdcb36e73f5b1c6dc5ee5878f305e985625d99b",
+  "coreml_parity_l2_errors": [
+    0.007654860615730286,
+    0.008850915357470512,
+    0.007779385894536972
+  ],
+  "note": "Synthetic parity checks verify conversion, not recognition accuracy."
+}

@@ -92,7 +92,7 @@ final class SessionModel {
   @ObservationIgnored private var faceGallery = FaceGallery(people:[])
   @ObservationIgnored private var lastFaceCheckAt: Double = 0
   /// In-memory face seen while a just-introduced person had no enrolled face. Proposed at Stop; never saved unless approved.
-  struct FaceCandidate { var sample: FaceSample; var print: VNFeaturePrintObservation; var area: CGFloat; var sightings: Int }
+  struct FaceCandidate { var sample: FaceSample; var embedding: [Float]; var area: CGFloat; var sightings: Int }
   private(set) var faceCandidates: [UUID: FaceCandidate] = [:]
   @ObservationIgnored lazy var glasses = GlassesController()
   @ObservationIgnored private let phoneCamera = PhoneCamera()
@@ -469,26 +469,34 @@ final class SessionModel {
   /// Throttled on-device face check. Frames that arrive while one is running are skipped.
   private func checkFaces(_ image: UIImage, at time: Double) {
     guard recognizeFaces, phase == .active, faceTask == nil, time - lastFaceCheckAt >= 1000 else { return }
-    let enrolled = people.people.filter { !$0.faces.isEmpty }
-    if faceGallery.key != enrolled.flatMap({ $0.faces.map(\.id) }) { faceGallery = FaceGallery(people:enrolled) }
-    guard !faceGallery.isEmpty else { return }
+    let enrolled = people.people
+    if faceGallery.key != FaceGallery.key(for:enrolled) { faceGallery = FaceGallery(people:enrolled) }
+    guard !faceGallery.isEmpty || presentPeople.contains(where: { $0.faces.isEmpty }) else {
+      faceReadout = enrolled.contains(where: { !$0.faces.isEmpty }) ? "Add new face photos in People to enable FaceNet" : "Add face photos in People"
+      return
+    }
     lastFaceCheckAt = time
     let gallery = faceGallery, thisEpoch = epoch, threshold = Float(faceThreshold)
     faceTask = Task { [weak self] in
-      let result = await Task.detached(priority:.utility) { () -> (matches: [FaceMatch], nearest: [FaceMatch], unmatched: [FaceRecognizer.DetectedFace]) in
-        guard let faces = try? FaceRecognizer.faces(in:image) else { return ([], [], []) }
-        var matches: [FaceMatch] = [], unmatched: [FaceRecognizer.DetectedFace] = []
-        for face in faces {
-          if let match = FaceRecognizer.match([face], gallery:gallery, threshold:threshold).first { matches.append(match) } else { unmatched.append(face) }
-        }
-        return (matches, faces.compactMap { FaceRecognizer.rank($0, gallery:gallery).first }, unmatched)
+      let result = await Task.detached(priority:.utility) { () -> (matches: [FaceMatch], unmatched: [FaceRecognizer.DetectedFace], error: String?) in
+        do {
+          let faces = try FaceRecognizer.faces(in:image)
+          let matches = FaceRecognizer.match(faces, gallery:gallery, threshold:threshold)
+          // Ambiguous near-matches must never become new enrollment candidates.
+          let unmatched = faces.filter { face in
+            FaceRecognizer.rank(face, gallery:gallery).first.map { $0.distance > threshold + FaceRecognizer.ambiguityMargin } ?? true
+          }
+          return (matches, unmatched, nil)
+        } catch { return ([], [], error.localizedDescription) }
       }.value
-      guard let self else { return }
+      guard let self, !Task.isCancelled else { return }
       faceTask = nil
-      guard epoch == thisEpoch, phase == .active else { return }
-      faceReadout = result.nearest.isEmpty ? "No faces in view" : result.nearest.map { match in
+      guard epoch == thisEpoch, phase == .active, recognizeFaces, Float(faceThreshold) == threshold,
+            gallery.key == FaceGallery.key(for:people.people) else { return }
+      if let error = result.error { faceReadout = error; return }
+      faceReadout = result.matches.isEmpty ? "No confident friend match" : result.matches.map { match in
         let name = people.people.first { $0.id == match.personID }?.name ?? "?"
-        return "\(name) \(String(format:"%.2f", match.distance))\(result.matches.contains(match) ? " ✓" : "")"
+        return "\(name) · distance \(String(format:"%.2f", match.distance))"
       }.joined(separator:" · ")
       applyFaceMatches(result.matches.map(\.personID), at:time)
       considerFaceCandidate(result.unmatched, at:time)
@@ -503,13 +511,12 @@ final class SessionModel {
       person.faces.isEmpty && presence.lastHeard[person.id].map { time - $0 <= 20_000 && $0 <= time + 1000 } == true
     }
     guard waiting.count == 1, let id = waiting.first?.id else { return }
-    var distance: Float = .greatestFiniteMagnitude
-    if var existing = faceCandidates[id], (try? face.print.computeDistance(&distance, to:existing.print)) != nil, distance <= Float(faceThreshold) {
+    if var existing = faceCandidates[id], let distance = FaceEmbedding.distance(face.embedding, existing.embedding), distance <= Float(faceThreshold) {
       existing.sightings += 1
-      if face.area > existing.area, let sample = FaceRecognizer.sample(from:face) { existing.sample = sample; existing.print = face.print; existing.area = face.area }
+      if face.area > existing.area, let sample = FaceRecognizer.sample(from:face) { existing.sample = sample; existing.embedding = face.embedding; existing.area = face.area }
       faceCandidates[id] = existing
     } else if let sample = FaceRecognizer.sample(from:face) {
-      faceCandidates[id] = FaceCandidate(sample:sample, print:face.print, area:face.area, sightings:1)
+      faceCandidates[id] = FaceCandidate(sample:sample, embedding:face.embedding, area:face.area, sightings:1)
     }
   }
   func applyFaceMatches(_ ids: [UUID], at time: Double) { _ = presence.recordFaces(ids, at:time); syncPresence() }

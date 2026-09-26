@@ -6,6 +6,10 @@ A runnable native iOS companion with **iPhone**, **regular Meta glasses**, and *
 
 **Implemented and locally tested; physical glasses acceptance remains unverified.** Pocket operation, nearby-speaker transcription and display wake behavior need the hardware acceptance test. Friend matching runs locally against enrolled photos; Muse does not identify faces or infer emotions/intentions. Current and historical verification results are separated below.
 
+## FaceNet friend matching · September 26
+
+Friend recognition now uses a bundled, on-device FaceNet identity model with shared eye alignment for photo enrollment and camera frames. It rejects ambiguous identities, group-photo enrollment and conflicting profile uploads. **Re-add existing face photos in People** to replace old Vision image features; names and notes remain available. [Model setup, migration and real-camera acceptance](docs/FACENET.md). **98 native tests and 124 backend tests passed**, with simulator and unsigned iPhone builds. Real-world accuracy and glasses latency remain unverified.
+
 ## Current merged app · September 26
 
 William’s full People, groups, friend matching, presence, profile learning, scene labels and simpler UI are integrated with the working glasses flow. **Start glasses** opens lens controls; select **Start** on the glasses to capture. Display glasses default to automatic scene cues every **10 seconds** (**30** in reduced-power mode), with one recent image and available audio-energy context. No transcription runs in this default mode. Recommendations stay until the next result; lens **Pause** and **Stop** control capture.

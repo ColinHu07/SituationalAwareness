@@ -247,14 +247,18 @@ struct FaceEnrollmentSection: View {
           Label("Add face photo", systemImage:"person.crop.square.badge.camera")
           if working { Spacer(); ProgressView() }
         }
-      }.disabled(working || store.people[index].faces.count >= 8)
+      }.disabled(working || store.people[index].faces.filter(\.isCompatible).count >= 8)
+      if store.people[index].faces.contains(where: { !$0.isCompatible }) {
+        Text("These older photos need to be added again for face matching.").font(.caption).foregroundStyle(.orange)
+      }
       if let error { Text(error).font(.caption).foregroundStyle(.red) }
     } header: { Text("Face") } footer: {
-      Text("Add 3–5 clear photos from different angles and lighting. Faces are compared on this iPhone only. Long-press a photo to remove it.")
+      Text("Add 3–5 clear photos of just this person, with both eyes visible, in different lighting. Faces are compared on this iPhone only. Long-press a photo to remove it.")
     }
     .onChange(of:selection) { _, item in
       guard let item else { return }
       selection = nil; working = true; error = nil
+      let personID = store.people[index].id
       Task {
         defer { working = false }
         do {
@@ -262,8 +266,11 @@ struct FaceEnrollmentSection: View {
             throw CopilotError(message:"Couldn't open that photo.")
           }
           let sample = try await Task.detached(priority:.userInitiated) { try FaceRecognizer.enroll(from:image) }.value
-          guard index < store.people.count else { return }
-          store.people[index].faces.append(sample)
+          guard let current = store.people.firstIndex(where: { $0.id == personID }),
+                store.people[current].faces.filter(\.isCompatible).count < 8 else { return }
+          try FaceRecognizer.validateEnrollment(sample, personID:personID, people:store.people)
+          store.people[current].faces.removeAll { !$0.isCompatible }
+          store.people[current].faces.append(sample)
         } catch { self.error = error.localizedDescription }
       }
     }
