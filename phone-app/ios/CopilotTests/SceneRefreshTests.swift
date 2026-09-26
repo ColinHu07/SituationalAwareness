@@ -30,7 +30,8 @@ final class SceneRefreshTests: XCTestCase {
     XCTAssertEqual(model.cue,"This looks like a library. Keep your voice low.")
     let firstUpdate = model.lastAnalysisAtMs
     model.addSimulationScene("group")
-    try await Task.sleep(for:.milliseconds(600))
+    // A changed cue waits for the existing five-second reading interval.
+    try await Task.sleep(for:.milliseconds(5500))
     XCTAssertEqual(model.cue,"People are talking. Wait for a pause before joining in.")
     XCTAssertGreaterThan(model.lastAnalysisAtMs,firstUpdate)
     XCTAssertTrue(model.isTranscribing)
