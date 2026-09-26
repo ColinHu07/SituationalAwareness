@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Aside · Conversation copilot</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header><a class="brand" href="/" aria-label="Aside home"><span class="brandmark">a<span>·</span></span> aside</a><div class="header-right"><span class="tiny-label">CONVERSATION COPILOT</span><span class="pill">DEVELOPMENT LAB</span></div></header>
+<main>
+  <section class="intro"><div><div class="eyebrow"><span class="green-dot"></span> A LITTLE HELP. MORE PRESENCE.</div><h1>Stay in the<br><em>conversation.</em></h1><p>A quiet cue when it helps. Space when it doesn’t.<br>You decide when Aside listens.</p></div><div class="intro-note"><span>01 / PROTOTYPE</span><p>Built for intentional,<br>consensual conversations.</p><small>Hardware verification pending</small></div></section>
+  <div class="workspace">
+    <section class="display-panel panel">
+      <div class="panel-head"><div><span class="eyebrow">PHONE & DISPLAY PREVIEW</span><h2>A glance, then back to them.</h2></div><span class="pill amber">SIMULATED DISPLAY</span></div>
+      <div class="caption-card"><span id="caption-label" class="eyebrow">SIMULATED CAPTIONS</span><p id="caption-text" aria-live="polite">Speech will appear here.</p><small>Completed speech chunks. Separate from AI suggestions.</small></div>
+      <div class="saved-note"><span class="eyebrow">YOUR NOTE</span><p id="saved-note">Add an optional note in Session setup.</p></div>
+      <div class="lens" role="status" aria-live="polite"><div class="lens-top"><span><i id="state-dot"></i><span id="state">STOPPED</span></span><span>ASIDE</span></div><div class="cue-body"><span id="cue-icon">◌</span><p id="cue">Your conversation<br>comes first.</p><small id="cue-detail">Start a session to try a brief cue.</small></div><div class="lens-bottom"><span>Enter · dismiss</span><span>Space · pause</span><span>Esc · stop</span></div></div>
+      <div class="controls"><button class="primary" id="start">▶ <span>Start session</span></button><button id="pause" disabled>Ⅱ Pause</button><button id="stop" disabled>■ Stop</button></div>
+      <div class="secondary-controls"><button id="help" disabled>Help me respond ↗</button><button id="dismiss" disabled>Dismiss cue</button><button id="test-cue" disabled>Test display</button></div>
+      <p id="status" class="status">Start when everyone agrees.</p>
+    </section>
+    <aside class="setup-panel panel"><div class="panel-head"><div><span class="eyebrow">SESSION SETUP</span><h2>On your terms.</h2></div><span class="step">01</span></div>
+      <label class="field-label" for="input-mode">Input source</label><select id="input-mode"><option value="simulated">Simulated conversation</option><option value="browser">Browser camera + manual / mic input</option></select>
+      <p class="hint" id="input-description">Scripted text and a simulated display. No glasses or microphone are connected.</p>
+      <label class="field-label" for="context">A topic you want to remember <span>optional</span></label><input id="context" maxlength="160" placeholder="e.g. My summer internship">
+      <label class="consent"><input type="checkbox" id="consent"><span>I’m 18+ and every participant agrees to this session and the selected processing.</span></label>
+      <p class="hint" id="privacy">In simulation, inputs stay in this local prototype. Stop clears session content.</p>
+      <div class="divider"></div><div class="connection-row"><span><i class="green-dot"></i> Processing</span><strong id="provider">Checking…</strong></div>
+      <label id="token-label" class="field-label" for="proxy-token" hidden>Proxy access token</label><input id="proxy-token" type="password" autocomplete="off" placeholder="Separate proxy token, never your Meta key" hidden>
+      <p class="hint">Model credentials stay on the backend. No conversation content is saved by this prototype.</p>
+    </aside>
+    <section class="transcript-panel panel"><div class="panel-head"><div><span class="eyebrow">RECENT CONTEXT</span><h2>Just the last minute.</h2></div><span id="transcript-count" class="muted">0 utterances</span></div>
+      <div id="transcript" class="transcript"><p class="empty">Nothing captured. You’re in control.</p></div>
+      <div id="simulation-controls"><span class="field-label">Try a conversation moment <span>simulated</span></span><div class="chips"><button data-say="Would you like that hot or iced?">Ordering example</button><button data-say="I’ve been working on a robotics project.">A topic</button><button data-say="Can you have that ready by Friday?">An unclear question</button><button data-say="Anyway, let’s talk about dinner instead.">Change subject</button><button data-say="[unclear speech]" data-confidence="0.2">Unclear speech</button></div><button class="text-button" id="demo">▷ Run scripted demo</button></div>
+      <form id="utterance-form"><label class="field-label" for="utterance">Manual transcript <span id="manual-label">simulated input</span></label><div class="input-row"><input id="utterance" maxlength="500" placeholder="Enter an utterance…" required><button type="submit">Add ↗</button></div></form>
+      <div id="browser-controls" hidden><video id="preview" autoplay muted playsinline></video><div class="chips"><button id="camera">Enable browser camera</button><button id="microphone">Record browser mic · 6 sec</button></div><p class="hint">Explicit development fallback: these are this computer’s inputs, not the glasses. Native iOS handles glasses capture.</p></div>
+    </section>
+    <section class="metrics-panel panel"><div class="panel-head"><div><span class="eyebrow">SESSION SIGNALS</span><h2>Measured, not assumed.</h2></div><span class="step">02</span></div>
+      <div class="metrics-grid"><div><strong id="metric-cues">0</strong><span>Cues shown</span></div><div><strong id="metric-api">—</strong><span>Last API time</span></div><div><strong id="metric-stale">0</strong><span>Stale replies dropped</span></div><div><strong id="metric-bytes">0 KB</strong><span>Request payload</span></div></div>
+      <div class="metric-line"><span>Estimated model + ASR cost</span><strong id="metric-cost">$0.0000</strong></div><div class="metric-line"><span>Last transcription time</span><strong id="metric-asr">—</strong></div><p class="hint" id="metric-note">Simulation timings do not establish hardware or model performance.</p>
+      <details><summary>Failure testing & feedback</summary><div class="chips"><button id="disconnect">Disconnect device</button><button id="network">Simulate network loss</button><button id="distracting">Mark distracting cue</button></div><p class="hint" id="feedback">0 distracting cues marked. Feedback is local and anonymous.</p><button class="text-button" id="export">Export metrics only ↓</button></details>
+    </section>
+  </div>
+  <footer><span>Small cues. Human conversations.</span><span>No identity matching. No emotion inference. No medical claims.</span></footer>
+</main><script type="module" src="/app.mjs"></script>
+</body></html>

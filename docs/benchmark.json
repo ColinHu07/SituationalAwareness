@@ -1,0 +1,16 @@
+{
+  "date": "2026-09-23T06:36:16.379Z",
+  "mode": "SIMULATED provider; localhost HTTP only; no glasses/model/ASR",
+  "requests": 30,
+  "failures": 0,
+  "p50HttpMs": 1.22,
+  "p95HttpMs": 4.16,
+  "minPayloadBytes": 148,
+  "maxPayloadBytes": 169,
+  "fixtureFalseCues": 0,
+  "fixtureMissedCues": 0,
+  "staleResponseBlocked": true,
+  "hardwareLatencyMs": null,
+  "liveModelCostUsd": null,
+  "humanRatedDistraction": null
+}
