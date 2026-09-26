@@ -32,6 +32,12 @@ For this development build, the installer can supply `ASIDE_PROXY_URL` and `ASID
 
 This is live streaming with sampled analysis, not a saved video recording. Raw video/audio files are not written. Camera and microphone stay active between checks until Pause/Stop. Keep the Mac awake and the tunnel open during this test.
 
+### If Resume immediately fails with an update message
+
+The DAT error `datAppOnTheGlassesUpdateRequired` means the on-glasses app must be updated before the SDK can start the session. Open **Meta AI → App Connections** and complete the offered app update. Return to Conversation Copilot and tap **Retry after update**. This is separate from the iPhone companion build; repeatedly tapping Resume or reinstalling the companion cannot satisfy this requirement. If Meta offers no update, preserve the exact message and check availability through Meta's developer support.
+
+The capture screen displays this recovery above the preview, and the setup/capture retry buttons name the update requirement. Camera input remains unverified until a moving preview and received frames appear.
+
 ## Verified in this update
 
 - 26 native tests passed, including media freshness, silent ambient audio, stall cleanup, no-upload display testing, and safe debug configuration.

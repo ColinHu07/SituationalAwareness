@@ -21,6 +21,14 @@ struct PhoneCaptureView: View {
     NavigationStack {
       ScrollView {
         VStack(alignment:.leading,spacing:20) {
+          if usesGlasses && model.glasses.updateRequired {
+            VStack(alignment:.leading,spacing:10) {
+              Label("Glasses app update required",systemImage:"arrow.down.circle").font(.headline)
+              Text(GlassesController.updateInstructions).font(.subheadline)
+              Text("Capture cannot start until Meta completes this update.").font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth:.infinity,alignment:.leading)
+              .padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
+          }
           preview
           cueCard
           sessionStatus
@@ -129,7 +137,7 @@ struct PhoneCaptureView: View {
   private var captureControls: some View {
     HStack(spacing:12) {
       if model.phase == .paused {
-        Button("Resume",systemImage:"play.fill") { model.start() }
+        Button(usesGlasses && model.glasses.updateRequired ? "Retry after update" : "Resume",systemImage:"play.fill") { model.start() }
           .buttonStyle(.borderedProminent).disabled(!model.canStart)
       } else if model.phase == .active {
         Button("Pause",systemImage:"pause.fill") { model.pause() }.buttonStyle(.borderedProminent)

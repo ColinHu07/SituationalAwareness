@@ -205,10 +205,14 @@ final class SessionModel {
           audioRate = microphone.actualSampleRate
         } catch {
           guard epoch == thisEpoch else { return }
+          let needsGlassesUpdate = captureMode.needsGlasses && GlassesController.requiresGlassesAppUpdate(error)
           microphone.stop(); phoneCamera.stop()
           if captureMode.needsGlasses { await glasses.stop() }
           guard epoch == thisEpoch else { return }
-          phase = .paused; notice = error.localizedDescription; return
+          phase = .paused
+          if needsGlassesUpdate { glasses.report(error) }
+          notice = needsGlassesUpdate ? GlassesController.updateInstructions : error.localizedDescription
+          return
         }
       }
       guard epoch == thisEpoch, !Task.isCancelled else { return }

@@ -1,10 +1,23 @@
 import XCTest
 import AVFoundation
 import os
+import MWDATCore
 @testable import Copilot
 
 @MainActor
 final class SessionTests: XCTestCase {
+  func testGlassesAppUpdateErrorPreservesActionableRecovery() {
+    let controller = GlassesController()
+    var failure: String?
+    controller.onFailure = { failure = $0 }
+    controller.report(DeviceSessionError.datAppOnTheGlassesUpdateRequired)
+    XCTAssertTrue(controller.updateRequired)
+    XCTAssertEqual(failure,GlassesController.updateInstructions)
+    XCTAssertEqual(controller.lastError,GlassesController.updateInstructions)
+    controller.report(DeviceSessionError.noEligibleDevice)
+    XCTAssertFalse(controller.updateRequired)
+    XCTAssertNotEqual(failure,GlassesController.updateInstructions)
+  }
   private func activeModel() async throws -> SessionModel {
     let model = SessionModel()
     model.simulate = true; model.localMock = true; model.consent = true

@@ -58,6 +58,15 @@ final class GlassesController {
   var previewAtMs: Double = 0
   var framesReceived = 0
   var lastError: String?
+  var updateRequired = false
+  static let updateInstructions = "Open Meta AI → App Connections and update the app on your glasses. When the update finishes, return here and retry."
+  static func requiresGlassesAppUpdate(_ error: Error) -> Bool {
+    (error as? DeviceSessionError) == .datAppOnTheGlassesUpdateRequired
+  }
+  func report(_ error: Error) {
+    updateRequired = Self.requiresGlassesAppUpdate(error)
+    fail(updateRequired ? Self.updateInstructions : error.localizedDescription)
+  }
   var onFrame: ((UIImage, Double) -> Void)?
   var onFailure: ((String) -> Void)?
   var onHelp: (() -> Void)?
@@ -125,7 +134,7 @@ final class GlassesController {
     sessionRevision += 1
     let revision = sessionRevision
     lastPreviewAt = 0
-    framesReceived = 0; lastError = nil
+    framesReceived = 0; lastError = nil; updateRequired = false
     preview = nil; previewAtMs = 0
     sessionHasStarted = false; cameraHasStreamed = false; displayHasStarted = false
     let permissions: [Permission] = withDisplay ? [.camera, .microphone] : [.camera]
@@ -172,7 +181,7 @@ final class GlassesController {
       }
     })
     tokens.append(deviceSession.errorPublisher.listen { [weak self] error in
-      Task { @MainActor in guard self?.sessionRevision == revision else { return }; self?.fail(error.localizedDescription) }
+      Task { @MainActor in guard self?.sessionRevision == revision else { return }; self?.report(error) }
     })
     try deviceSession.start()
     let deadline = Date().addingTimeInterval(15)

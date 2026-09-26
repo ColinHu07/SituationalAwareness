@@ -66,7 +66,7 @@ struct ContentView: View {
             }
             HStack(spacing:12) {
               if model.phase == .stopped || model.phase == .paused {
-                Button(model.phase == .paused ? "Resume analyzing" : "Start analyzing",systemImage:"play.fill") { model.start() }
+                Button(model.captureMode.needsGlasses && model.glasses.updateRequired ? "Retry after update" : model.phase == .paused ? "Resume analyzing" : "Start analyzing",systemImage:"play.fill") { model.start() }
                   .buttonStyle(.borderedProminent).tint(ink).disabled(!model.canStart)
               } else {
                 Button("Pause",systemImage:"pause.fill") { model.pause() }.buttonStyle(.borderedProminent).tint(ink)
