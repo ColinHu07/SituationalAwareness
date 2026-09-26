@@ -1,6 +1,6 @@
 # Research register
 
-Research date: **2026-09-23**. Current prototype: **Aside**, native iOS companion plus a small Node proxy and a clearly labeled browser simulator. Documentation and source inspection are distinct from successful hardware or authenticated API verification; see the results table in the project README for tests actually run.
+Research date: **2026-09-23**. This is the original research snapshot; the current native implementation now uses the separately documented Muse realtime ASR WebSocket with HTTP WAV fallback. Current behavior and verification live in the [architecture](ARCHITECTURE.md) and root README. Documentation and source inspection are distinct from successful hardware or authenticated API verification.
 
 Detailed primary-source findings:
 

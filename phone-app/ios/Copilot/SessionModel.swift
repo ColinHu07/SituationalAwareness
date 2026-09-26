@@ -23,6 +23,9 @@ final class SessionModel {
   var offline = false
   var connectionTestOnly = false
   var uploadsDisabled: Bool { offline || connectionTestOnly }
+  static let translationLanguages = ["English", "Hindi"]
+  var translationEnabled = UserDefaults.standard.object(forKey:"copilot.translationEnabled") as? Bool ?? true
+  var targetLanguage = UserDefaults.standard.string(forKey:"copilot.targetLanguage") ?? "English"
   var endpoint = UserDefaults.standard.string(forKey:"copilot.endpoint") ?? "http://127.0.0.1:8787"
   var proxyToken = TokenStore.read()
   var selectedAudioUID = ""
@@ -52,9 +55,14 @@ final class SessionModel {
   var latestFrame: SampledFrame?
   var isThinking = false
   var isTranscribing = false
+  var realtimeASRReady = false
+  var speechMode = "Not started"
   var apiMs: Double = 0
   var transcriptionMs: Double = 0
+  var realtimeCaptionLatencyMs: Double = 0
+  var localizationMs: Double = 0
   var contextToDisplayMs: Double = 0
+  var realtimeFallbacks = 0
   var uploadedBytes = 0
   var estimatedCost: Double?
   @ObservationIgnored private var knownCostTotal: Double = 0
@@ -88,7 +96,8 @@ final class SessionModel {
   private(set) var faceCandidates: [UUID: FaceCandidate] = [:]
   @ObservationIgnored lazy var glasses = GlassesController()
   @ObservationIgnored private let phoneCamera = PhoneCamera()
-  @ObservationIgnored private let microphone = ConversationMicrophone()
+  @ObservationIgnored private let microphone: ConversationMicrophone
+  @ObservationIgnored private let realtimeASRFactory: @MainActor (String, String) -> any RealtimeASRTransport
   @ObservationIgnored private var generation = 0
   @ObservationIgnored private var epoch = 0
   @ObservationIgnored private var lastRequestedGeneration = -1
@@ -97,6 +106,14 @@ final class SessionModel {
   @ObservationIgnored private var recentCues: [String] = []
   @ObservationIgnored private var cueTask: Task<Void, Never>?
   @ObservationIgnored private var asrTask: Task<Void, Never>?
+  @ObservationIgnored private var realtimeASR: (any RealtimeASRTransport)?
+  @ObservationIgnored private var localizationTasks: [UUID:Task<Void, Never>] = [:]
+  @ObservationIgnored private var realtimeClock = RealtimeSpeechClock()
+  @ObservationIgnored private var realtimePartials: [Int:(text:String, speaker:String?)] = [:]
+  @ObservationIgnored private var finalizedRealtimeTurnIDs: Set<Int> = []
+  @ObservationIgnored private var visibleRealtimeTurnID: Int?
+  @ObservationIgnored private let speechLanguageBias = ["English", "Hindi"]
+  @ObservationIgnored private var realtimeFallbackNotice: String?
   @ObservationIgnored private var startTask: Task<Void, Never>?
   @ObservationIgnored private var loopTask: Task<Void, Never>?
   @ObservationIgnored private var ttlTask: Task<Void, Never>?
@@ -109,8 +126,12 @@ final class SessionModel {
   /// The setting Muse last recognized, shown as a chip and sent back as background.
   var currentScene: String?
 
-  init(people: PeopleStore? = nil) {
+  init(people: PeopleStore? = nil,
+       microphone: ConversationMicrophone = ConversationMicrophone(),
+       realtimeASRFactory: @escaping @MainActor (String, String) -> any RealtimeASRTransport = { RealtimeASRClient(endpoint:$0, token:$1) }) {
     self.people = people ?? PeopleStore()
+    self.microphone = microphone
+    self.realtimeASRFactory = realtimeASRFactory
     #if DEBUG
     let launchEnvironment = ProcessInfo.processInfo.environment
     if let settings = DevelopmentConnection.settings(from:launchEnvironment) {
@@ -135,6 +156,9 @@ final class SessionModel {
       guard !self.analyzesSurroundings else { return }
       self.lastVoiceAt = timestamp
       self.invalidateCue()
+    } }
+    microphone.onPCM = { [weak self] data, timestamp in Task { @MainActor in
+      self?.sendRealtimePCM(data, endedAtMs:timestamp)
     } }
     microphone.onChunk = { [weak self] chunk in Task { @MainActor in self?.transcribe(chunk) } }
     microphone.onContext = { [weak self] context in Task { @MainActor in
@@ -281,6 +305,9 @@ final class SessionModel {
     phase = .starting
     captureStartedAt = nowMs()
     lastAnalysisAt = 0; nextAnalysisAt = 0
+    realtimeCaptionLatencyMs = 0; localizationMs = 0
+    realtimeFallbackNotice = nil
+    speechMode = sceneOnly ? "Scene only" : simulate ? "Simulated" : connectionTestOnly ? "No uploads" : displayOnly ? "Not started" : "Starting"
     invalidateCue()
     notice = displayOnly ? "Opening controls on glasses. Camera and microphone stay off." : simulate ? "SIMULATED INPUT. No camera or microphone recording." : captureMode == .phone ? "Starting the selected iPhone inputs…" : captureMode.hasGlassesDisplay ? "Opening glasses camera and ambient microphone permissions…" : "Opening glasses permissions, then selecting HFP microphone…"
     startTask = Task { [weak self] in
@@ -299,6 +326,12 @@ final class SessionModel {
           guard epoch == thisEpoch, !Task.isCancelled else { return }
           offline = true; modelMode = "Offline"; notice = "Cannot reach Muse. Camera only."
         }
+        }
+        if !connectionTestOnly && !displayOnly && !offline && !sceneOnly {
+          do { try await startRealtimeASR() }
+          catch { useChunkedFallback("Realtime transcription unavailable; using chunked fallback.") }
+        } else if offline && !sceneOnly {
+          speechMode = "Unavailable offline"
         }
         guard epoch == thisEpoch, !Task.isCancelled else { return }
         if captureMode.needsGlasses { configureGlassesCallbacks() }
@@ -333,7 +366,8 @@ final class SessionModel {
       openingGlassesControls = false
       phase = .active
       captureActiveAtMs = nowMs()
-      if !offline { notice = "" }
+      if let realtimeFallbackNotice { notice = realtimeFallbackNotice }
+      else if !offline { notice = "" }
       publishDisplay()
       loopTask?.cancel()
       loopTask = Task { [weak self] in
@@ -373,6 +407,9 @@ final class SessionModel {
     openingGlassesControls = false; glassesControlsReady = false
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
+    stopRealtimeASR()
+    cancelLocalization()
+    speechMode = "Paused"
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     latestFrame = nil; latestAudioContext = nil; latestSampleAt = 0; transcript.removeAll(); lastVoiceAt = 0; captionText = nil; captionAtMs = 0
@@ -396,6 +433,9 @@ final class SessionModel {
     openingGlassesControls = false; glassesControlsReady = false
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
+    stopRealtimeASR()
+    cancelLocalization()
+    speechMode = "Stopped"
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
@@ -552,9 +592,163 @@ final class SessionModel {
     latestFrame = SampledFrame(dataUrl:"data:image/jpeg;base64," + data.base64EncodedString(), capturedAtMs:time)
     latestSampleAt = time
   }
+  func startRealtimeASR() async throws {
+    stopRealtimeASR()
+    let relay = realtimeASRFactory(endpoint, proxyToken)
+    relay.onEvent = { [weak self] event in self?.applyRealtimeEvent(event) }
+    relay.onFailure = { [weak self] message in
+      guard let self else { return }
+      self.useChunkedFallback(message)
+    }
+    try await relay.start(languageBias:speechLanguageBias)
+    realtimeASR = relay
+    realtimeASRReady = true
+    speechMode = "Realtime diarization"
+    resetRealtimeSessionState()
+  }
+  func useChunkedFallback(_ message: String) {
+    realtimeASR?.onEvent = nil; realtimeASR?.onFailure = nil; realtimeASR?.stop()
+    realtimeASR = nil; realtimeASRReady = false
+    resetRealtimeSessionState()
+    if speechMode != "Chunked fallback" { realtimeFallbacks += 1 }
+    speechMode = "Chunked fallback"
+    realtimeFallbackNotice = message
+    if phase == .active { notice = message }
+  }
+  private func stopRealtimeASR() {
+    realtimeASR?.onEvent = nil
+    realtimeASR?.onFailure = nil
+    realtimeASR?.stop()
+    realtimeASR = nil
+    realtimeASRReady = false
+    resetRealtimeSessionState()
+  }
+  private func resetRealtimeSessionState() {
+    realtimeClock.reset()
+    realtimePartials.removeAll()
+    finalizedRealtimeTurnIDs.removeAll()
+    visibleRealtimeTurnID = nil
+  }
+  func sendRealtimePCM(_ data: Data, endedAtMs: Double) {
+    guard !sceneOnly, !uploadsDisabled, let relay = realtimeASR, realtimeASRReady,
+          phase == .starting || phase == .active else { return }
+    realtimeClock.notePCM(byteCount:data.count, endedAtMs:endedAtMs)
+    relay.sendPCM(data)
+  }
+  private func updateRealtimeLatency(_ event: RealtimeASREvent, receivedAtMs: Double) {
+    guard let capturedAt = realtimeClock.captureTime(audioProcessedMs:event.audioProcessedMs) else { return }
+    realtimeCaptionLatencyMs = max(0, receivedAtMs - capturedAt)
+  }
+  func applyRealtimeEvent(_ event: RealtimeASREvent, receivedAtMs: Double = nowMs()) {
+    guard phase == .active else { return }
+    switch event.type {
+    case "transcript.partial":
+      updateRealtimeLatency(event, receivedAtMs:receivedAtMs)
+      guard let turnID = event.turnId, let raw = event.text else { return }
+      let text = raw.trimmingCharacters(in:.whitespacesAndNewlines)
+      guard !text.isEmpty, !finalizedRealtimeTurnIDs.contains(turnID) else { return }
+      let speaker = validatedSpeakerAlias(event.speaker) ?? realtimePartials[turnID]?.speaker
+      realtimePartials[turnID] = (String(text.prefix(500)), speaker)
+      if visibleRealtimeTurnID == nil || turnID >= visibleRealtimeTurnID! {
+        visibleRealtimeTurnID = turnID
+        setCaption(Self.speakerCaption(speaker, text), capturedAtMs:receivedAtMs)
+      }
+    case "speaker.updated":
+      guard let turnID = event.turnId, let speaker = validatedSpeakerAlias(event.speaker),
+            var partial = realtimePartials[turnID], !finalizedRealtimeTurnIDs.contains(turnID) else { return }
+      partial.speaker = speaker
+      realtimePartials[turnID] = partial
+      if visibleRealtimeTurnID == turnID {
+        setCaption(Self.speakerCaption(speaker, partial.text), capturedAtMs:receivedAtMs)
+      }
+    case "transcript.final":
+      updateRealtimeLatency(event, receivedAtMs:receivedAtMs)
+      guard let turnID = event.turnId, !finalizedRealtimeTurnIDs.contains(turnID), let raw = event.text else { return }
+      finalizedRealtimeTurnIDs.insert(turnID)
+      let text = raw.trimmingCharacters(in:.whitespacesAndNewlines)
+      let prior = realtimePartials.removeValue(forKey:turnID)
+      guard !text.isEmpty else {
+        if visibleRealtimeTurnID == turnID {
+          visibleRealtimeTurnID = nil; captionText = nil; captionAtMs = 0; publishDisplay()
+        }
+        return
+      }
+      let speaker = validatedSpeakerAlias(event.speaker) ?? prior?.speaker
+      let timing = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:receivedAtMs)
+      lastVoiceAt = timing.endMs
+      let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:timing.startMs, endMs:timing.endMs,
+                                  confidence:nil, speaker:speaker)
+      transcript.append(entry)
+      transcript.sort { $0.endMs < $1.endMs }
+      logSpeech(entry); noteNames(in:entry)
+      trimTranscript()
+      if visibleRealtimeTurnID == nil || turnID >= visibleRealtimeTurnID! {
+        visibleRealtimeTurnID = turnID
+        setCaption(Self.speakerCaption(speaker, text), capturedAtMs:receivedAtMs)
+      }
+      localize(entry.id)
+    default: break
+    }
+  }
+  private static func speakerCaption(_ speaker: String?, _ text: String) -> String {
+    speaker.map { "\($0): \(text)" } ?? text
+  }
+  private func localize(_ entryID: UUID) {
+    guard translationEnabled, !simulate, !uploadsDisabled, localizationTasks[entryID] == nil,
+          let index = transcript.firstIndex(where: { $0.id == entryID }) else { return }
+    let entry = transcript[index]
+    let context = transcript[..<index].suffix(2).map {
+      LocalizationContextTurn(text:$0.text, speaker:$0.speaker)
+    }
+    let request = LocalizationRequest(text:entry.text, speaker:entry.speaker,
+                                      targetLanguage:targetLanguage, context:Array(context))
+    let thisEpoch = epoch
+    let requestedAt = nowMs()
+    let connection = client
+    localizationTasks[entryID] = Task { [weak self] in
+      guard let self else { return }
+      defer { if self.epoch == thisEpoch { self.localizationTasks[entryID] = nil } }
+      do {
+        let (response, bytes): (LocalizationResponse, Int) = try await connection.post("api/localize", request)
+        guard self.epoch == thisEpoch, self.phase == .active, !Task.isCancelled else { return }
+        self.uploadedBytes += bytes
+        self.localizationMs = response.metrics?.apiMs ?? max(0, nowMs() - requestedAt)
+        self.recordCost(response.metrics?.estimatedCostUsd)
+        self.applyLocalization(response.result, to:entryID)
+      } catch {
+        guard self.epoch == thisEpoch, self.phase == .active, !Task.isCancelled else { return }
+        if self.transcript.last?.id == entryID { self.notice = "Translation unavailable; showing original speech." }
+      }
+    }
+  }
+  private func cancelLocalization() {
+    localizationTasks.values.forEach { $0.cancel() }
+    localizationTasks.removeAll()
+  }
+  func applyLocalization(_ result: LocalizationResult, to entryID: UUID, completedAtMs: Double = nowMs()) {
+    guard phase == .active, result.targetLanguage == targetLanguage,
+          let index = transcript.firstIndex(where: { $0.id == entryID }) else { return }
+    guard result.confidence >= 0.65 else {
+      if transcript.last?.id == entryID { notice = "Translation uncertain; showing original speech." }
+      return
+    }
+    transcript[index].localization = result
+    guard transcript.last?.id == entryID, realtimePartials.isEmpty else { return }
+    let entry = transcript[index]
+    setCaption(Self.speakerCaption(entry.speaker, result.translation), capturedAtMs:completedAtMs)
+  }
+  func translationSettingsChanged() {
+    guard phase == .stopped else { return }
+    if !Self.translationLanguages.contains(targetLanguage) { targetLanguage = "English" }
+    UserDefaults.standard.set(translationEnabled, forKey:"copilot.translationEnabled")
+    UserDefaults.standard.set(targetLanguage, forKey:"copilot.targetLanguage")
+  }
   func transcribe(_ chunk: AudioChunk) {
-    guard !sceneOnly, !uploadsDisabled, phase == .active, chunk.startedAtMs >= captureStartedAt - 200 else { return }
+    // WAV transcription is an explicit fallback, not a duplicate stream while realtime is healthy.
+    guard realtimeASR == nil, !sceneOnly, !uploadsDisabled, phase == .active,
+          chunk.startedAtMs >= captureStartedAt - 200 else { return }
     guard asrTask == nil else { audioDrops += 1; return }
+    speechMode = "Chunked fallback"
     let thisEpoch = epoch
     let connection = client
     isTranscribing = true
@@ -574,6 +768,7 @@ final class SessionModel {
         // cues take longer than the gap between sentences in a real conversation.
         setCaption(text, capturedAtMs:chunk.endedAtMs)
         trimTranscript()
+        localize(entry.id)
       } catch {
         guard epoch == thisEpoch, !Task.isCancelled else { return }
         // Fail closed: missing transcription cannot be quietly replaced by a fixture.

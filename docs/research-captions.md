@@ -36,7 +36,9 @@ After the full William merge, Display glasses default to scene-only analysis. En
 
 With captions enabled, the glasses layout keeps the caption excerpt in body text and a separately labeled social cue in smaller `.meta` text. Both are part of one display update. New speech updates captions without cancelling pending cues. Pause, Stop and Dismiss clear cues; delivery freshness checks still reject expired results.
 
-These are **completed transcription chunks**, not word-by-word streaming captions. Audio chunks can span up to six seconds before ASR request latency. Chunks arriving while a transcription request is in flight are dropped, so the app does not yet promise a complete conversation transcript. Caption excerpts expire after 15 seconds; the lens shows up to 60 characters and the phone up to 240. The display is an excerpt, not an archival transcript. These limits describe app logic, not Meta's consumer caption feature or a measured latency/accuracy guarantee.
+The implemented native path now sends normalized **16 kHz mono PCM16** to the authenticated Muse realtime WebSocket and requests `DIARIZATION` with cumulative partials. Each partial replaces the current hypothesis; only `speechComplete` commits a turn. `turnId` reconciliation prevents a delayed final or localization response from replacing a newer live partial. Provider speaker labels are converted to session-local `P1`/`P2` aliases and reset with the realtime session; they are never linked to People profiles.
+
+The app renders only the partial events Muse actually supplies; it does not progressively reveal a completed sentence. If `DIARIZATION` emits sparse partials, the visible cadence will remain sparse and Stats records the latest provider-progress-to-phone latency. Realtime startup, connection or queue failure switches to the bounded WAV path, where windows can again span up to six seconds and overlapping HTTP requests can drop chunks. Caption excerpts expire after 15 seconds; the lens shows up to 64 characters and the phone up to 240. These are app-owned excerpts, not Meta consumer Live Captions or a measured latency/accuracy guarantee.
 
 ## Official MCP provenance
 

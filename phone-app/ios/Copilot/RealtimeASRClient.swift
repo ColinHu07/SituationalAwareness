@@ -53,7 +53,17 @@ struct RealtimeSpeechClock: Sendable {
 }
 
 @MainActor
-final class RealtimeASRClient {
+protocol RealtimeASRTransport: AnyObject {
+  var ready: Bool { get }
+  var onEvent: ((RealtimeASREvent) -> Void)? { get set }
+  var onFailure: ((String) -> Void)? { get set }
+  func start(languageBias: [String]) async throws
+  func sendPCM(_ data: Data)
+  func stop()
+}
+
+@MainActor
+final class RealtimeASRClient: RealtimeASRTransport {
   nonisolated static let maxFrameBytes = 64 * 1024
   private static let maxQueuedBytes = 512 * 1024
 
@@ -89,8 +99,8 @@ final class RealtimeASRClient {
     }
     switch scheme {
     case "https": components.scheme = "wss"
-    case "http" where ["localhost", "127.0.0.1", "::1"].contains(host): components.scheme = "ws"
-    default: throw CopilotError(message:"Realtime transcription requires HTTPS, except simulator localhost.")
+    case "http" where isLocalNetworkHost(host): components.scheme = "ws"
+    default: throw CopilotError(message:"Realtime transcription requires HTTPS, except explicitly local development hosts.")
     }
     var path = components.path
     while path.hasSuffix("/") { path.removeLast() }

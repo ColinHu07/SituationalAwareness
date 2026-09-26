@@ -13,14 +13,14 @@ Aside is an explicitly started surroundings and conversation aid. Display mode o
 | Display glasses | Low-resolution 2 FPS HEVC and 16 kHz mono ambient PCM in one DAT camera stream | Glasses social cue with optional captions; phone preview/status |
 | Simulated demo | Typed speech and synthetic image fixtures | Explicitly simulated cue; no sensor capture |
 
-The phone handles video decoding, JPEG sampling, bounded PCM/WAV batching, transcript state, scheduling and cue validation. Muse performs transcription and image/text inference via an authenticated backend. No model runs on the glasses, and full-video streaming to Muse is not implemented.
+The phone handles video decoding, JPEG sampling, realtime PCM streaming, bounded WAV fallback batching, transcript state, scheduling and cue validation. Muse performs transcription and image/text inference via an authenticated backend. No model runs on the glasses, and full-video streaming to Muse is not implemented.
 
 ```mermaid
 flowchart LR
     G[Display glasses] -->|DAT HEVC + timestamped ambient PCM| I[iOS companion]
-    I -->|Bounded 16 kHz mono WAV| P[Authenticated Node proxy]
-    P -->|HTTP ASR| A[Muse Voice Transcribe]
-    A -->|Recognized words| I
+    I -->|16 kHz mono PCM realtime; bounded WAV fallback| P[Authenticated Node proxy]
+    P -->|Realtime DIARIZATION; HTTP fallback| A[Muse Voice Transcribe]
+    A -->|Cumulative partials + finalized turns| I
     I -->|Fresh JPEG + words + coarse energy metadata| P
     P -->|Image and text request| M[Muse Spark Standard]
     M -->|Social cue or abstention| P
@@ -28,7 +28,7 @@ flowchart LR
     I -->|Validated current cue| D[DAT display and controls]
 ```
 
-`phone-app/ios/Copilot` owns phone capture, bounded audio/transcript state and the API client. `regular-glasses/Sources` owns shared DAT transport and HEVC decoding. `display-glasses/Sources` owns cue-first rendering and serialized sends/clears. `server/index.mjs` exposes only `POST /api/cue` and `POST /api/transcribe`; `server/model.mjs` owns provider credentials/prompts; `server/validation.mjs` validates timestamps, images and WAV. `shared/protocol.mjs` retains the browser conversation policy.
+`phone-app/ios/Copilot` owns phone capture, bounded audio/transcript state and the API client. `regular-glasses/Sources` owns shared DAT transport and HEVC decoding. `display-glasses/Sources` owns cue-first rendering and serialized sends/clears. `server/index.mjs` exposes authenticated cue, transcription, localization and learning POST routes and attaches the native-only realtime ASR upgrade route. `server/model.mjs`, `server/localization.mjs` and `server/realtime-asr.mjs` keep provider credentials and prompts server-side; `server/validation.mjs` validates timestamps, speaker aliases, narrow localization input, images and WAV. `shared/protocol.mjs` retains the browser conversation policy.
 
 Display audio uses experimental `StreamConfiguration.audioCodec` / `audioFramePublisher`, with DAT camera and microphone permissions plus iOS microphone permission. Camera and Audio Streaming app approval is required for development/beta use; production publishing is unavailable for this capability. Regular glasses retain add camera → select/settle/verify HFP → start video. Both paths use a single `DeviceSession`, and Display is attached to that same session. The [pinned release notes](https://github.com/facebook/meta-wearables-dat-ios/blob/1.0.0/CHANGELOG.md) and [current official audio guide](https://github.com/facebook/meta-wearables-dat-ios/blob/main/plugins/mwdat-ios/skills/audio-streaming/SKILL.md) document the API and access conditions.
 
@@ -38,7 +38,9 @@ Start checks for a reachable live proxy. If it is unreachable or not live, captu
 
 `analysisMode: "surroundings"` selects a separate Spark prompt. It accepts fresh images without requiring speech; normal conversation mode retains speech-grounded behavior. Both use `muse-spark-1.3` image/text Chat Completions, low reasoning effort and a strict five-field schema: `cue`, `reason`, `confidence`, `type`, `should_display`. Types remain `clarify`, `follow_up`, `reminder`, `respond`, `abstain`; simple environmental etiquette uses `reminder`.
 
-Speech goes through `muse-voice-transcribe-1.0` HTTP ASR. Captions represent completed recognized speech, never generated scene narration. A bounded 240-character caption expires after 15 seconds and survives cue dismissal. Captions are optional on the glasses and appear after the social cue. Notes remain wearer-authored; Pause retains them, Stop clears them.
+Speech normally goes through the server-authenticated `muse-voice-transcribe-1.0` realtime WebSocket in `DIARIZATION` mode. The phone forwards raw 16 kHz mono PCM16 before WAV construction, replaces cumulative partial hypotheses, and commits only finalized turns with session-local speaker aliases. The HTTP ASR endpoint remains an explicit startup/connection/backpressure fallback. Captions always represent recognized speech, never generated scene narration. A bounded 240-character phone caption expires after 15 seconds and survives cue dismissal; Display shows a 64-character excerpt alongside any social cue. Notes remain wearer-authored; Pause retains them, Stop clears them.
+
+Finalized turns may use `/api/localize`. Its strict input is the current utterance, optional validated `P1`/`P2` alias, selected target language and at most two prior text turns. Images, audio, face data, People IDs, names, notes and full history are excluded. Low-confidence or failed localization leaves original ASR text unchanged.
 
 Optional `audioContext` contains source (`glasses_pcm`, `glasses_hfp`, or `phone`), capture timestamp, window length, dBFS energy and activity ratio. This is coarse, uncalibrated capture metadata. It is not dB SPL, speech identity, a sound label or an audible tone. Low energy or missing words does not prove quiet surroundings; energy alone cannot justify a cue. The Spark prompt forbids mood/mental-state inference from faces, voices or behavior. A cue about giving space must be grounded in explicit words or other appropriate current evidence.
 
@@ -66,7 +68,7 @@ The wearer confirms consent and taps **Start analyzing**. Sensors remain active 
 | Cue confidence / size | At least 0.80; at most 14 words / 90 characters |
 | Deduplication | Last 20 normalized cues |
 | Cue HTTP timeout / concurrency | 20 seconds / one request; surroundings result age ≤20 seconds, conversation result age ≤10 seconds |
-| ASR concurrency | One; overlapping chunks drop |
+| ASR transport | One realtime socket with a bounded 512 KiB client queue; HTTP fallback allows one in-flight chunk and drops overlap |
 
 These are provisional bounds. An automatic request waits for both its inference interval and any cue cooldown; no-cue responses permit subsequent checks at the selected interval. Manual Analyze now bypasses those automatic timing gates, but not consent, active state, completed ASR, fresh evidence or output validation. Speech can affect cadence for 30 seconds while only the last 15 seconds qualifies as current cue evidence. When current speech ages out, surroundings requests omit the old transcript and may use a fresh image alone.
 
@@ -101,7 +103,7 @@ HEVC supports the documented background camera path, but locked-phone audio/deco
 | Sampled image + rolling transcript + coarse energy | Implemented; bounded uploads and easy freshness checks, but misses motion/events between images and loses audible tone |
 | Short MP4 with synchronized audio | Documented Spark alternative; requires accumulation, encoding/upload and file-lifecycle work; no benefit measured for this cue task |
 | Persistent live video/audio socket to Spark | Not established by inspected docs; text SSE is not live-video input |
-| Realtime ASR + sampled images | Documented future optimization; adds WebSocket credentials, turn reconciliation and renewal without adding live video reasoning |
+| Realtime ASR + sampled images | Implemented for native conversation mode with backend-held credentials, `turnId` reconciliation and chunk fallback; provider partial cadence and reconnection still need physical/live acceptance |
 
 See [model research](research-model.md) for provider sources and limits. No alternative is rejected on invented latency or cost.
 

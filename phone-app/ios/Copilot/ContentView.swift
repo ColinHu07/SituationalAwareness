@@ -82,10 +82,22 @@ struct ContentView: View {
           if model.cue != nil { Button("Not helpful",systemImage:"hand.thumbsdown") { model.markDistracting() }.font(.caption).tint(.secondary) }
           if !model.sceneOnly { VStack(alignment:.leading,spacing:12) {
             Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
-            Text(model.captionText ?? "—")
+            Text(model.captionText ?? (model.connectionTestOnly ? "Capture test: no transcription." : "Speech will appear here."))
               .font(.system(size:25,weight:.medium,design:.rounded))
               .foregroundStyle(model.captionText == nil ? .secondary : .primary)
               .frame(maxWidth:.infinity,minHeight:80,alignment:.leading)
+            if let entry = model.transcript.last, let localized = entry.localization {
+              Text("\(localized.sourceLanguage) → \(localized.targetLanguage)").font(.caption.bold()).foregroundStyle(.secondary)
+              Text("Original: \(entry.text)").font(.subheadline)
+              if localized.changedForPragmatics {
+                Text("Literal: \(localized.literalMeaning)").font(.caption).foregroundStyle(.secondary)
+                if !localized.pragmaticNote.isEmpty { Text(localized.pragmaticNote).font(.caption).foregroundStyle(.secondary) }
+              }
+            }
+            Text(model.translationEnabled
+                 ? "Muse partials appear immediately; finalized turns are localized when possible. P1/P2 are session-local speakers, not identities."
+                 : "Muse partials appear immediately. P1/P2 are session-local speakers, not identities.")
+              .font(.caption).foregroundStyle(.secondary)
           }.padding(22).background(.white,in:RoundedRectangle(cornerRadius:20))
 
           }
@@ -105,23 +117,38 @@ struct ContentView: View {
               if model.transcript.isEmpty { Text("—").foregroundStyle(.secondary) }
               ForEach(model.transcript) { entry in
                 VStack(alignment:.leading,spacing:3) {
-                  Text(Date(timeIntervalSince1970:entry.endMs/1000),style:.time).font(.caption).foregroundStyle(.secondary)
+                  HStack {
+                    Text(Date(timeIntervalSince1970:entry.endMs/1000),style:.time)
+                    if let speaker = entry.speaker { Text(speaker).fontWeight(.semibold) }
+                  }.font(.caption).foregroundStyle(.secondary)
                   Text(entry.text).font(.subheadline)
+                  if let localized = entry.localization {
+                    Text(localized.translation).font(.subheadline.weight(.semibold))
+                    if localized.changedForPragmatics {
+                      Text("Literal: \(localized.literalMeaning)").font(.caption).foregroundStyle(.secondary)
+                      if !localized.pragmaticNote.isEmpty { Text(localized.pragmaticNote).font(.caption).foregroundStyle(.secondary) }
+                    }
+                  }
                 }.frame(maxWidth:.infinity,alignment:.leading)
               }
             }.padding(.top,12)
           }
           DisclosureGroup("Stats") {
             Grid(alignment:.leading,horizontalSpacing:20,verticalSpacing:10) {
+              metric("Speech path",model.speechMode)
               metric("Cue API",String(format:"%.0f ms",model.apiMs))
-              metric("Transcription",String(format:"%.0f ms",model.transcriptionMs))
+              metric("Chunked transcription",String(format:"%.0f ms",model.transcriptionMs))
+              metric("Realtime caption latency",model.realtimeCaptionLatencyMs > 0 ? String(format:"%.0f ms",model.realtimeCaptionLatencyMs) : "Unavailable")
+              metric("Localization API",model.localizationMs > 0 ? String(format:"%.0f ms",model.localizationMs) : "Unavailable")
               metric("Context → phone cue",String(format:"%.0f ms",model.contextToDisplayMs))
               metric("Successful upload JSON",String(format:"%.1f KB",Double(model.uploadedBytes)/1024))
               metric("Approx. model cost",model.estimatedCost.map { String(format:"$%.5f",$0) } ?? "Unavailable")
               metric("Cues / distracting","\(model.shown) / \(model.distracting)")
               metric("Stale / audio drops","\(model.staleDrops) / \(model.audioDrops)")
+              metric("Realtime fallbacks","\(model.realtimeFallbacks)")
               metric("Microphone source rate",model.audioRate > 0 ? "\(Int(model.audioRate)) Hz" : "Unmeasured")
             }.font(.caption).padding(.top,12)
+            Text("Realtime latency is measured from provider audio progress to phone receipt. It does not include glasses display acknowledgement. Diagnostics contain no transcript or audio content.").font(.caption2).foregroundStyle(.secondary).padding(.top,8)
           }
         }.padding(24)
       }.background(Color(red:0.95,green:0.97,blue:0.95))
@@ -257,6 +284,14 @@ struct ContentView: View {
             Toggle("Conversation and captions",isOn:$model.glassesConversationEnabled).disabled(model.phase != .stopped)
             Text("Off keeps automatic scene cues. On adds speech captions, name detection and conversation learning.").font(.caption)
           }
+          Toggle("Semantic localization",isOn:$model.translationEnabled)
+            .onChange(of:model.translationEnabled) { _, _ in model.translationSettingsChanged() }
+            .disabled(model.phase != .stopped)
+          Picker("Caption language",selection:$model.targetLanguage) {
+            ForEach(SessionModel.translationLanguages,id:\.self) { Text($0).tag($0) }
+          }.onChange(of:model.targetLanguage) { _, _ in model.translationSettingsChanged() }
+            .disabled(model.phase != .stopped)
+          Text("Localization sends only a finalized utterance, its P1/P2 alias, the target language, and up to two prior text turns. It never sends images, audio, profiles, names, or notes.").font(.caption)
           TextField("Things you chose to remember (one per line)",text:$model.contextText,axis:.vertical).lineLimit(3...5).onChange(of:model.contextText) { _, _ in model.contextChanged() }
           if model.analyzesSurroundings {
             if model.captureMode.hasGlassesDisplay {

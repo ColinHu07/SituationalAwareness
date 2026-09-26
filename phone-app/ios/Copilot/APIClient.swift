@@ -7,7 +7,46 @@ struct TranscriptEntry: Codable, Identifiable {
   let startMs: Double
   let endMs: Double
   let confidence: Double?
-  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence }
+  let speaker: String?
+  var localization: LocalizationResult? = nil
+  init(text: String, startMs: Double, endMs: Double, confidence: Double?, speaker: String? = nil) {
+    self.text = text; self.startMs = startMs; self.endMs = endMs
+    self.confidence = confidence; self.speaker = validatedSpeakerAlias(speaker)
+  }
+  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence, speaker }
+}
+func validatedSpeakerAlias(_ value: String?) -> String? {
+  guard let value, value.range(of:#"^P(?:[1-9]|[1-9][0-9])$"#, options:.regularExpression) != nil else { return nil }
+  return value
+}
+struct LocalizationContextTurn: Encodable, Sendable {
+  let text: String
+  let speaker: String?
+}
+struct LocalizationRequest: Encodable, Sendable {
+  let text: String
+  let speaker: String?
+  let targetLanguage: String
+  let context: [LocalizationContextTurn]
+}
+struct LocalizationResult: Decodable, Equatable, Sendable {
+  let sourceLanguage: String
+  let targetLanguage: String
+  let translation: String
+  let literalMeaning: String
+  let pragmaticNote: String
+  let confidence: Double
+  let changedForPragmatics: Bool
+}
+struct LocalizationResponse: Decodable, Sendable {
+  struct Metrics: Decodable, Sendable {
+    let apiMs: Double?
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let estimatedCostUsd: Double?
+  }
+  let result: LocalizationResult
+  let metrics: Metrics?
 }
 struct SampledFrame: Codable { let dataUrl: String; let capturedAtMs: Double }
 struct AudioContext: Encodable, Sendable {
@@ -86,6 +125,7 @@ struct APIClient {
   func post<Input: Encodable, Output: Decodable>(_ path: String, _ value: Input) async throws -> (Output, Int) {
     var request = URLRequest(url: try url(path))
     if path == "api/cue" { request.timeoutInterval = 20 }
+    if path == "api/localize" { request.timeoutInterval = 12 }
     if path == "api/learn" { request.timeoutInterval = 40 }
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")

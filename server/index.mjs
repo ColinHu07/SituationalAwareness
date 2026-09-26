@@ -6,10 +6,13 @@ import { timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
 import { createProvider } from './model.mjs';
-import { validateInput, validateAudio, validateLearnInput } from './validation.mjs';
+import { createLocalizationProvider } from './localization.mjs';
+import { attachRealtimeASR } from './realtime-asr.mjs';
+import { validateInput, validateAudio, validateLearnInput, validateLocalizationInput } from './validation.mjs';
 import { abstain, LIMITS } from '../shared/protocol.mjs';
 
-export function createServer({ env = process.env, provider = createProvider(env) } = {}) {
+export function createServer({ env = process.env, provider = createProvider(env), localizer } = {}) {
+  localizer ??= createLocalizationProvider(env);
   const token = env.COPILOT_PROXY_TOKEN || '';
   const host = env.HOST || '127.0.0.1';
   if ((provider.mode === 'live' || !['127.0.0.1', 'localhost', '::1'].includes(host)) && token.length < 32)
@@ -18,7 +21,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
   // Four slots: the phone transcribes and asks for a cue at the same time, with headroom for cancelled work.
   const recent = [], MAX_PER_MINUTE = 60, MAX_ACTIVE = 4;
   const files = { '/': '../web/index.html', '/app.mjs': '../web/app.mjs', '/style.css': '../web/style.css', '/shared/protocol.mjs': '../shared/protocol.mjs' };
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -40,7 +43,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
         const data = await readFile(new URL(files[path], import.meta.url));
         res.writeHead(200, { 'Content-Type': path.endsWith('.mjs') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html' }); return res.end(data);
       }
-      if (req.method !== 'POST' || !['/api/cue','/api/transcribe','/api/learn'].includes(path)) return json(404, { error: 'Not found' });
+      if (req.method !== 'POST' || !['/api/cue','/api/transcribe','/api/localize','/api/learn'].includes(path)) return json(404, { error: 'Not found' });
       if (!tokenValid) return json(401, { error: 'Enter the proxy token, not the model API key.' });
       if (!(req.headers['content-type'] || '').startsWith('application/json')) return json(415, { error: 'Expected application/json' });
       while (recent.length && recent[0] < Date.now() - 60000) recent.shift();
@@ -49,6 +52,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
       let bytes = 0; const chunks = [];
       for await (const chunk of req) { bytes += chunk.length; if (bytes > 1_000_000) { json(413, { error: 'Payload exceeds 1 MB' }); req.destroy(); return; } chunks.push(chunk); }
       let body; try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { return json(400, { error: 'Invalid JSON' }); }
+      if (path === '/api/localize') return json(200, await localizer.localize(validateLocalizationInput(body), controller.signal));
       if (path === '/api/cue') {
         const input = validateInput(body), last = input.transcript.at(-1);
         const recentSpeech = last && Date.now() - last.endMs <= LIMITS.speechMs && (last.confidence === null || last.confidence >= 0.65);
@@ -64,6 +68,8 @@ export function createServer({ env = process.env, provider = createProvider(env)
       json(status, { error: status === 400 ? error.message : status === 503 ? error.message : 'Processing unavailable. No cue shown; try again after a pause.' });
     } finally { if (acquired) active--; }
   });
+  attachRealtimeASR(server, { env, token });
+  return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
