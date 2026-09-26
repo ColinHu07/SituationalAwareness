@@ -5,7 +5,7 @@ import XCTest
 final class PeopleTests: XCTestCase {
   private func activeModel(_ store: PeopleStore) async throws -> SessionModel {
     let model = SessionModel(people:store)
-    model.simulate = true; model.localMock = true
+    model.simulate = true; model.localMock = true; model.consent = true
     model.start()
     try await Task.sleep(for:.milliseconds(100))
     XCTAssertEqual(model.phase,.active)

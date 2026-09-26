@@ -1,5 +1,15 @@
 # Native iOS companion
 
+## Quick multi-speaker caption test
+
+Configure the existing Muse proxy in Settings, then choose **iPhone → Multi-speaker captions** on the home screen. On the separate **Live captions** screen, tap **Start** and allow microphone access. Up to three recent speaker rows (Person A, Person B, Person C) remain visible together and update independently. **Stop** clears the captions and microphone; backgrounding the app or using **Back** also stops capture. No camera or scene analysis runs in this test. Rows expire individually after 15 seconds without an update.
+
+Run `npm install` and restart the backend for the new `/api/asr/realtime` WebSocket route. The server needs `MODEL_MODE=live`, `MUSE_API_KEY`, and the existing separate proxy token. This test uses Muse's actual speaker labels and stops with an error if realtime transcription is unavailable. It does not fabricate speaker labels from chunked transcription. Simultaneously visible rows do not guarantee recognition of both voices during overlapping speech. Translation is not included in this quick test.
+
+The home screen keeps its **iPhone / Glasses** source buttons, People, Settings, camera, and conversation cues. Use **Back** to return from the caption test.
+
+Expand **Timing & debug** on the caption screen to inspect timestamped capture, socket send, proxy forwarding, Muse progress, speaker/final events, and caption-state updates. Audio offsets and queue depths show where the stream falls behind; the round-trip measure covers phone ↔ proxy only. Event age is an estimate from the phone's audio callback clock and provider stream progress, not word-level latency or isolated model compute time. Phone and server elapsed timestamps use separate clocks. Audio/send summaries are throttled to once per second. **Share timing log** exports the last 200 metadata-only events; the same events appear under `CaptionTiming` in the native console. Stop keeps the log for inspection; Start resets it. Returning home discards the screen's in-memory log.
+
 Open `Copilot.xcodeproj` in Xcode 26.6 or newer. The project pins Meta Wearables DAT **1.0.0** (`MWDATCore`, `MWDATCamera`, `MWDATDisplay`) and targets iOS 17.2+. No generated project step is needed. **iPhone** mode is the default and uses the built-in microphone with optional rear camera. **Meta glasses** retains camera/HFP capture and phone output. **Display glasses** uses low-rate video plus ambient PCM and shows social cues on the glasses. Physical capture/display behavior remains unverified; synthetic live Muse transport/schema checks are recorded in the root README.
 
 ## Run the simulator
@@ -52,7 +62,7 @@ The [pinned release notes](https://github.com/facebook/meta-wearables-dat-ios/bl
 
 | Layer | Display surroundings mode |
 |---|---|
-| Glasses transport | Low-resolution `.hvc1` HEVC, requested 2 FPS, direct 16 kHz mono PCM |
+| Glasses transport | Low-resolution `.hvc1` HEVC, requested 15 FPS, direct 16 kHz mono PCM |
 | Local image sampling | One JPEG refreshed every 2 seconds; maximum dimension 640 pixels, quality 0.6 |
 | Muse check eligibility | 8 seconds with recognized speech less than 30 seconds old; 20 seconds otherwise |
 | Reduced power | 30-second checks in Low Power Mode or serious phone thermal state; critical thermal state pauses |

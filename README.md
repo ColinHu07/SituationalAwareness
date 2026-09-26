@@ -1,10 +1,14 @@
 # Aside — an opt-in conversation copilot
 
-**Live test:** the same installed iOS app now offers **iPhone / Glasses** source selection and a shared camera-and-cue screen. Choose **Glasses → With display** for mirrored phone/glasses text. [Step-by-step live glasses setup and test](docs/LIVE_GLASSES_TEST.md).
+**Live test:** the same installed iOS app offers **iPhone / Glasses** source selection and a shared camera-and-cue screen. Choose **Glasses → With display** for mirrored phone/glasses text. The iPhone source card also offers **Multi-speaker captions**, a separate Start/Stop test with up to three speaker rows. [Phone caption test setup](phone-app/ios/README.md#quick-multi-speaker-caption-test). [Step-by-step live glasses setup and test](docs/LIVE_GLASSES_TEST.md).
 
 A runnable native iOS companion with **iPhone**, **regular Meta glasses**, and **Display glasses** capture modes, a small credential-holding backend, and an explicitly simulated browser lab. The wearer starts deliberately, gets a brief social cue from the visible setting or recent recognized speech, and can dismiss, pause or stop.
 
 **Implemented and locally tested; physical glasses acceptance remains unverified.** Pocket operation, nearby-speaker transcription and display wake behavior need the hardware acceptance test. Friend matching runs locally against enrolled photos; Muse does not identify faces or infer emotions/intentions. Current and historical verification results are separated below.
+
+## FaceNet friend matching · September 26
+
+Friend recognition now uses a bundled, on-device FaceNet identity model with shared eye alignment for photo enrollment and camera frames. It rejects ambiguous identities, group-photo enrollment and conflicting profile uploads. **Re-add existing face photos in People** to replace old Vision image features; names and notes remain available. [Model setup, migration and real-camera acceptance](docs/FACENET.md). **98 native tests and 124 backend tests passed**, with simulator and unsigned iPhone builds. Real-world accuracy and glasses latency remain unverified.
 
 ## Current merged app · September 26
 
@@ -163,3 +167,13 @@ See [dated research and sources](docs/RESEARCH.md), [architecture and alternativ
 | `docs/` | Research, architecture, acceptance script and recorded measurements |
 
 The HEVC decoder is adapted from Meta's official sample; attribution and license are retained under `phone-app/ios/ThirdParty/`.
+
+## September 26: persistent cues and tone coaching
+
+William's `daba7fe` update is integrated with the existing phone and glasses flows. Cues persist until replaced or dismissed, with a five-second minimum dwell and a ten-second quiet period after dismissal. Checks run every three seconds near recent speech, five seconds otherwise, four seconds in scene-only Display mode, or fifteen seconds in reduced-power mode; requests remain serialized. The phone keeps up to eight short model summaries as session memory and sends the current cue so unchanged advice need not be redrawn. Native cue confidence eligibility is now 0.6. These settings supersede older timing descriptions elsewhere in this repository.
+
+**Coach my wording** adds a separate recovery suggestion for potentially blunt speech. **That was me** calibrates a microphone-level heuristic; it is separate from the provider's speaker labels in multi-speaker captions. The backend adds `/api/tone` and allows up to 120 requests per minute.
+
+The integration preserves realtime multi-speaker phone captions and timing diagnostics, the camera preview frame-rate fix, glasses scene/conversation switching, wristband controls, no-upload capture testing, and conversation learning when glasses streaming stops. Physical hardware and live-provider behavior still require validation.
+
+Merge validation: all 124 Node tests passed. Native simulator testing was attempted twice but blocked by local disk exhaustion while Xcode wrote module/index caches (`No space left on device`); native test results are not confirmed for this merge.

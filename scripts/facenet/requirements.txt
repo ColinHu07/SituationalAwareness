@@ -1,0 +1,6 @@
+# Python 3.11, macOS (Core ML prediction verification runs during export).
+torch==2.2.2
+torchvision==0.17.2
+facenet-pytorch==2.6.0
+coremltools==8.3.0
+numpy==1.26.4

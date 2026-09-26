@@ -4,6 +4,12 @@ import FoundationNetworking
 #endif
 
 struct RealtimeASREvent: Decodable, Sendable {
+  struct Timing: Decodable, Sendable {
+    let serverElapsedMs: Double
+    let audioReceivedMs: Double
+    let audioForwardedMs: Double
+    let upstreamQueuedMs: Double
+  }
   let type: String
   let sessionId: String?
   let turnId: Int?
@@ -12,13 +18,15 @@ struct RealtimeASREvent: Decodable, Sendable {
   let startAudioMs: Double?
   let endAudioMs: Double?
   let audioProcessedMs: Double?
+  var timing: Timing? = nil
+  var clientSentMs: Double? = nil
 
   init(type: String, sessionId: String? = nil, turnId: Int? = nil, speaker: String? = nil,
        text: String? = nil, startAudioMs: Double? = nil, endAudioMs: Double? = nil,
-       audioProcessedMs: Double? = nil) {
+       audioProcessedMs: Double? = nil, timing: Timing? = nil, clientSentMs: Double? = nil) {
     self.type = type; self.sessionId = sessionId; self.turnId = turnId; self.speaker = speaker
     self.text = text; self.startAudioMs = startAudioMs; self.endAudioMs = endAudioMs
-    self.audioProcessedMs = audioProcessedMs
+    self.audioProcessedMs = audioProcessedMs; self.timing = timing; self.clientSentMs = clientSentMs
   }
 }
 
@@ -57,6 +65,7 @@ protocol RealtimeASRTransport: AnyObject {
   var ready: Bool { get }
   var onEvent: ((RealtimeASREvent) -> Void)? { get set }
   var onFailure: ((String) -> Void)? { get set }
+  var onSend: ((Int, Double) -> Void)? { get set }
   func start(languageBias: [String]) async throws
   func sendPCM(_ data: Data)
   func stop()
@@ -72,6 +81,8 @@ final class RealtimeASRClient: RealtimeASRTransport {
   private let session: URLSession
   private var socket: URLSessionWebSocketTask?
   private var receiveTask: Task<Void, Never>?
+  private var sendTask: Task<Void, Never>?
+  private var pingTask: Task<Void, Never>?
   private var pendingPCM: [Data] = []
   private var pendingBytes = 0
   private var sending = false
@@ -80,6 +91,7 @@ final class RealtimeASRClient: RealtimeASRTransport {
 
   var onEvent: ((RealtimeASREvent) -> Void)?
   var onFailure: ((String) -> Void)?
+  var onSend: ((Int, Double) -> Void)?
 
   init(endpoint: String, token: String) {
     self.endpoint = endpoint
@@ -100,7 +112,7 @@ final class RealtimeASRClient: RealtimeASRTransport {
     switch scheme {
     case "https": components.scheme = "wss"
     case "http" where isLocalNetworkHost(host): components.scheme = "ws"
-    default: throw CopilotError(message:"Realtime transcription requires HTTPS, except explicitly local development hosts.")
+    default: throw CopilotError(message:"Use an HTTPS server URL, or http:// with a local network address.")
     }
     var path = components.path
     while path.hasSuffix("/") { path.removeLast() }
@@ -123,6 +135,7 @@ final class RealtimeASRClient: RealtimeASRTransport {
   }
 
   func start(languageBias: [String]) async throws {
+    try Task.checkCancellation()
     guard socket == nil else { throw CopilotError(message:"Realtime transcription is already running.") }
     let url = try Self.webSocketURL(endpoint:endpoint)
     var request = URLRequest(url:url)
@@ -130,40 +143,48 @@ final class RealtimeASRClient: RealtimeASRTransport {
     let task = session.webSocketTask(with:request)
     socket = task; stopped = false; ready = false
     task.resume()
+    var timedOut = false
+    let timeout = Task { [weak self, task] in
+      do { try await Task.sleep(for:.seconds(10)) } catch { return }
+      guard let self, self.socket === task, !self.stopped, !self.ready else { return }
+      timedOut = true
+      task.cancel(with:.goingAway, reason:nil)
+    }
+    defer { timeout.cancel() }
     do {
-      let payload = try JSONSerialization.data(withJSONObject:["type":"start", "languageBias":languageBias])
+      try await withTaskCancellationHandler {
+      let payload = try JSONSerialization.data(withJSONObject:["type":"start", "languageBias":languageBias, "diagnostics":true])
       guard let text = String(data:payload, encoding:.utf8) else {
         throw CopilotError(message:"Could not encode realtime ASR settings.")
       }
       try await task.send(.string(text))
-      let event = try await receiveReady(task)
+      let event = try Self.decode(await task.receive())
+      try Task.checkCancellation()
+      guard socket === task, !stopped else { throw CancellationError() }
       guard event.type == "ready", event.sessionId?.isEmpty == false else {
         throw CopilotError(message:"Realtime ASR did not acknowledge the session.")
       }
       ready = true
       onEvent?(event)
       receiveTask = Task { [weak self, task] in await self?.receiveForever(task) }
+      if event.timing != nil { pingTask = Task { [weak self, task] in
+        while !Task.isCancelled {
+          guard let self, self.socket === task, !self.stopped else { return }
+          do {
+            let payload = try JSONSerialization.data(withJSONObject:["type":"timing.ping", "clientSentMs":ProcessInfo.processInfo.systemUptime * 1000])
+            try await task.send(.string(String(decoding:payload, as:UTF8.self)))
+            try await Task.sleep(for:.seconds(2))
+          } catch { return }
+        }
+      } }
+      } onCancel: {
+        task.cancel(with:.goingAway, reason:nil)
+      }
     } catch {
-      stop()
+      if socket === task { stop() }
+      if Task.isCancelled { throw CancellationError() }
+      if timedOut { throw CopilotError(message:"Connection timed out. Check the server and try again.") }
       throw CopilotError(message:"Realtime transcription unavailable: \(error.localizedDescription)")
-    }
-  }
-
-  private func receiveReady(_ task: URLSessionWebSocketTask) async throws -> RealtimeASREvent {
-    try await withThrowingTaskGroup(of: RealtimeASREvent.self) { group in
-      group.addTask {
-        let message = try await task.receive()
-        return try Self.decode(message)
-      }
-      group.addTask {
-        try await Task.sleep(for:.seconds(10))
-        throw CopilotError(message:"Realtime ASR acknowledgement timed out.")
-      }
-      guard let event = try await group.next() else {
-        throw CopilotError(message:"Realtime ASR acknowledgement failed.")
-      }
-      group.cancelAll()
-      return event
     }
   }
 
@@ -182,6 +203,8 @@ final class RealtimeASRClient: RealtimeASRTransport {
   func stop() {
     stopped = true; ready = false
     receiveTask?.cancel(); receiveTask = nil
+    sendTask?.cancel(); sendTask = nil
+    pingTask?.cancel(); pingTask = nil
     pendingPCM.removeAll(keepingCapacity:false); pendingBytes = 0; sending = false
     socket?.cancel(with:.normalClosure, reason:nil); socket = nil
   }
@@ -191,14 +214,16 @@ final class RealtimeASRClient: RealtimeASRTransport {
     let data = pendingPCM.removeFirst()
     pendingBytes -= data.count
     sending = true
-    Task { [weak self, task] in
+    sendTask = Task { [weak self, task] in
       do {
+        let began = ProcessInfo.processInfo.systemUptime
         try await task.send(.data(data))
-        guard let self else { return }
+        guard let self, self.socket === task, !self.stopped else { return }
+        self.onSend?(data.count, (ProcessInfo.processInfo.systemUptime - began) * 1000)
         self.sending = false
         self.pump()
       } catch {
-        guard let self else { return }
+        guard let self, self.socket === task, !self.stopped else { return }
         self.sending = false
         self.fail("Realtime transcription connection lost; switching to fallback.")
       }
@@ -209,11 +234,12 @@ final class RealtimeASRClient: RealtimeASRTransport {
     do {
       while !Task.isCancelled && !stopped {
         let message = try await task.receive()
+        guard socket === task, !stopped, !Task.isCancelled else { return }
         let event = try Self.decode(message)
         onEvent?(event)
       }
     } catch {
-      if !stopped && !Task.isCancelled {
+      if socket === task && !stopped && !Task.isCancelled {
         fail("Realtime transcription connection lost; switching to fallback.")
       }
     }

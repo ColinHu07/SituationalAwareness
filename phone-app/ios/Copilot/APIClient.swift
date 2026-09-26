@@ -3,32 +3,86 @@ import Security
 
 struct TranscriptEntry: Codable, Identifiable {
   var id: UUID = UUID()
+
   let text: String
   let startMs: Double
   let endMs: Double
   let confidence: Double?
-  let speaker: String?
+
+  // Tone coaching ONLY.
+  // "wearer", "other", or nil.
+  var speaker: String? = nil
+
+  // Muse diarization ONLY.
+  // "P1", "P2", ... or nil.
+  var speakerAlias: String? = nil
+
+  // Used for wearer/other loudness heuristic.
+  var levelDbFS: Double? = nil
+
+  // Session-only derived translation.
   var localization: LocalizationResult? = nil
-  init(text: String, startMs: Double, endMs: Double, confidence: Double?, speaker: String? = nil) {
-    self.text = text; self.startMs = startMs; self.endMs = endMs
-    self.confidence = confidence; self.speaker = validatedSpeakerAlias(speaker)
+
+  enum CodingKeys: String, CodingKey {
+    case text, startMs, endMs, confidence, speaker, speakerAlias
   }
-  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence, speaker }
+
+  init(text: String, startMs: Double, endMs: Double, confidence: Double?,
+       speaker: String? = nil, speakerAlias: String? = nil,
+       levelDbFS: Double? = nil, localization: LocalizationResult? = nil) {
+    self.text = text
+    self.startMs = startMs
+    self.endMs = endMs
+    self.confidence = confidence
+    self.speaker = validatedToneSpeaker(speaker)
+    self.speakerAlias = validatedSpeakerAlias(speakerAlias)
+    self.levelDbFS = levelDbFS
+    self.localization = localization
+  }
+
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy:CodingKeys.self)
+    self.init(
+      text:try values.decode(String.self, forKey:.text),
+      startMs:try values.decode(Double.self, forKey:.startMs),
+      endMs:try values.decode(Double.self, forKey:.endMs),
+      confidence:try values.decodeIfPresent(Double.self, forKey:.confidence),
+      speaker:try values.decodeIfPresent(String.self, forKey:.speaker),
+      speakerAlias:try values.decodeIfPresent(String.self, forKey:.speakerAlias)
+    )
+  }
 }
-func validatedSpeakerAlias(_ value: String?) -> String? {
-  guard let value, value.range(of:#"^P(?:[1-9]|[1-9][0-9])$"#, options:.regularExpression) != nil else { return nil }
+
+func validatedToneSpeaker(_ value: String?) -> String? {
+  guard let value, ["wearer", "other"].contains(value) else { return nil }
   return value
 }
+
+func validatedSpeakerAlias(_ value: String?) -> String? {
+  guard let value,
+        value.range(
+          of: #"^P(?:[1-9]|[1-9][0-9])$"#,
+          options: .regularExpression
+        ) != nil
+  else {
+    return nil
+  }
+
+  return value
+}
+
 struct LocalizationContextTurn: Encodable, Sendable {
   let text: String
   let speaker: String?
 }
+
 struct LocalizationRequest: Encodable, Sendable {
   let text: String
   let speaker: String?
   let targetLanguage: String
   let context: [LocalizationContextTurn]
 }
+
 struct LocalizationResult: Decodable, Equatable, Sendable {
   let sourceLanguage: String
   let targetLanguage: String
@@ -38,6 +92,7 @@ struct LocalizationResult: Decodable, Equatable, Sendable {
   let confidence: Double
   let changedForPragmatics: Bool
 }
+
 struct LocalizationResponse: Decodable, Sendable {
   struct Metrics: Decodable, Sendable {
     let apiMs: Double?
@@ -48,6 +103,7 @@ struct LocalizationResponse: Decodable, Sendable {
   let result: LocalizationResult
   let metrics: Metrics?
 }
+
 struct SampledFrame: Codable { let dataUrl: String; let capturedAtMs: Double }
 struct AudioContext: Encodable, Sendable {
   let capturedAtMs: Double
@@ -66,11 +122,18 @@ struct CueRequest: Encodable {
   var people: [PersonContext] = []
   var groups: [GroupContext] = []
   var currentScene = ""
+  /// Earlier one-sentence summaries from this session, oldest first: memory beyond the 60-second transcript.
+  var recentMoments: [Moment] = []
+  /// The cue on screen now, so the model can keep it when it's still the best advice.
+  var previousCue = ""
 }
+struct Moment: Codable, Equatable { let atMs: Double; let summary: String }
 struct CueResult: Decodable {
   let cue: String; let reason: String; let confidence: Double; let type: String; let should_display: Bool
   /// Where the wearer seems to be ("library", "funeral"), or "" when unclear.
   var scene: String? = nil
+  /// One neutral sentence about what is happening now, kept as session memory.
+  var summary: String? = nil
 }
 struct CueResponse: Decodable {
   struct Metrics: Decodable { let apiMs: Double?; let inputTokens: Int?; let outputTokens: Int?; let estimatedCostUsd: Double? }
@@ -83,7 +146,24 @@ struct AudioChunk: Encodable, Sendable {
   let sampleRate = 16000
   let startedAtMs: Double
   let endedAtMs: Double
+  /// Voiced loudness (dBFS); kept on the phone, not uploaded.
+  var speechDbFS: Double = -120
+  enum CodingKeys: String, CodingKey { case audioBase64, mimeType, sampleRate, startedAtMs, endedAtMs }
 }
+
+// Checks how the wearer's own line may land (POST /api/tone).
+struct ToneRequest: Encodable {
+  struct Line: Encodable { let text: String; let endMs: Double }
+  struct Recent: Encodable { let text: String; let speaker: String? }
+  let line: Line
+  let recent: [Recent]
+  let scene: String
+  let speakerKnown: Bool
+  let people: [PersonContext]
+  let groups: [GroupContext]
+}
+struct ToneResult: Decodable { let flag: Bool; let severity: String; let issue: String; let recovery: String; let rephrase: String }
+struct ToneResponse: Decodable { let result: ToneResult }
 struct TranscriptionResponse: Decodable { let text: String; let confidence: Double?; let transcriptionMs: Double?; let estimatedCostUsd: Double? }
 struct HealthResponse: Decodable { let modelMode: String?; let tokenValid: Bool? }
 struct CopilotError: LocalizedError { let message: String; var errorDescription: String? { message } }

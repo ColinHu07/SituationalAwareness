@@ -4,11 +4,11 @@ import { validateInput, validateAudio, InputError } from '../server/validation.m
 import { NOW, input, surroundingsInput, audioInput, wav } from './fixtures.mjs';
 
 test('recent coherent transcript and matching image bytes pass without alteration', () => {
-  assert.deepEqual(validateInput(input(), NOW), { ...input(), analysisMode: 'conversation', audioContext: null, people: [], groups: [], currentScene: '' });
+  assert.deepEqual(validateInput(input(), NOW), { ...input(), analysisMode: 'conversation', audioContext: null, people: [], groups: [], currentScene: '', recentMoments: [], previousCue: '' });
 });
 
 test('surroundings accepts silent scenes and fresh bounded audio observations', () => {
-  assert.deepEqual(validateInput(surroundingsInput(), NOW), { ...surroundingsInput(), people: [], groups: [], currentScene: '' });
+  assert.deepEqual(validateInput(surroundingsInput(), NOW), { ...surroundingsInput(), people: [], groups: [], currentScene: '', recentMoments: [], previousCue: '' });
   for (const source of ['phone', 'glasses_pcm']) {
     const direct = surroundingsInput(); direct.audioContext.source = source;
     assert.equal(validateInput(direct, NOW).audioContext.source, source);
@@ -76,11 +76,11 @@ test('confidence missing from supported STT is preserved as unknown', () => {
 
 test('session speaker aliases are preserved while arbitrary transcript fields are rejected', () => {
   const valid = input();
-  valid.transcript[0].speaker = 'P2';
-  assert.equal(validateInput(valid, NOW).transcript[0].speaker, 'P2');
+  valid.transcript[0].speakerAlias = 'P2';
+  assert.equal(validateInput(valid, NOW).transcript[0].speakerAlias, 'P2');
 
   const rawProviderLabel = input();
-  rawProviderLabel.transcript[0].speaker = 'A';
+  rawProviderLabel.transcript[0].speakerAlias = 'A';
   assert.throws(() => validateInput(rawProviderLabel, NOW), InputError);
 
   const extra = input();

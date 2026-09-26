@@ -21,8 +21,9 @@ class FakeSocket extends EventEmitter {
 }
 
 class FakeUpstream extends FakeSocket {
+  static latest = null;
   constructor(url) {
-    super(); this.url = url;
+    super(); this.url = url; FakeUpstream.latest = this;
     queueMicrotask(() => this.emit('open'));
   }
   send(value, options) {
@@ -100,6 +101,30 @@ test('relay waits for Meta acknowledgement, forwards raw PCM, and never sends th
   const ready = client.sent.map(x => typeof x.value === 'string' ? JSON.parse(x.value) : null).find(x => x?.type === 'ready');
   assert.deepEqual(ready, { type: 'ready', sessionId: 'meta-session' });
   assert.equal(JSON.stringify(client.sent).includes('server-secret'), false);
+
+  const upstream = FakeUpstream.latest;
+  const pcm = Buffer.from([0, 0, 1, 0, 2, 0]);
+  client.emit('message', pcm, true);
+  assert.deepEqual(upstream.sent.at(-1), { value: pcm, options: { binary: true } });
+  for (const event of [
+    { type: 'speechStart', turnId: 1, audioProcessedMs: 0 },
+    { type: 'speaker', label: 'A' },
+    { type: 'transcript', transcript: 'Hello' },
+    { type: 'speechStart', turnId: 2, audioProcessedMs: 200 },
+    { type: 'speaker', label: 'B' },
+    { type: 'transcript', transcript: 'Hi there' },
+    { type: 'speechComplete', turnId: 1, transcript: 'Hello.', audioProcessedMs: 190 },
+  ]) upstream.emit('message', JSON.stringify(event), false);
+  const captions = client.sent.map(x => JSON.parse(x.value)).filter(x => x.type.startsWith('transcript.'));
+  assert.deepEqual(captions.map(({ type, turnId, speaker, text }) => ({ type, turnId, speaker, text })), [
+    { type: 'transcript.partial', turnId: 1, speaker: 'P1', text: 'Hello' },
+    { type: 'transcript.partial', turnId: 2, speaker: 'P2', text: 'Hi there' },
+    { type: 'transcript.final', turnId: 1, speaker: 'P1', text: 'Hello.' },
+  ]);
+  client.emit('message', JSON.stringify({ type: 'endStream' }), false);
+  assert.deepEqual(JSON.parse(upstream.sent.at(-1).value), { type: 'endStream' });
+  client.close(1000, 'Stopped');
+  assert.equal(upstream.closed?.code, 1000);
 });
 
 test('idle authenticated realtime clients cannot occupy a relay slot indefinitely', async () => {
@@ -109,6 +134,34 @@ test('idle authenticated realtime clients cannot occupy a relay slot indefinitel
   });
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(client.closed?.code, 1008);
+});
+
+test('opt-in diagnostics correlate audio offsets, provider boundaries and round trips without extra content', async () => {
+  const client = new FakeSocket();
+  await runRealtimeSession(client, { apiKey: 'server-secret', WebSocketClass: FakeUpstream });
+  client.emit('message', JSON.stringify({ type:'start', diagnostics:true }), false);
+  await flush(); await flush();
+  const upstream = FakeUpstream.latest;
+  assert.equal(JSON.parse(upstream.sent[0].value).emitAudioProgress, true);
+  client.emit('message', Buffer.alloc(3200), true);
+  client.emit('message', JSON.stringify({type:'timing.ping',clientSentMs:12345}), false);
+  upstream.emit('message', JSON.stringify({type:'audioProgress',audioProcessedMs:80}), false);
+  upstream.emit('message', JSON.stringify({type:'speechStart',turnId:1,audioProcessedMs:20}), false);
+  upstream.emit('message', JSON.stringify({type:'speechEnd',turnId:1,audioProcessedMs:90}), false);
+  const messages = client.sent.map(x=>JSON.parse(x.value));
+  const forwarded = messages.find(x=>x.type==='audio.forwarded');
+  assert.equal(forwarded.timing.audioReceivedMs,100);
+  assert.equal(forwarded.timing.audioForwardedMs,100);
+  assert.equal(forwarded.timing.upstreamQueuedMs,0);
+  assert.ok(forwarded.timing.serverElapsedMs >= 0);
+  assert.equal(messages.find(x=>x.type==='timing.pong').clientSentMs,12345);
+  assert.equal(messages.find(x=>x.type==='audio.progress').audioProcessedMs,80);
+  assert.equal(messages.find(x=>x.type==='speech.start').turnId,1);
+  assert.equal(messages.find(x=>x.type==='speech.end').audioProcessedMs,90);
+  assert.ok(messages.every(x=>!('text' in x)));
+  assert.equal(JSON.stringify(messages).includes('server-secret'),false);
+  assert.throws(()=>validateStartMessage({type:'start',diagnostics:'yes'}),/Invalid diagnostics/);
+  client.close(1000,'Done');
 });
 
 test('invalid and oversized client frames close safely without echoing participant content', async () => {

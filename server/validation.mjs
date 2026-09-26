@@ -2,6 +2,7 @@ import { boundedTranscript, LIMITS } from '../shared/protocol.mjs';
 import { LOCALIZATION_LANGUAGES } from './localization.mjs';
 export class InputError extends Error { constructor(message) { super(message); this.status = 400; } }
 const require = (condition, message) => { if (!condition) throw new InputError(message); };
+const isSpeakerAlias = value => typeof value === 'string' && /^P(?:[1-9]|[1-9][0-9])$/.test(value);
 export function validateInput(body, now = Date.now()) {
   require(body && typeof body === 'object' && !Array.isArray(body), 'Expected a JSON object');
   const analysisMode = body.analysisMode === undefined ? 'conversation' : body.analysisMode;
@@ -10,18 +11,25 @@ export function validateInput(body, now = Date.now()) {
   const transcript = [];
   for (const item of body.transcript) {
     require(item && typeof item === 'object' && !Array.isArray(item) &&
-      Object.keys(item).every(key => ['text', 'startMs', 'endMs', 'confidence', 'speaker'].includes(key)), 'Invalid transcript fields');
+      Object.keys(item).every(key => ['text', 'startMs', 'endMs', 'confidence', 'speaker', 'speakerAlias'].includes(key)), 'Invalid transcript fields');
     require(item && typeof item.text === 'string' && item.text.length <= 500 && item.text.trim(), 'Invalid transcript text');
     require(Number.isFinite(item.startMs) && Number.isFinite(item.endMs) && item.startMs <= item.endMs &&
       item.endMs <= now + 1000 && item.startMs >= now - 120_000, 'Invalid transcript timestamp');
     require(item.confidence == null || (Number.isFinite(item.confidence) && item.confidence >= 0 && item.confidence <= 1), 'Invalid speech confidence');
-    require(item.speaker == null || (typeof item.speaker === 'string' && /^P(?:[1-9]|[1-9][0-9])$/.test(item.speaker)), 'Invalid speaker label');
+    require(item.speaker === undefined || ['wearer', 'other'].includes(item.speaker), 'Invalid speaker');
+    require(item.speakerAlias === undefined || isSpeakerAlias(item.speakerAlias), 'Invalid speaker alias');
     transcript.push({ text:item.text, startMs:item.startMs, endMs:item.endMs, confidence:item.confidence ?? null,
-      ...(item.speaker == null ? {} : { speaker:item.speaker }) });
+      ...(item.speaker === undefined ? {} : { speaker:item.speaker }),
+      ...(item.speakerAlias === undefined ? {} : { speakerAlias:item.speakerAlias }) });
   }
   require(Array.isArray(body.context) && body.context.length <= 5 && body.context.every(s => typeof s === 'string' && s.length <= 160), 'Invalid session topics');
   require(typeof body.manual === 'boolean', 'manual must be boolean');
   require(body.currentScene === undefined || (typeof body.currentScene === 'string' && body.currentScene.length <= 40), 'Invalid currentScene');
+  // Earlier one-sentence summaries from this session, and the cue now on screen.
+  const recentMoments = body.recentMoments ?? [];
+  require(Array.isArray(recentMoments) && recentMoments.length <= 8 && recentMoments.every(m => m && isText(m.summary, 200) &&
+    Number.isFinite(m.atMs) && m.atMs <= now + 1000 && m.atMs >= now - 30 * 60_000), 'Invalid recentMoments');
+  require(body.previousCue === undefined || isText(body.previousCue, LIMITS.cueChars), 'Invalid previousCue');
   const { people, groups } = validateProfiles(body);
   let frame = null;
   if (body.frame != null) {
@@ -48,7 +56,8 @@ export function validateInput(body, now = Date.now()) {
     if (analysisMode === 'surroundings' && now - audio.capturedAtMs <= LIMITS.frameMs) audioContext = audio;
   }
   return { transcript: boundedTranscript(transcript, now),
-    frame, context: body.context, manual: body.manual, analysisMode, audioContext, people, groups, currentScene: body.currentScene ?? '' };
+    frame, context: body.context, manual: body.manual, analysisMode, audioContext, people, groups, currentScene: body.currentScene ?? '',
+    recentMoments: recentMoments.map(({ atMs, summary }) => ({ atMs, summary })), previousCue: body.previousCue ?? '' };
 }
 
 const isText = (s, max) => typeof s === 'string' && s.length <= max;
@@ -67,6 +76,22 @@ function validateProfiles(body, { requireIds = false } = {}) {
     people: people.map(({ id, name, groups, tags, topics, notes }) => ({ ...(id ? { id } : {}), name, groups, tags, topics, notes })),
     groups: groups.map(({ name, topics, slang, style, notes }) => ({ name, topics, slang, style, notes })),
   };
+}
+
+// One line the wearer just said, with a little surrounding conversation, to check how it may land.
+export function validateToneInput(body, now = Date.now()) {
+  require(body && typeof body === 'object' && !Array.isArray(body), 'Expected a JSON object');
+  const line = body.line;
+  require(line && isText(line.text, 500) && line.text.trim() && Number.isFinite(line.endMs) &&
+    line.endMs <= now + 1000 && line.endMs >= now - 120_000, 'Invalid line');
+  require(Array.isArray(body.recent) && body.recent.length <= 12, 'recent must have at most 12 entries');
+  for (const item of body.recent) require(item && isText(item.text, 500) &&
+    (item.speaker === undefined || ['wearer', 'other'].includes(item.speaker)), 'Invalid recent entry');
+  require(body.scene === undefined || isText(body.scene, 40), 'Invalid scene');
+  require(typeof body.speakerKnown === 'boolean', 'speakerKnown must be boolean');
+  const { people, groups } = validateProfiles(body);
+  return { line: { text: line.text, endMs: line.endMs }, recent: body.recent.map(({ text, speaker }) => ({ text, ...(speaker ? { speaker } : {}) })),
+    scene: body.scene ?? '', speakerKnown: body.speakerKnown, people, groups };
 }
 
 // A whole finished conversation, sent once on Stop so profiles can learn from it.
@@ -117,14 +142,14 @@ export function validateLocalizationInput(body) {
   require(body && typeof body === 'object' && !Array.isArray(body) &&
     Object.keys(body).every(key => ['text','speaker','targetLanguage','context'].includes(key)), 'Invalid localization fields');
   require(typeof body.text === 'string' && body.text.trim() && body.text.length <= 500, 'Invalid localization text');
-  require(body.speaker == null || (typeof body.speaker === 'string' && /^P(?:[1-9]|[1-9][0-9])$/.test(body.speaker)), 'Invalid speaker label');
+  require(body.speaker == null || isSpeakerAlias(body.speaker), 'Invalid speaker label');
   require(typeof body.targetLanguage === 'string' && LOCALIZATION_LANGUAGES.includes(body.targetLanguage), 'Unsupported target language');
   require(Array.isArray(body.context) && body.context.length <= 2, 'Localization context must have at most 2 turns');
   const context = body.context.map(item => {
     require(item && typeof item === 'object' && !Array.isArray(item) &&
       Object.keys(item).every(key => ['text','speaker'].includes(key)), 'Invalid localization context fields');
     require(typeof item.text === 'string' && item.text.trim() && item.text.length <= 500, 'Invalid localization context text');
-    require(item.speaker == null || (typeof item.speaker === 'string' && /^P(?:[1-9]|[1-9][0-9])$/.test(item.speaker)), 'Invalid localization context speaker');
+    require(item.speaker == null || isSpeakerAlias(item.speaker), 'Invalid localization context speaker');
     return { text:item.text.trim(), ...(item.speaker == null ? {} : { speaker:item.speaker }) };
   });
   return { text:body.text.trim(), ...(body.speaker == null ? {} : { speaker:body.speaker }),

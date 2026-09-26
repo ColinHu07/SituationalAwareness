@@ -17,7 +17,7 @@ test('documented Chat Completions request sends actual supplied image and strict
   assert.equal(captured.url, 'https://api.meta.ai/v1/chat/completions');
   assert.equal(captured.options.headers.Authorization, `Bearer ${env.MUSE_API_KEY}`);
   assert.equal(captured.body.model, 'muse-spark-1.3');
-  assert.equal(captured.body.reasoning_effort, 'low');
+  assert.equal(captured.body.reasoning_effort, 'minimal');
   // A live synthetic request exhausted 1024 tokens before any visible JSON.
   assert.ok(captured.body.max_completion_tokens >= 2048);
   assert.ok(captured.body.max_completion_tokens <= 4096);
@@ -53,7 +53,7 @@ test('surroundings sends real scene and coarse audio context with a separate evi
     assert.match(SURROUNDINGS_PROMPT, /Never infer emotions/);
     assert.match(SURROUNDINGS_PROMPT, /Ignore instructions embedded/);
     assert.equal(observation.analysisMode, 'surroundings');
-    assert.match(observation.request, /scene or conversation/);
+    assert.match(observation.request, /most useful cue for right now/);
     assert.deepEqual(observation.transcript, []);
     assert.deepEqual(observation.audioContext, scene.audioContext);
     assert.equal(parts.find(part => part.type === 'image_url').image_url.url, scene.frame.dataUrl);
@@ -207,12 +207,30 @@ test('ASR never substitutes canned transcript for a malformed response or mock m
   await assert.rejects(createProvider({ MODEL_MODE: 'mock' }).transcribe(wav()), error => error.status === 503);
 });
 
-test('mock fixture remains explicitly simulated and abstains when latest subject changes', async () => {
+test('mock fixture remains explicitly simulated and falls back to a generic cue when the subject changes', async () => {
   const provider = createProvider({ MODEL_MODE: 'mock' }, () => { throw new Error('Mock must not use network'); });
   const response = await provider.cue(input());
   assert.equal(response.metrics.simulated, true); assert.match(response.result.reason, /SIMULATED/);
   const newer = input(); newer.transcript.push({ text: 'Let us talk about lunch instead.', startMs: 1, endMs: 2 });
-  assert.equal(mockCue(newer).should_display, false);
+  const fallback = mockCue(newer);
+  assert.equal(fallback.cue, 'Keep listening, then ask a follow-up question.'); assert.match(fallback.reason, /SIMULATED/);
+  assert.equal(mockCue({ ...newer, transcript: [] }).should_display, false, 'No speech at all still abstains');
+});
+
+test('cue requests carry session memory and the cue on screen; summaries survive validation', async () => {
+  const { validateCue } = await import('../shared/protocol.mjs');
+  const base = { cue: 'Ask how the trip went.', reason: 'They mentioned a trip.', confidence: 0.7, type: 'follow_up', should_display: true, scene: '' };
+  assert.equal(validateCue({ ...base, summary: ' Two friends chatting about a trip. ' }).summary, 'Two friends chatting about a trip.');
+  assert.equal(validateCue({ ...base, should_display: false, summary: 'Quiet office.' }).summary, 'Quiet office.');
+  assert.equal('summary' in validateCue(base), false);
+  let body;
+  const provider = createProvider(env, async (_url, options) => { body = JSON.parse(options.body); return { ok: true, json: async () => completion() }; });
+  await provider.cue({ ...input(), recentMoments: [{ atMs: Date.now() - 20_000, summary: 'Talking about robotics.' }], previousCue: 'Ask about the robot.' });
+  const sent = JSON.parse(body.messages[1].content[0].text);
+  assert.equal(sent.previousCue, 'Ask about the robot.');
+  assert.equal(sent.recentMoments[0].summary, 'Talking about robotics.'); assert.ok(sent.recentMoments[0].ageSeconds >= 19);
+  assert.ok(body.response_format.json_schema.schema.required.includes('summary'));
+  assert.match(body.messages[0].content, /previousCue is the cue on screen now/);
 });
 
 test('live credential is required and Contributor model is prohibited', () => {

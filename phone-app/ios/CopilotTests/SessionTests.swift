@@ -9,6 +9,7 @@ private final class FakeRealtimeASRTransport: RealtimeASRTransport {
   var ready = false
   var onEvent: ((RealtimeASREvent) -> Void)?
   var onFailure: ((String) -> Void)?
+  var onSend: ((Int, Double) -> Void)?
   private(set) var languageBias: [String] = []
   private(set) var frames: [Data] = []
   func start(languageBias: [String]) async throws { self.languageBias = languageBias; ready = true }
@@ -32,8 +33,8 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(model.isThinking)
     model.requestCue(manual:false)
     XCTAssertEqual(model.requests,1,"Only one analysis may run at a time")
-    XCTAssertEqual(model.analysisInterval(reducedPower:false),10)
-    XCTAssertEqual(model.analysisInterval(reducedPower:true),30)
+    XCTAssertEqual(model.analysisInterval(reducedPower:false),4)
+    XCTAssertEqual(model.analysisInterval(reducedPower:true),15)
     model.stop()
   }
 
@@ -119,7 +120,7 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
   }
 
-  func testAbstentionShowsAnOutcomeOnLens() async throws {
+  func testOrdinarySpeechStillGetsAFallbackCue() async throws {
     let model = try await activeModel()
     defer { model.stop() }
     model.addSimulationLine("The sky is blue.")
@@ -127,8 +128,36 @@ final class SessionTests: XCTestCase {
     model.requestCue(manual:true)
     XCTAssertEqual(model.analysisFeedback,"Analyzing…")
     try await Task.sleep(for:.milliseconds(600))
-    XCTAssertNil(model.cue)
-    XCTAssertEqual(model.analysisFeedback,"No new cue needed. See phone for why.")
+    XCTAssertEqual(model.cue,"Keep listening, then ask a follow-up question.")
+    XCTAssertEqual(model.analysisFeedback,"Social cue")
+    XCTAssertEqual(model.moments.last?.summary,"SIMULATED: conversation mentioning \"The sky is blue.\".")
+  }
+  func testNewCueWaitsForDwellAndSameCueDoesNotRedraw() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.addSimulationLine("Can you have it ready by Friday?")
+    try await Task.sleep(for:.milliseconds(1600))
+    model.requestCue(manual:true)
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.cue,"Ask what they meant by Friday.")
+    model.requestCue(manual:true)
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.shown,1,"An unchanged cue is kept, not re-shown")
+    model.addSimulationLine("How is the robotics project?")
+    model.requestCue(manual:true)
+    try await Task.sleep(for:.milliseconds(1000))
+    XCTAssertEqual(model.cue,"Ask what they meant by Friday.","A different cue waits until the current one has been up 5 seconds")
+    try await Task.sleep(for:.milliseconds(3500))
+    XCTAssertEqual(model.cue,"Ask how their robotics project is going.")
+    model.contextChanged()
+    XCTAssertEqual(model.cue,"Ask how their robotics project is going.","Editing notes or people keeps the cue on screen")
+  }
+  func testSessionMemorySkipsRepeatsAndKeepsTheLatestEight() {
+    let model = SessionModel(people:PeopleStore(fileURL:nil))
+    for index in 0..<10 { model.remember("Moment \(index)", at:Double(index)) }
+    model.remember("moment 9", at:10)
+    model.remember("  ", at:11)
+    XCTAssertEqual(model.moments.map(\.summary), (2..<10).map { "Moment \($0)" })
   }
   func testStoppedStreamingKeepsControlsAndConsentButClearsContext() async throws {
     let model = try await activeModel()
@@ -299,7 +328,7 @@ final class SessionTests: XCTestCase {
   }
   private func activeModel() async throws -> SessionModel {
     let model = SessionModel()
-    model.simulate = true; model.localMock = true
+    model.simulate = true; model.localMock = true; model.consent = true
     model.start()
     try await Task.sleep(for:.milliseconds(100))
     XCTAssertEqual(model.phase,.active)
@@ -385,7 +414,6 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(model.isThinking)
     // Conversation keeps going while the cue is being prepared.
     model.addSimulationLine("Let's talk about lunch instead.")
-    XCTAssertEqual(model.analysisFeedback,"Analyzing…")
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertEqual(model.cue, "Ask what they meant by Friday.")
     XCTAssertFalse(model.isThinking)
@@ -419,10 +447,11 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(model.shown,1)
     model.dismiss()
     XCTAssertNil(model.cue)
+    model.requestCue(manual:false)
+    XCTAssertEqual(model.requests,1,"Automatic checks stay quiet for 10 seconds after a dismissal")
     model.requestCue(manual:true)
     try await Task.sleep(for:.milliseconds(600))
-    XCTAssertNil(model.cue)
-    XCTAssertEqual(model.shown,1)
+    XCTAssertEqual(model.cue,"Ask what they meant by Friday.","Asking again explicitly brings the advice back")
   }
   func testTranscriptBoundsAndStopErasure() async throws {
     let model = try await activeModel()
@@ -501,11 +530,11 @@ final class SessionTests: XCTestCase {
     let model = try await activeModel()
     model.simulateSurroundings = true
     let timestamp = nowMs()
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),20)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),5)
     model.lastVoiceAt = timestamp
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),8)
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:true),30)
-    XCTAssertEqual(model.analysisInterval(at:timestamp+30001,reducedPower:false),20)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),3)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:true),15)
+    XCTAssertEqual(model.analysisInterval(at:timestamp+30001,reducedPower:false),5)
     model.latestAudioContext = AudioContext(capturedAtMs:timestamp,windowMs:1000,activityRatio:0.5,rmsDbFS:-30,source:"glasses_pcm")
     model.pause()
     XCTAssertNil(model.latestAudioContext)
@@ -667,7 +696,7 @@ final class SessionTests: XCTestCase {
 
   func testUnreachableServerStillStartsPhoneCaptureWithoutUploads() async throws {
     let model = SessionModel(people:PeopleStore(fileURL:nil))
-    model.captureMode = .phone; model.phoneCameraEnabled = false
+    model.captureMode = .phone; model.phoneCameraEnabled = false; model.consent = true
     model.endpoint = "http://127.0.0.1:9" // nothing listens here
     model.start()
     for _ in 0..<50 where model.phase == .starting { try await Task.sleep(for:.milliseconds(100)) }
@@ -764,7 +793,8 @@ final class SessionTests: XCTestCase {
     model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.final",turnId:1,speaker:"P1",
                                               text:"Kal milna thoda mushkil hoga."),
                              receivedAtMs:timestamp+20)
-    XCTAssertEqual(model.transcript.last?.speaker,"P1")
+    XCTAssertNil(model.transcript.last?.speaker)
+    XCTAssertEqual(model.transcript.last?.speakerAlias,"P1")
     XCTAssertEqual(model.transcript.last?.text,"Kal milna thoda mushkil hoga.")
     XCTAssertEqual(model.captionText,"P1: Kal milna thoda mushkil hoga.")
     model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.final",turnId:1,speaker:"P1",text:"Duplicate."),
@@ -781,7 +811,8 @@ final class SessionTests: XCTestCase {
     model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.final",turnId:1,speaker:"P1",text:"First."),
                              receivedAtMs:timestamp+20)
     XCTAssertEqual(model.captionText,"P2: new turn")
-    XCTAssertEqual(model.transcript.last?.speaker,"P1")
+    XCTAssertNil(model.transcript.last?.speaker)
+    XCTAssertEqual(model.transcript.last?.speakerAlias,"P1")
   }
 
   func testPauseClearsRealtimePartialState() async throws {
@@ -836,7 +867,7 @@ final class SessionTests: XCTestCase {
     model.targetLanguage = "English"
     let timestamp = nowMs()
     let entry = TranscriptEntry(text:"कल मिलना थोड़ा मुश्किल होगा।",
-                                startMs:timestamp-1000,endMs:timestamp,confidence:nil,speaker:"P1")
+                                startMs:timestamp-1000,endMs:timestamp,confidence:nil,speakerAlias:"P1")
     model.transcript = [entry]
     let result = LocalizationResult(sourceLanguage:"Hindi",targetLanguage:"English",
       translation:"I probably won't be able to meet tomorrow.",
@@ -853,7 +884,7 @@ final class SessionTests: XCTestCase {
     defer { model.stop() }
     model.targetLanguage = "English"
     let timestamp = nowMs()
-    let entry = TranscriptEntry(text:"Maybe tomorrow.",startMs:timestamp-1000,endMs:timestamp,confidence:nil,speaker:"P1")
+    let entry = TranscriptEntry(text:"Maybe tomorrow.",startMs:timestamp-1000,endMs:timestamp,confidence:nil,speakerAlias:"P1")
     model.transcript = [entry]
     model.setCaption("P1: Maybe tomorrow.",capturedAtMs:timestamp)
     let result = LocalizationResult(sourceLanguage:"English",targetLanguage:"English",
@@ -869,7 +900,7 @@ final class SessionTests: XCTestCase {
     defer { model.stop() }
     model.targetLanguage = "English"
     let timestamp = nowMs()
-    let first = TranscriptEntry(text:"पहली बात",startMs:timestamp-1000,endMs:timestamp,confidence:nil,speaker:"P1")
+    let first = TranscriptEntry(text:"पहली बात",startMs:timestamp-1000,endMs:timestamp,confidence:nil,speakerAlias:"P1")
     model.transcript = [first]
     model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:2,speaker:"P2",text:"new turn"),
                              receivedAtMs:timestamp+10)
@@ -882,21 +913,27 @@ final class SessionTests: XCTestCase {
   }
 
   func testDerivedLocalizationNeverEncodesIntoCueTranscript() throws {
-    var entry = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speaker:"P1")
+    var entry = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speakerAlias:"P1")
     entry.localization = LocalizationResult(sourceLanguage:"English",targetLanguage:"Hindi",
       translation:"नमस्ते",literalMeaning:"नमस्ते",pragmaticNote:"",
       confidence:0.9,changedForPragmatics:false)
     let json = try XCTUnwrap(String(data:JSONEncoder().encode(entry),encoding:.utf8))
     XCTAssertFalse(json.contains("localization"))
     XCTAssertFalse(json.contains("नमस्ते"))
-    XCTAssertTrue(json.contains("\"speaker\":\"P1\""))
+    XCTAssertTrue(json.contains("\"speakerAlias\":\"P1\""))
+    XCTAssertFalse(json.contains("\"speaker\":\"P1\""))
   }
 
-  func testTranscriptSpeakerRejectsIdentityAndProviderLabels() throws {
-    let identity = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speaker:"Ary")
-    let provider = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speaker:"A")
+  func testTranscriptSeparatesToneRoleFromSessionSpeakerAlias() throws {
+    let identity = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speaker:"Ary",speakerAlias:"Ary")
+    let provider = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speaker:"P1",speakerAlias:"A")
+    let valid = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speaker:"wearer",speakerAlias:"P1")
     XCTAssertNil(identity.speaker)
+    XCTAssertNil(identity.speakerAlias)
     XCTAssertNil(provider.speaker)
+    XCTAssertNil(provider.speakerAlias)
+    XCTAssertEqual(valid.speaker,"wearer")
+    XCTAssertEqual(valid.speakerAlias,"P1")
     let json = try XCTUnwrap(String(data:JSONEncoder().encode(identity),encoding:.utf8))
     XCTAssertFalse(json.contains("Ary"))
   }

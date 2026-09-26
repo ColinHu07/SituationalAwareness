@@ -10,7 +10,7 @@ These are app-owned Muse Voice captions, not Meta's built-in Live Captions. Cumu
 
 ## Capture and analysis
 
-DAT **1.0.0** carries low-resolution **2 FPS HEVC video and 16 kHz mono ambient PCM** in one camera stream; Display uses the same `DeviceSession`. Display mode does not use an HFP microphone picker. Regular Meta glasses retain their separate HFP route and phone output.
+DAT **1.0.0** carries low-resolution **15 FPS HEVC video and 16 kHz mono ambient PCM** in one camera stream; Display uses the same `DeviceSession`. Display mode does not use an HFP microphone picker. Regular Meta glasses retain their separate HFP route and phone output.
 
 The phone decodes frames, keeps one JPEG refreshed every **2 seconds**, streams normalized **16 kHz mono PCM16** to **Muse Voice Transcribe** through the backend, and keeps bounded WAV chunks in memory for fallback. **Muse Spark** receives a fresh image, recent recognized words, and optional coarse audio-energy metadata. The phone handles capture, scheduling and cue validation; model inference runs through the backend and Muse. No full-video upload or local glasses model is implemented.
 

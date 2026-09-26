@@ -30,6 +30,12 @@ struct ContentView: View {
             }
             if model.captureMode == .phone {
               Toggle("Camera",isOn:$model.phoneCameraEnabled).disabled(model.phase != .stopped)
+              NavigationLink {
+                PhoneCaptionsView(model:model, settingsPresented:showSettings)
+              } label: {
+                Label("Multi-speaker captions",systemImage:"captions.bubble")
+              }.disabled(model.phase != .stopped)
+                .accessibilityIdentifier("captions.open")
             }
           }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
           with
@@ -80,8 +86,13 @@ struct ContentView: View {
             }.font(.subheadline.weight(.semibold)).tint(mint) }
           }.padding(22).background(ink,in:RoundedRectangle(cornerRadius:20))
           if model.cue != nil { Button("Not helpful",systemImage:"hand.thumbsdown") { model.markDistracting() }.font(.caption).tint(.secondary) }
+          if let feedback = model.toneFeedback { RecoveryCard(feedback:feedback) { model.dismissTone() } }
           if !model.sceneOnly { VStack(alignment:.leading,spacing:12) {
-            Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
+            HStack {
+              Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
+              Spacer()
+              ThatWasMeButton(model:model)
+            }
             Text(model.captionText ?? (model.connectionTestOnly ? "Capture test: no transcription." : "Speech will appear here."))
               .font(.system(size:25,weight:.medium,design:.rounded))
               .foregroundStyle(model.captionText == nil ? .secondary : .primary)
@@ -119,7 +130,7 @@ struct ContentView: View {
                 VStack(alignment:.leading,spacing:3) {
                   HStack {
                     Text(Date(timeIntervalSince1970:entry.endMs/1000),style:.time)
-                    if let speaker = entry.speaker { Text(speaker).fontWeight(.semibold) }
+                    if let speaker = entry.speakerAlias ?? entry.speaker { Text(speaker).fontWeight(.semibold) }
                   }.font(.caption).foregroundStyle(.secondary)
                   Text(entry.text).font(.subheadline)
                   if let localized = entry.localization {
@@ -206,6 +217,7 @@ struct ContentView: View {
         Button("Quiet library") { model.addSimulationScene("library") }
         Button("Group conversation") { model.addSimulationScene("group") }
         Button("Funeral") { model.addSimulationScene("funeral") }
+        Button("Blunt remark") { model.addSimulationLine("Honestly, this idea is stupid.") }
       }.buttonStyle(.bordered).disabled(model.phase != .active)
       Button("Someone needs space") {
         model.simulateSurroundings = true
@@ -248,6 +260,12 @@ struct ContentView: View {
   private var settings: some View {
     NavigationStack {
       Form {
+        Section("Tone check") {
+          Toggle("Coach my wording",isOn:$model.toneCheckEnabled)
+          if model.wearerVoiceDbFS != nil {
+            Button("Reset my voice level",role:.destructive) { model.resetWearerVoice() }
+          }
+        }
         Section("Development mode") {
           Toggle("Capture test only (no uploads)",isOn:$model.connectionTestOnly).disabled(model.phase != .stopped)
           Button("Use simulated demo",systemImage:"testtube.2") {
@@ -298,7 +316,7 @@ struct ContentView: View {
               Toggle("Captions on glasses",isOn:$model.displayCaptions).onChange(of:model.displayCaptions) { _, _ in model.refreshDisplay() }
               Text("In conversation mode, recognized words stay visible alongside a social cue. Longer captions are shortened on the glasses; see the phone for more.").font(.caption).foregroundStyle(.secondary)
             }
-            Text("Muse checks about every 8 seconds near conversation, 20 seconds without recent speech, or 30 seconds in reduced-power mode. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
+            Text(model.sceneOnly ? "Scene-only test: Muse checks fresh camera images every 4 seconds (15 in reduced-power mode), with audio levels when available. No speech transcription. Recommendations update automatically." : "Muse checks about every 3 seconds during conversation, 5 seconds otherwise, or 15 seconds in reduced-power mode; one check runs at a time. The current cue stays on screen until a better one arrives. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
           } else {
             Stepper("Image sample every \(Int(model.sampleInterval)) seconds",value:$model.sampleInterval,in:3...30,step:1)
           }
@@ -308,13 +326,13 @@ struct ContentView: View {
           Toggle("Recognize enrolled faces",isOn:$model.recognizeFaces)
           if model.recognizeFaces {
             LabeledContent("Match distance ≤ \(String(format:"%.2f",model.faceThreshold))") {
-              Slider(value:$model.faceThreshold,in:0.2...1.0,step:0.01)
+              Slider(value:$model.faceThreshold,in:0.5...1.1,step:0.01)
             }
           }
-          Text("Add face photos in People. Matching runs on this iPhone; unmatched faces are discarded. Two face matches within 10 seconds, or one plus their name spoken within 30 seconds, adds someone to Who's here. A name alone only suggests them. Introductions like \"my name is Priya\" or \"this is my friend Dev\" add a new person automatically. If exactly one unrecognized face is in view right after their name is heard, it is offered for their profile in the review when you stop; faces of people never named are not kept. Lower the distance if strangers match; raise it if friends are missed. The live view shows distances while the camera runs.").font(.caption)
+          Text("Add face photos in People. Matching runs on this iPhone; unmatched faces are discarded. Two face matches within 10 seconds, or one plus their name spoken within 30 seconds, adds someone to Who's here. A name alone only suggests them. Introductions like \"my name is Priya\" or \"this is my friend Dev\" add a new person automatically. If exactly one unrecognized face is in view right after their name is heard, it is offered for their profile in the review when you stop; faces of people never named are not kept. Lower the distance if strangers match; raise it if friends are missed. FaceNet distances are not confidence percentages. Similar-looking or unclear faces remain unknown. Thresholds need testing with your camera and enrolled friends.").font(.caption)
         }
         Section("Provisional cue rules") {
-          Text("Surroundings checks submit a frame ≤10 seconds old or recognized speech ≤15 seconds old, with 1.5 seconds after the last recognized speech. Scene results expire when their image is 20 seconds old. New recognized speech invalidates old cues; steady ambient noise does not block scene checks. Cue confidence ≥0.8, automatic cooldown 30 seconds, lifetime 8 seconds.").font(.caption)
+          Text(model.sceneOnly ? "Muse checks every 4 seconds (15 in reduced-power mode). Recommendations stay until the next result. Pause and Stop clear captured context." : "Surroundings checks submit a frame ≤10 seconds old or recognized speech ≤15 seconds old, with 1.5 seconds after the last recognized speech. Scene results expire when their image is 20 seconds old. Each check also sends up to 8 one-sentence summaries of earlier moments. A cue stays until replaced, at least 5 seconds; an unchanged cue is not redrawn. Cue confidence ≥0.6. Dismiss pauses automatic checks for 10 seconds.").font(.caption)
           Text("iPhone mode pauses when the app leaves the foreground. Glasses pocket operation and routing need hardware validation; a simulator cannot verify them.").font(.caption)
         }
       }.navigationTitle("Settings").toolbar { Button("Done") { showSettings = false } }

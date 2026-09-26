@@ -100,7 +100,6 @@ final class GlassesController {
   @ObservationIgnored var requestedScreen: GlassesScreen?
   @ObservationIgnored private var sessionRevision = 0
   @ObservationIgnored var displayReady = false
-  @ObservationIgnored private var lastPreviewAt: Double = 0
   @ObservationIgnored private var sessionHasStarted = false
   @ObservationIgnored private var cameraHasStreamed = false
   @ObservationIgnored private var displayHasStarted = false
@@ -243,12 +242,12 @@ final class GlassesController {
     stopping = false
     cameraRevision += 1
     let captureRevision = cameraRevision
-    lastPreviewAt = 0; framesReceived = 0; lastError = nil; updateRequired = false
+    framesReceived = 0; lastError = nil; updateRequired = false
     preview = nil; previewAtMs = 0; cameraHasStreamed = false
-    // Display uses DAT 1.0 ambient PCM alongside low-rate video. Regular glasses
+    // Display uses DAT 1.0 ambient PCM alongside preview video. Regular glasses
     // retain their existing HFP path: add camera, settle HFP, then start video.
     let configuration = withDisplay
-      ? StreamConfiguration(videoCodec:.hvc1, audioCodec:.pcm(sampleRate:.rate16000, numberOfChannels:1), resolution:.low, frameRate:2)
+      ? StreamConfiguration(videoCodec:.hvc1, audioCodec:.pcm(sampleRate:.rate16000, numberOfChannels:1), resolution:.low, frameRate:15)
       : StreamConfiguration(videoCodec:.hvc1, resolution:.low, frameRate:15)
     guard let camera = try deviceSession.addCamera(config:configuration) else { throw CopilotError(message:"Could not attach camera.") }
     self.camera = camera
@@ -268,7 +267,8 @@ final class GlassesController {
     let decoder = VideoFrameDecoder()
     let frameGate = self.frameGate
     cameraTokens.append(camera.stream.videoFramePublisher.listen { [weak self] frame in
-      // Decode every HEVC dependency but publish at most 2 Hz to the UI/sampler.
+      // Decode every HEVC dependency. The gate bounds pending UI work;
+      // SessionModel independently throttles image sampling and face checks.
       guard let image = decoder.decode(frame.sampleBuffer),
             let captured = clock.timestamp(for:CMSampleBufferGetPresentationTimeStamp(frame.sampleBuffer), audio:false),
             frameGate.begin() else { return }
@@ -276,8 +276,6 @@ final class GlassesController {
         defer { frameGate.finish() }
         guard let self, self.sessionRevision == revision, self.cameraRevision == captureRevision, !self.stopping else { return }
         self.framesReceived += 1
-        guard captured - self.lastPreviewAt >= 500 else { return }
-        self.lastPreviewAt = captured
         self.preview = image; self.previewAtMs = captured
         self.onFrame?(image, captured)
       }

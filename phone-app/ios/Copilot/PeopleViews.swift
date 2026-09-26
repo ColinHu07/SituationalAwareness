@@ -247,14 +247,18 @@ struct FaceEnrollmentSection: View {
           Label("Add face photo", systemImage:"person.crop.square.badge.camera")
           if working { Spacer(); ProgressView() }
         }
-      }.disabled(working || store.people[index].faces.count >= 8)
+      }.disabled(working || store.people[index].faces.filter(\.isCompatible).count >= 8)
+      if store.people[index].faces.contains(where: { !$0.isCompatible }) {
+        Text("These older photos need to be added again for face matching.").font(.caption).foregroundStyle(.orange)
+      }
       if let error { Text(error).font(.caption).foregroundStyle(.red) }
     } header: { Text("Face") } footer: {
-      Text("Add 3–5 clear photos from different angles and lighting. Faces are compared on this iPhone only. Long-press a photo to remove it.")
+      Text("Add 3–5 clear photos of just this person, with both eyes visible, in different lighting. Faces are compared on this iPhone only. Long-press a photo to remove it.")
     }
     .onChange(of:selection) { _, item in
       guard let item else { return }
       selection = nil; working = true; error = nil
+      let personID = store.people[index].id
       Task {
         defer { working = false }
         do {
@@ -262,8 +266,11 @@ struct FaceEnrollmentSection: View {
             throw CopilotError(message:"Couldn't open that photo.")
           }
           let sample = try await Task.detached(priority:.userInitiated) { try FaceRecognizer.enroll(from:image) }.value
-          guard index < store.people.count else { return }
-          store.people[index].faces.append(sample)
+          guard let current = store.people.firstIndex(where: { $0.id == personID }),
+                store.people[current].faces.filter(\.isCompatible).count < 8 else { return }
+          try FaceRecognizer.validateEnrollment(sample, personID:personID, people:store.people)
+          store.people[current].faces.removeAll { !$0.isCompatible }
+          store.people[current].faces.append(sample)
         } catch { self.error = error.localizedDescription }
       }
     }
@@ -279,5 +286,42 @@ struct SceneChip: View {
       .padding(.horizontal,12).padding(.vertical,7)
       .background(Color.orange.opacity(0.15), in:Capsule())
       .accessibilityLabel("Setting: \(scene)")
+  }
+}
+
+// Shown when something the wearer said may have come across too blunt.
+struct RecoveryCard: View {
+  let feedback: SessionModel.ToneFeedback
+  let dismiss: () -> Void
+  var body: some View {
+    VStack(alignment:.leading, spacing:12) {
+      HStack {
+        Label("SOFTEN IT", systemImage:"bubble.left.and.exclamationmark.bubble.right").font(.caption.bold()).tracking(1)
+        Spacer()
+        Button("Dismiss", systemImage:"xmark", action:dismiss).labelStyle(.iconOnly)
+      }
+      Text("“\(feedback.recovery)”").font(.system(size:23, weight:.semibold, design:.rounded))
+        .frame(maxWidth:.infinity, alignment:.leading)
+      if !feedback.rephrase.isEmpty {
+        Label(feedback.rephrase, systemImage:"arrow.uturn.forward").font(.subheadline).opacity(0.8)
+      }
+    }.padding(20).foregroundStyle(.white)
+      .background(feedback.strong ? Color(red:0.78, green:0.33, blue:0.12) : Color(red:0.85, green:0.52, blue:0.12), in:RoundedRectangle(cornerRadius:20))
+      .accessibilityElement(children:.combine)
+      .accessibilityLabel("Soften it. Say: \(feedback.recovery). Next time: \(feedback.rephrase)")
+  }
+}
+
+// Teaches the app how loud the wearer's voice is, so only their own lines get a tone check.
+struct ThatWasMeButton: View {
+  @Bindable var model: SessionModel
+  @State private var confirmed = false
+  var body: some View {
+    if model.captionText != nil, model.transcript.last?.levelDbFS != nil {
+      Button { model.markLastLineAsMine(); confirmed = true } label: {
+        Image(systemName:confirmed ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
+      }.accessibilityLabel("That was me")
+        .onChange(of:model.captionText) { _, _ in confirmed = false }
+    }
   }
 }

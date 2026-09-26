@@ -2,114 +2,157 @@ import Foundation
 import UIKit
 import Vision
 
-/// One enrolled face: a Vision feature print of a cropped face plus a small thumbnail for the People editor.
+/// Legacy prints are retained for decoding old profiles only; they are never used as identity embeddings.
 struct FaceSample: Codable, Identifiable, Hashable {
   var id = UUID()
-  var print: Data
+  var print: Data = Data()
   var thumbnail: Data
+  var embedding: [Float]? = nil
+  var modelID: String? = nil
+  var isCompatible: Bool { modelID == FaceEmbedding.modelID && embedding.flatMap(FaceEmbedding.normalized) != nil }
 }
 
-/// Enrolled faces decoded once for matching; rebuilt when enrollment changes.
-struct FaceGallery: @unchecked Sendable {
-  let entries: [(personID: UUID, print: VNFeaturePrintObservation)]
-  let key: [UUID]
+struct FaceGallery: Sendable {
+  struct Key: Equatable, Sendable { let personID: UUID; let samples: [FaceSample] }
+  let entries: [(personID: UUID, embedding: [Float])]
+  let key: [Key]
+  static func key(for people: [Person]) -> [Key] { people.map { Key(personID:$0.id, samples:$0.faces) } }
   init(people: [Person]) {
-    var entries: [(UUID, VNFeaturePrintObservation)] = []
-    for person in people {
-      for sample in person.faces { if let print = FaceRecognizer.decode(sample.print) { entries.append((person.id, print)) } }
+    entries = people.flatMap { person in
+      person.faces.compactMap { sample in
+        guard sample.isCompatible, let vector = sample.embedding.flatMap(FaceEmbedding.normalized) else { return nil }
+        return (person.id, vector)
+      }
     }
-    self.entries = entries
-    key = people.flatMap { $0.faces.map(\.id) }
+    key = Self.key(for:people)
   }
   var isEmpty: Bool { entries.isEmpty }
 }
 
 struct FaceMatch: Equatable { let personID: UUID; let distance: Float }
 
-/// On-device only. Frames are never uploaded for recognition, and faces that match
-/// no enrolled person are discarded after comparison.
+/// Frames and identity embeddings stay on device. Uncertain faces remain unknown.
 enum FaceRecognizer {
-  /// Faces smaller than this (pixels, shorter side) are too blurry to compare.
-  static let minimumFaceSide: CGFloat = 48
-  /// Generic Vision feature prints are not a trained face-identity model. These defaults
-  /// need calibration on real enrollment photos; the People screen shows live distances.
-  static let defaultThreshold: Float = 0.55
-  static let ambiguityMargin: Float = 0.05
+  static let minimumFaceSide: CGFloat = 80
+  /// Provisional unit-embedding L2 thresholds; calibrate with held-out camera images.
+  static let defaultThreshold: Float = 0.85
+  static let ambiguityMargin: Float = 0.12
+  struct DetectedFace: @unchecked Sendable { let embedding: [Float]; let crop: CGImage; let area: CGFloat }
 
-  struct DetectedFace: @unchecked Sendable { let print: VNFeaturePrintObservation; let crop: CGImage; let area: CGFloat }
-
-  static func faces(in image: UIImage) throws -> [DetectedFace] {
+  static func faces(in image: UIImage, enrollment: Bool = false) throws -> [DetectedFace] {
     guard let cgImage = upright(image) else { return [] }
-    let detect = VNDetectFaceRectanglesRequest()
+    let detect = VNDetectFaceLandmarksRequest()
     try VNImageRequestHandler(cgImage:cgImage).perform([detect])
+    let observations = detect.results ?? []
+    if enrollment && observations.count > 1 {
+      throw CopilotError(message:"More than one face found. Crop the photo to just this person and try again.")
+    }
     let width = CGFloat(cgImage.width), height = CGFloat(cgImage.height)
-    return try (detect.results ?? []).compactMap { face in
-      // Vision boxes are normalized with a bottom-left origin; widen to include hair and jaw.
+    return try observations.prefix(6).compactMap { face in
       let box = face.boundingBox
-      var rect = CGRect(x:box.minX * width, y:(1 - box.maxY) * height, width:box.width * width, height:box.height * height)
-      guard min(rect.width, rect.height) >= minimumFaceSide else { return nil }
-      rect = rect.insetBy(dx:-rect.width * 0.2, dy:-rect.height * 0.2).intersection(CGRect(x:0, y:0, width:width, height:height))
-      guard let crop = cgImage.cropping(to:rect.integral) else { return nil }
-      let printRequest = VNGenerateImageFeaturePrintRequest()
-      printRequest.imageCropAndScaleOption = .scaleFill
-      try VNImageRequestHandler(cgImage:crop).perform([printRequest])
-      guard let print = printRequest.results?.first else { return nil }
-      return DetectedFace(print:print, crop:crop, area:rect.width * rect.height)
+      let w = box.width * width, h = box.height * height
+      guard min(w, h) >= minimumFaceSide, face.confidence >= 0.8,
+            abs(face.yaw?.doubleValue ?? 0) < 0.65,
+            let crop = aligned(cgImage, face:face) else { return nil }
+      return DetectedFace(embedding:try FaceNetEncoder.shared.embedding(for:crop), crop:crop, area:w * h)
     }
   }
 
-  /// Best enrolled person for each detected face. A face matches only when it is within the
-  /// threshold and clearly closer to one person than to anyone else.
   static func match(_ faces: [DetectedFace], gallery: FaceGallery, threshold: Float = defaultThreshold) -> [FaceMatch] {
-    faces.compactMap { face in
+    guard threshold.isFinite, threshold > 0, threshold <= 2 else { return [] }
+    let candidates = faces.compactMap { face -> FaceMatch? in
       let ranked = rank(face, gallery:gallery)
       guard let first = ranked.first, first.distance <= threshold else { return nil }
       if ranked.count > 1, ranked[1].distance - first.distance < ambiguityMargin { return nil }
       return first
     }
-  }
-  /// Closest distance to each enrolled person, nearest first. Also used to show calibration numbers.
-  static func rank(_ face: DetectedFace, gallery: FaceGallery) -> [FaceMatch] {
-    var best: [UUID: Float] = [:]
-    for entry in gallery.entries {
-      var distance: Float = .greatestFiniteMagnitude
-      guard (try? face.print.computeDistance(&distance, to:entry.print)) != nil else { continue }
-      best[entry.personID] = min(best[entry.personID] ?? .greatestFiniteMagnitude, distance)
-    }
-    return best.map { FaceMatch(personID:$0.key, distance:$0.value) }.sorted { $0.distance < $1.distance }
+    // Two different faces claiming the same profile in one frame are ambiguous.
+    let counts = Dictionary(candidates.map { ($0.personID, 1) }, uniquingKeysWith:+)
+    return candidates.filter { counts[$0.personID] == 1 }
   }
 
-  /// Enrollment: the largest face in a photo of this person.
+  static func rank(_ face: DetectedFace, gallery: FaceGallery) -> [FaceMatch] {
+    var distances: [UUID: [Float]] = [:]
+    for entry in gallery.entries {
+      if let distance = FaceEmbedding.distance(face.embedding, entry.embedding) {
+        distances[entry.personID, default:[]].append(distance)
+      }
+    }
+    // With multiple photos, require support from the closest two, not one lucky outlier.
+    return distances.map { id, values in
+      let best = values.sorted().prefix(2)
+      return FaceMatch(personID:id, distance:best.reduce(0, +) / Float(best.count))
+    }.sorted { $0.distance == $1.distance ? $0.personID.uuidString < $1.personID.uuidString : $0.distance < $1.distance }
+  }
+
   static func enroll(from image: UIImage) throws -> FaceSample {
-    guard let face = try faces(in:image).max(by: { $0.area < $1.area }) else {
-      throw CopilotError(message:"No clear face found. Use a well-lit photo where the face is large and facing the camera.")
+    guard let face = try faces(in:image, enrollment:true).first else {
+      throw CopilotError(message:"No clear face found. Use a well-lit photo of one person looking toward the camera, with both eyes visible.")
     }
     guard let sample = sample(from:face) else { throw CopilotError(message:"Couldn't save this face.") }
     return sample
   }
-  static func sample(from face: DetectedFace) -> FaceSample? {
-    guard let print = encode(face.print) else { return nil }
-    let thumb = UIImage(cgImage:face.crop)
-    let side: CGFloat = 96
-    let format = UIGraphicsImageRendererFormat(); format.scale = 1
-    let small = UIGraphicsImageRenderer(size:CGSize(width:side, height:side), format:format).image { _ in
-      thumb.draw(in:CGRect(x:0, y:0, width:side, height:side))
+
+  /// Reject likely wrong-person uploads and cross-profile duplicates before saving.
+  static func validateEnrollment(_ sample: FaceSample, personID: UUID, people: [Person]) throws {
+    guard sample.isCompatible, let vector = sample.embedding else { throw CopilotError(message:"Please add a new face photo.") }
+    let own = people.first { $0.id == personID }?.faces.filter(\.isCompatible) ?? []
+    if !own.isEmpty, !own.contains(where: { FaceEmbedding.distance(vector, $0.embedding!).map { $0 <= 1.05 } ?? false }) {
+      throw CopilotError(message:"This photo doesn't closely match this person's saved photos. Check the person and try a clearer photo.")
     }
-    return FaceSample(print:print, thumbnail:small.jpegData(compressionQuality:0.7) ?? Data())
+    for other in people where other.id != personID {
+      if other.faces.contains(where: { $0.isCompatible && FaceEmbedding.distance(vector, $0.embedding!).map { $0 < defaultThreshold } == true }) {
+        throw CopilotError(message:"This face also matches \(other.name). Check the selected profile before adding it.")
+      }
+    }
   }
 
-  static func encode(_ print: VNFeaturePrintObservation) -> Data? {
-    try? NSKeyedArchiver.archivedData(withRootObject:print, requiringSecureCoding:true)
-  }
-  static func decode(_ data: Data) -> VNFeaturePrintObservation? {
-    try? NSKeyedUnarchiver.unarchivedObject(ofClass:VNFeaturePrintObservation.self, from:data)
+  static func sample(from face: DetectedFace) -> FaceSample? {
+    guard let vector = FaceEmbedding.normalized(face.embedding),
+          let thumbnail = UIImage(cgImage:face.crop).jpegData(compressionQuality:0.85) else { return nil }
+    return FaceSample(thumbnail:thumbnail, embedding:vector, modelID:FaceEmbedding.modelID)
   }
 
-  /// Redraws so pixel data matches the displayed orientation; Vision then needs no orientation hint.
+  /// Identical eye alignment for enrollment and camera frames, in top-left pixel coordinates.
+  private static func aligned(_ image: CGImage, face: VNFaceObservation) -> CGImage? {
+    func center(_ region: VNFaceLandmarkRegion2D?) -> CGPoint? {
+      guard let points = region?.normalizedPoints, !points.isEmpty else { return nil }
+      let x = points.reduce(CGFloat(0)) { $0 + $1.x } / CGFloat(points.count)
+      let y = points.reduce(CGFloat(0)) { $0 + $1.y } / CGFloat(points.count)
+      let box = face.boundingBox
+      return CGPoint(x:(box.minX + x * box.width) * CGFloat(image.width),
+                     y:(1 - box.minY - y * box.height) * CGFloat(image.height))
+    }
+    guard let a = center(face.landmarks?.leftEye), let b = center(face.landmarks?.rightEye) else { return nil }
+    let left = a.x < b.x ? a : b, right = a.x < b.x ? b : a
+    let dx = right.x - left.x, dy = right.y - left.y
+    let eyeDistance = hypot(dx, dy)
+    guard eyeDistance >= 16 else { return nil }
+    let scale = 60 / eyeDistance, angle = atan2(dy, dx)
+    let transform = CGAffineTransform(a:scale * cos(angle), b:-scale * sin(angle),
+                                     c:scale * sin(angle), d:scale * cos(angle), tx:0, ty:0)
+    let mapped = left.applying(transform)
+    var final = transform; final.tx = 50 - mapped.x; final.ty = 60 - mapped.y
+    // Avoid artificial black borders when a face is partly outside the frame.
+    let inverse = final.inverted()
+    let bounds = CGRect(x:0, y:0, width:image.width, height:image.height)
+    guard [CGPoint(x:0,y:0), CGPoint(x:159,y:0), CGPoint(x:0,y:159), CGPoint(x:159,y:159)]
+      .allSatisfy({ bounds.contains($0.applying(inverse)) }) else { return nil }
+    let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+    return UIGraphicsImageRenderer(size:CGSize(width:160, height:160), format:format).image { context in
+      context.cgContext.concatenate(final)
+      UIImage(cgImage:image).draw(in:bounds)
+    }.cgImage
+  }
+
   private static func upright(_ image: UIImage) -> CGImage? {
-    if image.imageOrientation == .up, let cgImage = image.cgImage { return cgImage }
+    // Bound work for large photo-library images while preserving orientation.
+    let longest = max(image.size.width, image.size.height)
+    guard longest > 0 else { return nil }
+    let scale = min(1, 1600 / longest)
+    let size = CGSize(width:image.size.width * scale, height:image.size.height * scale)
     let format = UIGraphicsImageRendererFormat(); format.scale = 1
-    return UIGraphicsImageRenderer(size:image.size, format:format).image { _ in image.draw(at:.zero) }.cgImage
+    return UIGraphicsImageRenderer(size:size, format:format).image { _ in image.draw(in:CGRect(origin:.zero, size:size)) }.cgImage
   }
 }
 
@@ -140,7 +183,9 @@ struct PresenceTracker {
 
   /// Returns people newly added by this evidence.
   mutating func recordFaces(_ ids: [UUID], at time: Double) -> [UUID] {
-    ids.filter { id in
+    var seen: Set<UUID> = []
+    return ids.filter { id in
+      guard seen.insert(id).inserted, faceHits[id]?.last != time else { return false }
       faceHits[id] = (faceHits[id] ?? []).filter { time - $0 <= Self.faceWindowMs } + [time]
       guard !dismissed.contains(id) else { return false }
       if confirmed.contains(id) { sources[id, default:[]].insert(.face); lastEvidence[id] = time; return false }

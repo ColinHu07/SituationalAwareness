@@ -31,17 +31,18 @@ export function validateStartMessage(value) {
   if (!Array.isArray(languages) || languages.length < 1 || languages.length > 6 ||
       languages.some(language => typeof language !== 'string' || !SUPPORTED_LANGUAGES.has(language)))
     throw new Error('Invalid language bias.');
-  return { languageBias: [...new Set(languages)] };
+  if (value.diagnostics != null && typeof value.diagnostics !== 'boolean') throw new Error('Invalid diagnostics flag.');
+  return { languageBias: [...new Set(languages)], ...(value.diagnostics === true ? { diagnostics: true } : {}) };
 }
 
-export function buildMetaHandshake(apiKey, { languageBias }) {
+export function buildMetaHandshake(apiKey, { languageBias, diagnostics = false }) {
   return {
     authorization: { accessToken: `Bearer ${apiKey}` },
     audioEncoding: 'PCM_16KHZ',
     model: 'muse-voice-transcribe-1.0',
     mode: 'DIARIZATION',
     partialMode: 'CUMULATIVE',
-    emitAudioProgress: false,
+    emitAudioProgress: diagnostics,
     languageBias,
   };
 }
@@ -161,10 +162,18 @@ export async function runRealtimeSession(client, {
   startTimeoutMs = 10_000,
 } = {}) {
   let upstream = null, started = false, ready = false, ending = false;
+  let diagnostics = false, receivedBytes = 0, forwardedBytes = 0, lastAudioReport = -Infinity, lastProgressReport = -Infinity;
+  const began = performance.now();
   const assembler = new DiarizedTurnAssembler();
 
   const sendClient = value => {
-    if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(value));
+    if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ ...value,
+      ...(diagnostics ? { timing: {
+        serverElapsedMs: performance.now() - began,
+        audioReceivedMs: receivedBytes / 32, audioForwardedMs: forwardedBytes / 32,
+        upstreamQueuedMs: (upstream?.bufferedAmount || 0) / 32,
+      } } : {}),
+    }));
   };
   const failClient = (code = 1011) => {
     if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING)
@@ -177,6 +186,7 @@ export async function runRealtimeSession(client, {
 
   const start = async value => {
     const config = validateStartMessage(value);
+    diagnostics = config.diagnostics === true;
     if (started) throw new Error('ASR session already started.');
     started = true;
     clearTimeout(startTimer);
@@ -194,6 +204,15 @@ export async function runRealtimeSession(client, {
       try { event = JSON.parse(String(data)); } catch { return; }
       if (event.type === 'error') { failClient(1011); return; }
       for (const normalized of assembler.consume(event)) sendClient(normalized);
+      if (diagnostics && ['audioProgress', 'speechStart', 'speechEnd'].includes(event.type)) {
+        if (event.type === 'audioProgress') {
+          if (performance.now() - lastProgressReport < 1000) return;
+          lastProgressReport = performance.now();
+        }
+        sendClient({ type: event.type === 'audioProgress' ? 'audio.progress' : event.type === 'speechStart' ? 'speech.start' : 'speech.end',
+          ...(Number.isInteger(event.turnId) ? { turnId: event.turnId } : {}),
+          audioProcessedMs: Number.isFinite(event.audioProcessedMs) ? event.audioProcessedMs : null });
+      }
     });
     upstream.on('close', code => {
       if (client.readyState === WebSocket.OPEN)
@@ -209,11 +228,20 @@ export async function runRealtimeSession(client, {
         if (!ready || ending || data.length === 0 || data.length > MAX_CLIENT_FRAME_BYTES) {
           failClient(data.length > MAX_CLIENT_FRAME_BYTES ? 1009 : 1008); return;
         }
+        receivedBytes += data.length;
         upstream.send(data, { binary: true });
+        forwardedBytes += data.length;
+        if (diagnostics && performance.now() - lastAudioReport >= 1000) {
+          lastAudioReport = performance.now();
+          sendClient({ type: 'audio.forwarded' });
+        }
         return;
       }
       const value = JSON.parse(String(data));
       if (!started) { await start(value); return; }
+      if (diagnostics && ready && value?.type === 'timing.ping' && Number.isFinite(value.clientSentMs)) {
+        sendClient({ type: 'timing.pong', clientSentMs: value.clientSentMs }); return;
+      }
       if (value?.type === 'endStream' && ready && !ending) {
         ending = true; upstream.send(JSON.stringify({ type: 'endStream' })); return;
       }
@@ -223,7 +251,7 @@ export async function runRealtimeSession(client, {
 
   client.on('close', () => {
     clearTimeout(startTimer);
-    if (!upstream || ending) return;
+    if (!upstream) return;
     if (upstream.readyState === WebSocket.OPEN) {
       upstream.close(1000, 'Client ended session.');
     } else if (upstream.readyState === WebSocket.CONNECTING) {
