@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from '../server/index.mjs';
 import { createProvider } from '../server/model.mjs';
 import { Session } from '../shared/protocol.mjs';
-import { CUE, input, audioInput, deferred } from './fixtures.mjs';
+import { CUE, input, surroundingsInput, audioInput, deferred } from './fixtures.mjs';
 
 const TOKEN = 'synthetic-proxy-token-for-tests-only-123456789';
 const providerResult = { result: CUE, metrics: { apiMs: 0, estimatedCostUsd: 0, simulated: true } };
@@ -84,6 +84,47 @@ test('an expired frame is dropped while fresh clear speech can be processed', as
   const body = input(Date.now()); body.frame.capturedAtMs -= 15000;
   const response = await server.post(body);
   assert.equal(response.status, 200); assert.equal(captured.frame, null);
+});
+
+test('surroundings analyzes a recent image in silence and forwards bounded audio context', async t => {
+  let captured;
+  const server = await serverFor(t, { mode: 'mock', cue: async body => { captured = body; return providerResult; } });
+  const body = surroundingsInput(Date.now());
+  const response = await server.post(body);
+  assert.equal(response.status, 200); assert.equal(captured.analysisMode, 'surroundings');
+  assert.deepEqual(captured.transcript, []); assert.deepEqual(captured.frame, body.frame);
+  assert.deepEqual(captured.audioContext, body.audioContext);
+});
+
+test('surroundings rejects stale image and audio-only evidence without calling Muse', async t => {
+  let calls = 0;
+  const server = await serverFor(t, { mode: 'mock', cue: async () => { calls++; return providerResult; } });
+  const stale = surroundingsInput(Date.now()); stale.frame.capturedAtMs -= 15000;
+  const audioOnly = { ...surroundingsInput(Date.now()), frame: null };
+  for (const body of [stale, audioOnly]) {
+    const response = await server.post(body), result = await response.json();
+    assert.equal(response.status, 200); assert.equal(result.result.should_display, false);
+    assert.match(result.result.reason, /recent image or clear speech/);
+  }
+  assert.equal(calls, 0);
+});
+
+test('surroundings permits fresh clear speech without a frame but rejects unreliable speech alone', async t => {
+  let calls = 0;
+  const server = await serverFor(t, { mode: 'mock', cue: async () => { calls++; return providerResult; } });
+  const body = { ...input(Date.now()), analysisMode: 'surroundings', frame: null };
+  assert.equal((await server.post(body)).status, 200); assert.equal(calls, 1);
+  body.transcript[0].confidence = 0.4;
+  assert.equal((await (await server.post(body)).json()).result.should_display, false);
+  assert.equal(calls, 1);
+});
+
+test('HTTP rejects invalid analysis modes and invented audio observations before provider use', async t => {
+  let calls = 0;
+  const server = await serverFor(t, { mode: 'mock', cue: async () => { calls++; return providerResult; } });
+  assert.equal((await server.post({ ...input(Date.now()), analysisMode: 'emotion' })).status, 400);
+  const body = surroundingsInput(Date.now()); body.audioContext.emotion = 'calm';
+  assert.equal((await server.post(body)).status, 400); assert.equal(calls, 0);
 });
 
 test('provider failure cannot leak upstream participant content into HTTP errors', async t => {

@@ -1,8 +1,24 @@
 # Aside — an opt-in conversation copilot
 
-A runnable native iOS companion with **iPhone**, **regular Meta glasses**, and **Display glasses** capture modes, a small credential-holding backend, and an explicitly simulated browser lab. The wearer starts deliberately, gets a brief cue only when supported by recent conversation, and can dismiss, pause or stop.
+A runnable native iOS companion with **iPhone**, **regular Meta glasses**, and **Display glasses** capture modes, a small credential-holding backend, and an explicitly simulated browser lab. The wearer starts deliberately, gets a brief social cue from the visible setting or recent recognized speech, and can dismiss, pause or stop.
 
-**Implemented and locally tested; not yet verified on glasses or the authenticated Muse API.** No phone was connected and no model key was provided during this run. Pocket operation, partner transcription and display wake behavior need the hardware acceptance test. This is not a medical product and does not identify faces or infer emotions/intentions.
+**Implemented and locally tested; physical glasses acceptance remains unverified.** Pocket operation, nearby-speaker transcription and display wake behavior need the hardware acceptance test. The prototype does not identify faces or infer emotions/intentions. Current and historical verification results are separated below.
+
+## Display surroundings update · September 25
+
+Choose **Display glasses**, confirm consent, and tap **Start analyzing** on the phone. DAT **1.0.0** sends low-resolution **2 FPS HEVC video plus 16 kHz mono ambient PCM** to the phone in one camera stream. Display mode does not select an HFP microphone. Regular glasses retain their HFP input and phone output.
+
+The phone keeps one JPEG refreshed every **2 seconds**, batches audio for Muse ASR, and asks Muse Spark about the fresh image and recognized words. Checks are eligible every **8 seconds** with recognized speech less than 30 seconds old, **20 seconds** otherwise, or **30 seconds** in Low Power Mode / serious thermal state. Critical phone thermal state pauses capture. A separate **30-second cue cooldown** avoids repeated automatic nudges; each cue lasts **8 seconds**. These are provisional settings, not measured optimal performance.
+
+Camera and microphone stay active until **Pause** or **Stop**. On the glasses, **Analyze now** requests a check without waiting for automatic timing; **Dismiss**, **Pause**, **Stop**, and paused **Resume analysis** give control back to the wearer. Captions are optional and secondary to the social cue. The phone coordinates capture and scheduling; Muse inference runs through the backend rather than on the glasses.
+
+A fresh image alone can support “This looks like a library. Keep your voice low.” Explicit speech such as “I need some space” can support giving someone a moment. Audio-energy metadata does not identify sounds, measure room loudness, or infer tone/mood. Raw ambient noise does not repeatedly invalidate surroundings checks; recognized speech updates conversation evidence. No raw audio/video files are saved.
+
+Ambient streaming is an **experimental development/beta capability** requiring **Camera and Audio Streaming** app approval and camera/microphone permissions. It cannot currently be published to production release channels. See [Display setup](display-glasses/README.md), the [pinned DAT 1.0.0 changelog](https://github.com/facebook/meta-wearables-dat-ios/blob/1.0.0/CHANGELOG.md), and the [current official audio guide](https://github.com/facebook/meta-wearables-dat-ios/blob/main/plugins/mwdat-ios/skills/audio-streaming/SKILL.md) checked September 25. The release tag omits guide files, so the guide link uses `main`.
+
+In **Simulated demo**, try **Quiet library**, **Group conversation**, and **Someone needs space** with the local scripted model. The images and words are labeled fixtures; these demonstrate app behavior without claiming live recognition. This update has **22 passing native tests**, **101 passing backend tests**, and successful simulator/unsigned iPhone builds. Standalone simulator launch, library/group/supportive cues, Pause and Stop were verified through the UI. A missing runtime framework search path was fixed for standalone launches. Synthetic live Muse image/text requests returned valid structured cues in **9.51–10.09 seconds**; a one-second synthetic silence clip returned an empty ASR transcript in **1.14 seconds**. These verify API transport/schema, not recognition accuracy or camera-to-glasses latency. Actual glasses behavior remains unverified.
+
+Live testing exposed a reasoning-token truncation at 1,024 tokens. The provider now allows 4,096 combined reasoning/output tokens and uses minimal reasoning for surroundings. Cue HTTP timeout is 20 seconds. Images must be at most 10 seconds old when submitted; scene responses are discarded when their submitted image exceeds 20 seconds. Speech freshness stays 15 seconds, and new recognized speech or session controls cancel pending work. One request at a time means actual check cadence also depends on model latency.
 
 ## Phone-first update · September 25
 
@@ -10,7 +26,7 @@ The three device folders are **[phone-app/](phone-app/)**, **[regular-glasses/](
 
 The reference [Read the Room repository](https://github.com/max-lee-dev/sbu-hacks-read-the-room) uses Gemini image analysis, ElevenLabs narration and NeuralSeek guidance. Its “transcription” field is scene narration, not recognized speech. [Full code review and provider mapping](docs/REFERENCE_COMPARISON.md).
 
-The iOS app now offers three real capture paths plus a labeled demo. **iPhone** uses the phone's built-in mic and optional rear camera without initializing DAT. **Meta glasses** uses their camera/HFP and shows results on the phone. **Display glasses** additionally renders captions and suggestions on the glasses. Regular-glasses spoken output is not implemented.
+The iOS app now offers three real capture paths plus a labeled demo. **iPhone** uses the phone's built-in mic and optional rear camera without initializing DAT. **Meta glasses** uses their camera/HFP and shows results on the phone. **Display glasses** uses direct ambient PCM and renders social cues, with optional captions, on the glasses. Regular-glasses spoken output is not implemented.
 
 The phone screen separates **Captions** (completed ASR speech chunks), **Your notes** (wearer-authored), and **AI suggestion**. Captions do not wait for the suggestion cooldown and survive suggestion dismissal. They are not word-by-word partial streaming. Camera/audio input and live Meta calls still need real-device validation.
 
@@ -35,7 +51,7 @@ The backend uses Node built-ins; there are no npm runtime dependencies. The brow
 
 ## Native iPhone companion
 
-Open `phone-app/ios/Copilot.xcodeproj` in Xcode. The project pins the official Meta DAT **0.9.0** package and includes camera/HEVC decoding, a shared camera/display session, explicit Bluetooth HFP input selection, WAV transcription, cue controls and local simulation. See [iOS setup](phone-app/ios/README.md) for registration, developer mode, signing, firmware and proxy configuration.
+Open `phone-app/ios/Copilot.xcodeproj` in Xcode. The project pins the official Meta DAT **1.0.0** package and includes HEVC decoding, ambient PCM for Display glasses, explicit HFP selection for regular glasses, WAV transcription, social cues and local simulation. See [iOS setup](phone-app/ios/README.md) for registration, developer mode, signing, firmware and proxy configuration.
 
 Build without changing the Mac's globally selected developer tools:
 
@@ -46,7 +62,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
   -derivedDataPath artifacts/DerivedData CODE_SIGNING_ALLOWED=NO build
 ```
 
-The app starts in **iPhone** mode. Choose **Simulated demo** with a **local scripted provider** to try it without a backend or hardware. Our simulated display is not Meta Mock Device Kit validation of Display glasses. The separate **Connection test only (no uploads)** mode exercises actual camera/HFP/display and a manual cue before configuring Muse. For actual hardware, use [the two-person demo protocol](docs/DEMO.md).
+The app starts in **iPhone** mode. Choose **Simulated demo** with a **local scripted provider** to try it without a backend or hardware. Our simulated display is not Meta Mock Device Kit validation of Display glasses. The separate **Connection test only (no uploads)** mode exercises the selected camera/audio path and a manual Display cue before configuring Muse. For actual hardware, use [the two-person demo protocol](docs/DEMO.md).
 
 ## Enable live Muse Spark and ASR
 
@@ -66,7 +82,7 @@ Generate the separate proxy token with `node -e "console.log(require('crypto').r
 
 For an iOS simulator, the loopback endpoint is `http://127.0.0.1:8787`. A physical phone needs a reachable **trusted HTTPS** proxy endpoint; its own `127.0.0.1` does not point at this Mac. The Node development server does not terminate TLS. Use a secured deployment/reverse proxy, set `HOST` appropriately if needed, and disable request-body/token logging in that infrastructure. Native non-loopback HTTP is rejected. This repository does not publish a service automatically.
 
-The live provider uses documented `muse-spark-1.3` image + text requests with a strict five-field schema. Audio uses the separate `muse-voice-transcribe-1.0` HTTP API. It does not use a presumed real-time video socket. HFP audio is resampled to the ASR format, not improved in fidelity.
+The live provider uses documented `muse-spark-1.3` image + text requests with a strict five-field schema. Audio uses the separate `muse-voice-transcribe-1.0` HTTP API. Spark gets recognized text and images, not the raw soundtrack or audible tone. Display PCM arrives at the requested ASR sample rate; regular-glasses HFP is resampled without improving fidelity. No live video socket or sound-event classifier is implemented.
 
 To test real image transport after capturing a consented frame:
 
@@ -77,6 +93,8 @@ npm run smoke:live -- --image /absolute/path/to/consented-sampled-frame.jpg --co
 This sends the supplied image with an abstention probe and reports only transport/schema success and usage metrics. It requires a real key and has no stock-image substitution; it does not establish cue accuracy or prove the frame came from glasses. For explicit development fallback in the browser, select **Browser camera + manual / mic input**. Camera/mic capture requires a secure browser context (localhost qualifies). Browser microphone recording is per-button six-second chunks, while native capture is continuous and bounded.
 
 ## Phone update verification · September 25
+
+Historical phone-first results before the Display surroundings update; device and credential availability below describe that earlier run.
 
 - **12 native tests passed**, including caption lifetime, separate notes, phone defaults, foreground pause, and no-upload capture mode.
 - **75 backend/session tests passed**; browser JavaScript syntax check passed.
@@ -102,11 +120,11 @@ This sends the supplied image with an abstention probe and reports only transpor
 
 Machine-readable local results are in [benchmark.json](docs/benchmark.json). Its tiny text-only requests are not representative of image/audio bandwidth. Native/browser counters measure upload payloads, ASR/API times, returned usage costs and stale drops; physical display latency requires observation on glasses. Missing/canceled request billing remains unknown. Mark distracting cues and export metrics without conversation content.
 
-The initial 5-second browser / 8-second native frame samplers, 60-second transcript, 1.5-second silence gate, 30-second automatic cooldown and 8-second cue expiry are **provisional conservative settings**. Local mock timing does not justify claiming an optimal real-time configuration. Tune using live repeated measurements.
+The dated results above describe the earlier conversation-only version. Display mode now uses the sampling and scheduling policy documented in the Display surroundings update; browser and regular-glasses timing remain distinct. Local mock timing does not establish optimal live behavior.
 
 ## Important platform findings
 
-- The documented HFP route is 8 kHz mono and may suppress the partner's voice. Successful transcription of the wearer alone does not satisfy the two-person demo.
+- DAT 1.0.0 adds synchronized experimental camera PCM and a mock Display preview. Direct ambient PCM is used for Display mode; its nearby-speaker quality still requires testing. Regular glasses retain the documented 8 kHz HFP route, which may suppress a partner's voice.
 - DAT has display support, but its display dims/sleeps after idle time; guaranteed wake-on-cue is unverified.
 - HEVC is the documented iOS background camera route. Complete locked-phone camera/audio/network/display operation still needs testing.
 - No fixed current DAT three-minute camera limit was established; no speculative timed restart is implemented.

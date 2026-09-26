@@ -3,6 +3,8 @@ export class InputError extends Error { constructor(message) { super(message); t
 const require = (condition, message) => { if (!condition) throw new InputError(message); };
 export function validateInput(body, now = Date.now()) {
   require(body && typeof body === 'object' && !Array.isArray(body), 'Expected a JSON object');
+  const analysisMode = body.analysisMode === undefined ? 'conversation' : body.analysisMode;
+  require(['conversation', 'surroundings'].includes(analysisMode), 'Invalid analysisMode');
   require(Array.isArray(body.transcript) && body.transcript.length <= 40, 'Transcript must have at most 40 entries');
   for (const item of body.transcript) {
     require(item && typeof item.text === 'string' && item.text.length <= 500 && item.text.trim(), 'Invalid transcript text');
@@ -23,8 +25,21 @@ export function validateInput(body, now = Date.now()) {
     require(Number.isFinite(body.frame.capturedAtMs) && body.frame.capturedAtMs <= now + 1000, 'Invalid frame timestamp');
     if (now - body.frame.capturedAtMs <= LIMITS.frameMs) frame = body.frame;
   }
+  let audioContext = null;
+  if (body.audioContext != null) {
+    const audio = body.audioContext;
+    require(audio && typeof audio === 'object' && !Array.isArray(audio) &&
+      Object.keys(audio).sort().join() === ['activityRatio', 'capturedAtMs', 'rmsDbFS', 'source', 'windowMs'].sort().join(), 'Invalid audioContext');
+    require(Number.isFinite(audio.capturedAtMs) && audio.capturedAtMs <= now + 1000, 'Invalid audio context timestamp');
+    require(Number.isFinite(audio.windowMs) && audio.windowMs > 0 && audio.windowMs <= 6000 &&
+      Number.isFinite(audio.activityRatio) && audio.activityRatio >= 0 && audio.activityRatio <= 1 &&
+      Number.isFinite(audio.rmsDbFS) && audio.rmsDbFS >= -120 && audio.rmsDbFS <= 0 &&
+      ['glasses_hfp', 'glasses_pcm', 'phone'].includes(audio.source), 'Invalid audio context statistics');
+    // Energy alone cannot establish a setting or identify speech, sounds, or mood.
+    if (analysisMode === 'surroundings' && now - audio.capturedAtMs <= LIMITS.frameMs) audioContext = audio;
+  }
   return { transcript: boundedTranscript(body.transcript.map(x => ({ ...x, confidence: x.confidence ?? null })), now),
-    frame, context: body.context, manual: body.manual };
+    frame, context: body.context, manual: body.manual, analysisMode, audioContext };
 }
 
 export function validateAudio(body, now = Date.now()) {

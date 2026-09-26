@@ -1,4 +1,6 @@
 import XCTest
+import AVFoundation
+import os
 @testable import Copilot
 
 @MainActor
@@ -29,6 +31,9 @@ final class SessionTests: XCTestCase {
     XCTAssertFalse(model.captureMode.hasGlassesDisplay)
     model.captureMode = .displayGlasses
     XCTAssertTrue(model.captureMode.hasGlassesDisplay)
+    model.selectedAudioUID = ""
+    XCTAssertTrue(model.canStart, "Display ambient PCM needs no HFP selection")
+    XCTAssertTrue(model.analyzesSurroundings)
   }
   func testCaptionAndSavedNoteSurviveSuggestionDismissal() async throws {
     let model = try await activeModel()
@@ -153,5 +158,158 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(Array(audio[24..<28]),[0x80,0x3e,0,0])
     XCTAssertEqual(Array(audio[34..<36]),[16,0])
     XCTAssertEqual(Array(audio[40..<44]),[6,0,0,0])
+  }
+
+  func testSilentLibraryProducesSceneCueAndRespectsAutomaticCooldown() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.addSimulationScene("library")
+    XCTAssertTrue(model.transcript.isEmpty)
+    try await Task.sleep(for:.milliseconds(1600))
+    model.requestCue(manual:true)
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.cue,"This looks like a library. Keep your voice low.")
+    let count = model.requests
+    model.requestCue(manual:false)
+    XCTAssertEqual(model.requests,count)
+    model.dismiss()
+    model.requestCue(manual:false)
+    XCTAssertEqual(model.requests,count)
+  }
+
+  func testSurroundingsRejectsStaleImageAndAudioOnlyEvidence() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.simulateSurroundings = true
+    model.latestAudioContext = AudioContext(capturedAtMs:nowMs(),windowMs:1000,activityRatio:0,rmsDbFS:-80,source:"glasses_pcm")
+    model.latestFrame = SampledFrame(dataUrl:"data:image/jpeg;base64,unused",capturedAtMs:nowMs()-11000)
+    try await Task.sleep(for:.milliseconds(1600))
+    model.requestCue(manual:true)
+    XCTAssertEqual(model.requests,0)
+    XCTAssertNil(model.cue)
+  }
+
+  func testNewSceneCancelsPendingLibraryCue() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.addSimulationScene("library")
+    try await Task.sleep(for:.milliseconds(1600))
+    model.requestCue(manual:true)
+    XCTAssertTrue(model.isThinking)
+    model.addSimulationScene("group")
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertNotEqual(model.cue,"This looks like a library. Keep your voice low.")
+  }
+
+  func testSurroundingsUsesExplicitSpeechForSupportiveCue() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.simulateSurroundings = true
+    model.addSimulationLine("I've had a rough day. I need some space.")
+    try await Task.sleep(for:.milliseconds(1600))
+    model.requestCue(manual:true)
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.cue,"They mentioned a hard day. Listen and give them space.")
+  }
+
+  func testAdaptiveCadenceAndPauseErasesAudioSummary() async throws {
+    let model = try await activeModel()
+    model.simulateSurroundings = true
+    let timestamp = nowMs()
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),20)
+    model.lastVoiceAt = timestamp
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),8)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:true),30)
+    XCTAssertEqual(model.analysisInterval(at:timestamp+30001,reducedPower:false),20)
+    model.latestAudioContext = AudioContext(capturedAtMs:timestamp,windowMs:1000,activityRatio:0.5,rmsDbFS:-30,source:"glasses_pcm")
+    model.pause()
+    XCTAssertNil(model.latestAudioContext)
+    XCTAssertEqual(model.nextAnalysisAt,0)
+    model.stop()
+  }
+
+  func testAmbientPCMConversionBoundedChunksAndStop() throws {
+    let microphone = ConversationMicrophone()
+    let chunks = OSAllocatedUnfairLock(initialState:[AudioChunk]())
+    let contexts = OSAllocatedUnfairLock(initialState:[AudioContext]())
+    microphone.onChunk = { chunk in chunks.withLock { $0.append(chunk) } }
+    microphone.onContext = { context in contexts.withLock { $0.append(context) } }
+    microphone.prepareStreamPCM()
+    let format = try XCTUnwrap(AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:16000,channels:1,interleaved:false))
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat:format,frameCapacity:16000))
+    buffer.frameLength = 16000
+    let data = try XCTUnwrap(buffer.floatChannelData?[0])
+    for i in 0..<16000 { data[i] = 0.05 }
+    let timestamp = nowMs()
+    for i in 1...6 { microphone.receiveStreamPCM(buffer,at:timestamp+Double(i)*1000) }
+    let captured = chunks.withLock { $0 }
+    XCTAssertEqual(captured.count,1)
+    let chunk = try XCTUnwrap(captured.first)
+    XCTAssertEqual(Data(base64Encoded:chunk.audioBase64)?.count,192044)
+    XCTAssertEqual(chunk.endedAtMs-chunk.startedAtMs,6000,accuracy:1)
+    let summaries = contexts.withLock { $0 }
+    XCTAssertEqual(summaries.count,6)
+    XCTAssertTrue(summaries.allSatisfy { $0.source == "glasses_pcm" && $0.activityRatio == 1 && $0.rmsDbFS < 0 })
+    microphone.stop()
+    microphone.receiveStreamPCM(buffer,at:timestamp+7000)
+    XCTAssertEqual(contexts.withLock { $0.count },6)
+  }
+
+  func testGlassesClockPreservesRelativeAudioVideoTimeAndRejectsLateFrames() {
+    let clock = GlassesStreamClock()
+    func pts(_ seconds: Double) -> CMTime { CMTime(seconds:seconds,preferredTimescale:1000) }
+    XCTAssertEqual(clock.timestamp(for:pts(10),audio:false,arrival:100000),100000)
+    XCTAssertEqual(clock.timestamp(for:pts(10.1),audio:true,arrival:100150),100100)
+    XCTAssertEqual(clock.timestamp(for:pts(10.5),audio:false,arrival:100550),100500)
+    XCTAssertNil(clock.timestamp(for:pts(10.3),audio:false,arrival:100600))
+    XCTAssertNil(clock.timestamp(for:pts(12),audio:true,arrival:100600))
+    XCTAssertNil(clock.timestamp(for:pts(10.7),audio:true,arrival:116000))
+    clock.stop()
+    XCTAssertNil(clock.timestamp(for:pts(10.8),audio:true,arrival:100900))
+  }
+
+  func testSceneSelectionExplicitlyChecksDuringCooldown() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.addSimulationScene("library")
+    try await Task.sleep(for:.milliseconds(1600))
+    model.requestCue(manual:true)
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.cue,"This looks like a library. Keep your voice low.")
+    model.addSimulationScene("group")
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.cue,"People are talking. Wait for a pause before joining in.")
+  }
+
+  func testFreshSceneSurvivesSpeechExpiringDuringInference() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    model.addSimulationScene("library")
+    try await Task.sleep(for:.milliseconds(1600))
+    let time = nowMs()
+    model.transcript = [TranscriptEntry(text:"We have arrived.",startMs:time-16000,endMs:time-14900,confidence:nil)]
+    model.lastVoiceAt = time-14900
+    model.requestCue(manual:true)
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.cue,"This looks like a library. Keep your voice low.")
+  }
+
+  func testUnalignedPCMFramesNeverExceedSixSeconds() throws {
+    let microphone = ConversationMicrophone()
+    let chunks = OSAllocatedUnfairLock(initialState:[AudioChunk]())
+    microphone.onChunk = { chunk in chunks.withLock { $0.append(chunk) } }
+    microphone.prepareStreamPCM()
+    defer { microphone.stop() }
+    let format = try XCTUnwrap(AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:16000,channels:1,interleaved:false))
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat:format,frameCapacity:1024))
+    buffer.frameLength = 1024
+    let data = try XCTUnwrap(buffer.floatChannelData?[0])
+    for i in 0..<1024 { data[i] = 0.05 }
+    let time = nowMs()
+    for i in 1...188 { microphone.receiveStreamPCM(buffer,at:time+Double(i)*64) }
+    let captured = chunks.withLock { $0 }
+    XCTAssertEqual(captured.count,2)
+    XCTAssertTrue(captured.allSatisfy { Data(base64Encoded:$0.audioBase64)?.count == 192044 })
+    XCTAssertTrue(captured.allSatisfy { abs($0.endedAtMs-$0.startedAtMs-6000) < 1 })
   }
 }

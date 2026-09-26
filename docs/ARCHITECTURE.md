@@ -1,105 +1,106 @@
 # Aside architecture
 
-Aside is an explicitly started conversation aid. It offers one short cue from concrete recent speech and weak optional visual context. Abstention is the default; it has no face identification, emotion/intent inference, diagnosis, or treatment claims.
+Aside is an explicitly started surroundings and conversation aid. Display mode offers one brief social cue from a fresh scene or concrete recognized speech. A library image can support a qualified etiquette cue without speech. An explicit request for space can support a respectful response. There is no face identification, tone/mood inference, diagnosis or sound-event classification.
 
-## Phone-first extension · 2026-09-25
+## Capture modes and responsibilities
 
-`CaptureMode` selects iPhone / regular Meta glasses / Display glasses / explicit simulation. `PhoneCamera` uses AVFoundation rear-camera buffers; `ConversationMicrophone` explicitly selects builtInMic or the chosen HFP UID. DAT initializes lazily, only for glasses work. Regular glasses attach camera only; Display glasses attach camera and display. Phone mode pauses on background entry.
+`CaptureMode` selects iPhone / regular Meta glasses / Display glasses / explicit simulation. DAT initializes lazily for glasses work. The Xcode project pins **DAT 1.0.0** and compiles all three source folders into one phone companion.
 
-Caption state is independent of cue state. Completed real ASR chunks update a bounded 240-character caption, expire after 15 seconds, and survive cue dismissal. Late/out-of-order/expired caption updates are rejected. Suggestions retain the existing silence/freshness/cooldown policy. Wearer-authored notes persist through Pause but clear on Stop. There is no generated scene narration presented as a transcript. True partial streaming ASR and regular-glasses spoken output remain future work. See [reference review](REFERENCE_COMPARISON.md).
+| Mode | Capture | Output |
+|---|---|---|
+| iPhone | Built-in microphone; optional AVFoundation rear camera | Phone captions and suggestions; pauses when backgrounded |
+| Regular Meta glasses | Low-resolution 15 FPS HEVC; explicitly selected HFP microphone | Phone output; spoken output not implemented |
+| Display glasses | Low-resolution 2 FPS HEVC and 16 kHz mono ambient PCM in one DAT camera stream | Glasses social cue with optional captions; phone preview/status |
+| Simulated demo | Typed speech and synthetic image fixtures | Explicitly simulated cue; no sensor capture |
 
-## Implemented glasses path
+The phone handles video decoding, JPEG sampling, bounded PCM/WAV batching, transcript state, scheduling and cue validation. Muse performs transcription and image/text inference via an authenticated backend. No model runs on the glasses, and full-video streaming to Muse is not implemented.
 
 ```mermaid
 flowchart LR
-    G[Display glasses] -->|DAT HEVC frames| I[iOS companion]
-    G -->|Verified HFP input| I
-    I -->|16 kHz mono WAV chunks| A[Authenticated Node proxy]
-    A -->|HTTP ASR| T[Muse Voice Transcribe]
-    T -->|Text| I
-    I -->|Recent transcript + one sampled JPEG| A
-    A -->|Strict structured request| M[Muse Spark Standard]
-    M -->|Cue or abstention| A
-    A --> I
-    I -->|Freshness + timing + dedup gates| D[DAT display / clear]
-    B[Labeled browser simulator] -->|Same proxy contracts| A
+    G[Display glasses] -->|DAT HEVC + timestamped ambient PCM| I[iOS companion]
+    I -->|Bounded 16 kHz mono WAV| P[Authenticated Node proxy]
+    P -->|HTTP ASR| A[Muse Voice Transcribe]
+    A -->|Recognized words| I
+    I -->|Fresh JPEG + words + coarse energy metadata| P
+    P -->|Image and text request| M[Muse Spark Standard]
+    M -->|Social cue or abstention| P
+    P --> I
+    I -->|Validated current cue| D[DAT display and controls]
 ```
 
-`phone-app/ios/Copilot` contains the native companion, phone camera, selected microphone capture, bounded speech/transcript state and API client. `regular-glasses/Sources` contains shared DAT connection/camera transport and HEVC decoding. `display-glasses/Sources` contains the glasses display rendering and clear operations. The Xcode project compiles all three folders into one companion app. iOS DAT 0.9.0 and a single shared `DeviceSession` are the hardware route. Xcode 26.6 and a registered but offline iPhone were found on this Mac, so iOS was selected over Android. Actual pocket operation has not been established by a build or simulation.
+`phone-app/ios/Copilot` owns phone capture, bounded audio/transcript state and the API client. `regular-glasses/Sources` owns shared DAT transport and HEVC decoding. `display-glasses/Sources` owns cue-first rendering and serialized sends/clears. `server/index.mjs` exposes only `POST /api/cue` and `POST /api/transcribe`; `server/model.mjs` owns provider credentials/prompts; `server/validation.mjs` validates timestamps, images and WAV. `shared/protocol.mjs` retains the browser conversation policy.
 
-`server/index.mjs` serves the simulator and two task-specific routes: `POST /api/cue` and `POST /api/transcribe`. `server/model.mjs` owns the model credential and Standard-tier provider calls. `server/validation.mjs` checks timestamps, bounds, image signatures and WAV format. `shared/protocol.mjs` defines the wire schema and browser cue policy. `web/` is the development interface and labeled mock-device surface, not an application deployed to the glasses.
+Display audio uses experimental `StreamConfiguration.audioCodec` / `audioFramePublisher`, with DAT camera and microphone permissions plus iOS microphone permission. Camera and Audio Streaming app approval is required for development/beta use; production publishing is unavailable for this capability. Regular glasses retain add camera → select/settle/verify HFP → start video. Both paths use a single `DeviceSession`, and Display is attached to that same session. The [pinned release notes](https://github.com/facebook/meta-wearables-dat-ios/blob/1.0.0/CHANGELOG.md) and [current official audio guide](https://github.com/facebook/meta-wearables-dat-ios/blob/main/plugins/mwdat-ios/skills/audio-streaming/SKILL.md) document the API and access conditions.
 
-The browser **Simulated conversation** source uses typed/scripted fixtures with a mock backend. **Browser camera + manual / mic input** is an explicitly selected live development fallback and requires a live provider for cue requests. Its microphone captures a six-second chunk per button press; it is not a continuous glasses audio loop. Browser hiding pauses capture. The native app separately has local simulated input and a scripted-provider toggle for offline work.
+Native **Connection test only (no uploads)** starts real selected inputs and permits a manual Display cue, but skips ASR/model uploads. Full hardware analysis checks for a reachable live proxy before capture. This makes sensor/display acceptance possible without a model credential.
 
-Native **Connection test only (no uploads)** attaches actual glasses camera/display/HFP and permits a manual cue without a backend. It discards speech buffers and disables inference. Full hardware conversation mode requires a reachable live proxy. This keeps the first hardware vertical slice independent of a model credential.
+## Evidence and model contracts
 
-The live cue request uses `muse-spark-1.3` Chat Completions with `strict:true` JSON schema, low reasoning effort and one optional JPEG/PNG. The five fields are `cue`, `reason`, `confidence`, `type`, `should_display`; current type values are `clarify`, `follow_up`, `reminder`, `respond`, `abstain`. Both provider output and local display eligibility are checked. Model confidence is a heuristic signal, not a calibrated probability of correctness.
+`analysisMode: "surroundings"` selects a separate Spark prompt. It accepts fresh images without requiring speech; normal conversation mode retains speech-grounded behavior. Both use `muse-spark-1.3` image/text Chat Completions, low reasoning effort and a strict five-field schema: `cue`, `reason`, `confidence`, `type`, `should_display`. Types remain `clarify`, `follow_up`, `reminder`, `respond`, `abstain`; simple environmental etiquette uses `reminder`.
 
-## Alternative comparison
+Speech goes through `muse-voice-transcribe-1.0` HTTP ASR. Captions represent completed recognized speech, never generated scene narration. A bounded 240-character caption expires after 15 seconds and survives cue dismissal. Captions are optional on the glasses and appear after the social cue. Notes remain wearer-authored; Pause retains them, Stop clears them.
 
-| Approach | Verified API support | Tradeoffs | Decision |
-|---|---|---|---|
-| Sampled image + rolling transcript | Image/text Spark requests, strict output, separate ASR | Small bounded requests; easy to drop stale images; speech carries most evidence. Loses motion and can miss a visual event between samples. | **Implemented initial route.** Benchmark before changing frequency. |
-| Short MP4 + transcript or embedded audio | Spark video understanding with synchronized soundtrack in uploaded MP4 | More encoding/upload work, clip accumulation delay and file-lifecycle complexity. HFP limitations remain. No extra benefit has been measured for these conversation cues. | Documented supported alternative, not implemented. Avoid persistent Files API uploads by default. |
-| Persistent live video + audio to Spark | Not established by inspected current docs | Cannot design against an assumed socket, latency or session limit. Text SSE output does not provide this capability. | Not implemented or claimed. |
-| Realtime ASR + sampled images | Dedicated `wss://api.meta.ai/v1/asr/realtime` is documented | Could reduce chunk/turn delay. Adds backend WebSocket credential handling, turn reconciliation, pacing and session renewal; 60-minute ASR session maximum. Does not add live video reasoning. | Supported future optimization after measurements; current prototype uses HTTP ASR chunks. |
+Optional `audioContext` contains source (`glasses_pcm`, `glasses_hfp`, or `phone`), capture timestamp, window length, dBFS energy and activity ratio. This is coarse, uncalibrated capture metadata. It is not dB SPL, speech identity, a sound label or an audible tone. Low energy or missing words does not prove quiet surroundings; energy alone cannot justify a cue. The Spark prompt forbids mood/mental-state inference from faces, voices or behavior. A cue about giving space must be grounded in explicit words or other appropriate current evidence.
 
-Sources, dates, payload details and limits are in [model research](research-model.md). No alternative was rejected on invented latency or cost measurements.
+The local demo contains library/group scenes and an explicit rough-day/request-for-space line. These are narrow deterministic fixtures, not evidence of Muse accuracy. The browser remains a separately labeled conversation simulator; its optional camera/mic route is a development fallback requiring a live provider. Browser mic capture is per-button six-second chunks and browser hiding pauses capture.
 
-## Lifecycle and bounded work
+## Scheduling and bounded work
 
-The user confirms participant consent and starts deliberately. Pause/stop invalidate pending requests and stop capture/cues. Stop clears the session transcript, sampled image and saved session context. Pause clears rolling capture data while saved wearer topics may remain available for deliberate resume. Dismiss invalidates the current cue and gives the conversation space. Device/system pause, route loss, disconnect and new speech also invalidate stale suggestions. Restart is deliberate after user stop or disconnected hardware; a paused SDK session is not repeatedly restarted.
+The wearer confirms consent and taps **Start analyzing**. Sensors remain active until Pause or Stop; the phone makes intermittent inference requests instead of uploading every frame. **Analyze now** requests an immediate eligible check. Automatic checking and cue presentation have separate limits:
 
-The iOS route first adds the camera, selects/starts the explicit HFP input, allows routing to settle, verifies it, and then starts video. It resamples incoming mono audio to PCM16/16 kHz WAV for ASR. Resampling 8 kHz HFP does not restore lost detail. An energy threshold identifies voice activity; it is provisional and needs calibration. Speech chunks flush after silence or around six seconds of continuous audio. One ASR operation is kept active; overloaded chunks are dropped instead of accumulating a delayed conversation.
-
-The camera stream is distinct from model sampling. HEVC state is decoded off the UI thread; only selected fresh frames become small JPEG uploads. A held decoder image must never be given a fresh capture timestamp. The model never receives every video frame. There is no three-minute restart timer because no corresponding current DAT limit was established.
-
-Current shared defaults are conservative **provisional settings**, not measured optimums:
-
-| Bound/policy | Default |
+| Native Display policy | Default |
 |---|---:|
-| Frame sample interval | 5 seconds |
-| Frame maximum age | 10 seconds |
-| Rolling transcript | 60 seconds, at most 40 entries / 6,000 characters |
-| Speech eligible for a cue | Ended within 15 seconds |
-| Natural silence before request | 1.5 seconds |
-| Cue confidence threshold | 0.80 |
-| Known ASR confidence eligibility | At least 0.65; unknown remains unknown |
-| Cue size | At most 14 words / 90 characters |
-| Cue lifetime | 8 seconds |
-| Automatic cue cooldown | 30 seconds |
-| Deduplication history | 2 minutes |
-| Cue request deadline | 10 seconds |
-| In-flight cue operations | One per client |
-| Proxy total active operations | Two; 60 requests/minute overall |
-| Proxy request body | At most 1 MB |
+| Requested transport frame rate | 2 FPS |
+| Local JPEG refresh | Every 2 seconds; one frame retained |
+| JPEG size | Maximum dimension 640 pixels; quality 0.6 |
+| Inference with recognized speech less than 30 seconds old | 8 seconds |
+| Inference without recent recognized speech | 20 seconds |
+| Low Power Mode or serious phone thermal state | 30 seconds |
+| Critical phone thermal state | Pause capture and analysis |
+| Automatic cue cooldown | 30 seconds after display or dismissal |
+| Cue lifetime | 8 seconds; expiry does not extend cooldown |
+| Current speech evidence | At most 15 seconds old |
+| Current image / energy context | At most 10 seconds old when submitted; surroundings image must remain ≤20 seconds at response |
+| Delay after recognized speech / session start | At least 1.5 seconds |
+| Rolling transcript | 60 seconds, at most 12 entries / 500 characters each |
+| Cue confidence / size | At least 0.80; at most 14 words / 90 characters |
+| Deduplication | Last 20 normalized cues |
+| Cue HTTP timeout / concurrency | 20 seconds / one request; surroundings result age ≤20 seconds, conversation result age ≤10 seconds |
+| ASR concurrency | One; overlapping chunks drop |
 
-Native defaults may be stricter than these shared/proxy bounds: the current companion samples every eight seconds, keeps at most 12 transcript entries, and remembers the last 20 normalized cues for the session. Its sample interval is configurable. These implementation differences should be recorded when comparing benchmark runs rather than treating browser and native timings as interchangeable.
+These are provisional bounds. An automatic request waits for both its inference interval and any cue cooldown; no-cue responses permit subsequent checks at the selected interval. Manual Analyze now bypasses those automatic timing gates, but not consent, active state, completed ASR, fresh evidence or output validation. Speech can affect cadence for 30 seconds while only the last 15 seconds qualifies as current cue evidence. When current speech ages out, surroundings requests omit the old transcript and may use a fresh image alone.
 
-Manual Help may bypass the automatic cooldown, but not consent, connection, freshness, active speech, schema or evidence checks. An empty/unclear transcript cannot be replaced by model speculation. After a new utterance, pause, stop or dismiss, a response from the old generation is discarded even if cancellation reached the provider too late.
+Energy gating batches approximately 1–6 seconds of audio and suppresses silence-only ASR uploads. Steady ambient noise can trigger ASR but is not assumed to be speech. In surroundings mode raw energy callbacks do not reset speech timing or invalidate cues; only actual recognized words do. Empty ASR preserves visual eligibility; failed ASR pauses. This avoids starvation in the presence of fans/music/crowds while preserving fresh speech updates. Phone/regular conversation mode retains its energy-based active-speech gate.
 
-The proxy accepts at most 20 seconds of recent PCM16 mono 16 kHz WAV, verifies the RIFF chunks and constrains upload size. It supports no generic arbitrary model endpoint, remote image URL fetching or persistent media collection. A busy, timed-out or invalid request becomes no cue; samples are not queued indefinitely. Failed browser ASR pauses and clears old context; empty ASR also prevents reuse of earlier speech. Pause/Stop abort pending browser ASR, and its microphone remains busy through the transcription response.
+Native conversation mode samples JPEGs every 8 seconds by default, configurable separately. Browser defaults remain 5-second image samples, up to 40 transcript entries / 6,000 characters, and a two-minute dedup window. Do not compare these modes' timings as if their schedules were identical. The proxy caps WAV duration at 20 seconds, request bodies at 1 MB, active operations at two and requests at 60 per minute.
 
-## Display and pocket limits
+The shared stream clock maps video/audio presentation timestamps to a session time base. HEVC dependencies are decoded off the UI actor; held decoder output is never retimestamped as a new frame. A bounded delivery gate prevents a backlog. New recognized speech, context edits, dismiss, pause, stop and failures invalidate previous cue generations. Response-time evidence freshness is checked again, so a late model result is dropped even if cancellation was too late upstream.
 
-DAT sends a complete root layout, with explicit controls. Updates and clears must be serialized and checked against the current session generation. `clearDisplay()` clears content; ending the experience also stops display before its parent session. A disconnected glasses screen cannot be proven cleared by local state alone.
+Pause stops camera/audio and clears rolling context while keeping a Display Resume/Stop view. Stop also clears notes/consent, cancels audio listeners, clears Display and ends the session. Resume creates a fresh session deliberately. DAT/system failures invalidate work; there is no reconnect loop or speculative three-minute restart timer.
 
-The display dims at 20 seconds and sleeps at 25 seconds of inactivity without ending the session. Guaranteed wake-on-new-cue was not verified. Respect display sleep; never send artificial keep-alives to defeat it. The demo must check whether stale content is present on wake.
+## Display and hardware limits
 
-`.hvc1` compressed streaming is the documented background route. That does not establish that audio, software decoding, network calls and display delivery all continue with the phone locked. Thermal/battery errors are explicit stop/degrade conditions, not prompts for an aggressive reconnect loop. HFP also prioritizes wearer speech and suppresses a partner; successful wearer transcription is insufficient evidence for the requested two-person experience.
+A single root `FlexBox` shows the social cue first, optional captions second, and Analyze now / Dismiss / Pause / Stop controls. Paused Resume is available while the retained display session is usable; initial Start occurs on the phone. Writes and clears are serialized and revision checked. A locally completed clear cannot prove that a disconnected physical display cleared.
 
-## Data, credentials and retention
+Earlier official documentation described dimming after 20 seconds and sleep after 25 seconds. Guaranteed wake-on-new-cue remains unverified. Do not promise an always-on display or send artificial keep-alives. DAT 1.0.0 supports mock Display previews, but neither those nor the app's independent fixtures establish physical readability/wake or sensor quality.
 
-The Muse key stays in the server environment (`MUSE_API_KEY`), never a client build or source file. A separate random `COPILOT_PROXY_TOKEN` authenticates clients and is required for live mode or a non-loopback bind. Native storage uses iOS Keychain with device-only, after-first-unlock accessibility so the token can be available during a locked-phone session. The native network session is ephemeral with no URL cache.
+HEVC supports the documented background camera path, but locked-phone audio/decoding/network/display operation still needs a hardware soak. Phone mode deliberately pauses when backgrounded. Regular HFP may suppress nearby speech; direct PCM nearby-speaker quality also needs measurement. Phone Low Power/thermal adaptation does not replace the glasses' own battery/thermal protections; DAT stream errors pause capture.
 
-The Node server is plain HTTP and defaults to loopback. A real phone must reach it through a trusted HTTPS reverse proxy or equivalent secured deployment; TLS termination is a setup responsibility, not something the development server implements. Native non-loopback HTTP is rejected. Do not publish an unauthenticated public proxy or put the provider key in browser settings. Reverse-proxy access/body logs and hosting telemetry must be configured separately to avoid capturing tokens or conversation content.
+## Alternatives
 
-Raw audio, images, transcript and model context are processed in bounded memory rather than intentionally written to application storage or console logs. Pause/stop clear client context and cancel ongoing work. Cancellation and local deletion cannot recall a request already accepted upstream. OS memory, crash behavior and external infrastructure are separate from application-level retention guarantees.
+| Approach | Status and tradeoff |
+|---|---|
+| Sampled image + rolling transcript + coarse energy | Implemented; bounded uploads and easy freshness checks, but misses motion/events between images and loses audible tone |
+| Short MP4 with synchronized audio | Documented Spark alternative; requires accumulation, encoding/upload and file-lifecycle work; no benefit measured for this cue task |
+| Persistent live video/audio socket to Spark | Not established by inspected docs; text SSE is not live-video input |
+| Realtime ASR + sampled images | Documented future optimization; adds WebSocket credentials, turn reconciliation and renewal without adding live video reasoning |
 
-SDK analytics/crash reporting can be opted out independently of model data handling. Use **Standard** Muse, whose Terms say content is not used to train Meta models; **Standard is not a zero-retention service by default**. Service, security, policy review and legal retention can still apply. No account-specific zero-retention agreement was verified. Files API uploads are avoided; their files do not expire automatically. Exact current Wearables bystander/retention terms remained login-gated during research.
+See [model research](research-model.md) for provider sources and limits. No alternative is rejected on invented latency or cost.
 
-## Measurement and acceptance
+## Data and validation
 
-Measure ASR time, API time, client upload bytes, token usage, estimated token/audio cost, suppressed cues and stale-response drops. Browser byte totals include cue JSON and audio JSON payloads, not transport headers or retransmissions. Missing usage is shown as incomplete instead of a measured zero. Cost totals are estimates from returned usage/audio length, not billing reconciliation: canceled or discarded requests may have incurred upstream work without usable accounting. Keep timestamps for audio/frame capture, request start/end, eligibility, display send and clear. Phone-side send completion is not a measurement of photons on the glasses: physical display timing and successful clearing require hardware observation.
+The Muse key stays in backend `MUSE_API_KEY`; a separate `COPILOT_PROXY_TOKEN` authenticates clients and lives in native Keychain. Native HTTP is restricted to loopback; physical phones need a trusted HTTPS proxy. The development server does not terminate TLS. Native networking is ephemeral with no URL cache. Infrastructure logging must be configured separately.
 
-Benchmark with a fixed consented script, then tune only when repeated data warrants it. Report mock timings as mock timings and live-network timings separately. Count incorrect cues and distractions as well as useful cues; a fast wrong cue is a failure. The [demo protocol](DEMO.md) includes clock skew, partner speech, locked-phone and display sleep checks. No hardware accuracy, latency, runtime or per-conversation price is claimed from unrun tests.
+Raw audio/video, sampled images and transcript are held in bounded memory rather than saved to app files or content logs. Pause/Stop clear capture context. Local cancellation/deletion cannot recall provider requests already accepted. SDK telemetry opt-outs do not set model retention. Standard Muse terms describe no training on content, but do not imply default zero retention; see dated [model research](research-model.md).
+
+Report ASR/API times, successful JSON upload bytes, returned usage estimates, stale/audio drops and useful/false/distracting cues. Evidence-to-phone-cue-ready timing is not physical display latency. Unknown/canceled-request cost remains unknown. [Hardware acceptance](DEMO.md) covers nearby voices, continuous noise, library scenes without speech, sleep, background operation and thermal behavior. Current build/test results belong in the root README; hardware accuracy, latency, runtime and live price remain unmeasured.

@@ -5,7 +5,8 @@ import MWDATDisplay
 @MainActor
 extension GlassesController {
   // Serialize all display writes: a dismissal/stop queued behind an in-flight send always wins.
-  func show(_ cue: String?, caption: String? = nil, note: String? = nil, paused: Bool = false) {
+  func show(_ cue: String?, caption: String? = nil, note: String? = nil, paused: Bool = false,
+            status: String? = nil, captionsEnabled: Bool = false) {
     displayRevision += 1
     let revision = displayRevision
     let previous = operation
@@ -16,19 +17,34 @@ extension GlassesController {
         try await display.clearDisplay()
         guard self.displayRevision == revision else { return }
         let content = FlexBox(direction:.column, spacing:12) {
-          if let caption, !paused {
-            Text("Captions · completed speech", style:.meta, color:.secondary)
-            Text(String(caption.suffix(140)), style:.body)
+          if paused {
+            Text("Analysis paused", style:.body)
+            Text("Camera and microphone are off.", style:.meta, color:.secondary)
+          } else {
+            if let cue {
+              Text("Social cue", style:.meta, color:.secondary)
+              Text(cue, style:.body)
+              if let status { Text(status, style:.meta, color:.secondary) }
+            } else {
+              Text("Muse", style:.meta, color:.secondary)
+              Text(status ?? "Watching surroundings", style:.body)
+              if let note, !note.isEmpty {
+                Text("Your note", style:.meta, color:.secondary)
+                Text(String(note.prefix(80)), style:.meta)
+              }
+            }
+            // Cues get the first glance; completed speech is optional, secondary context.
+            if captionsEnabled, let caption, !caption.isEmpty {
+              Text("Heard · completed speech", style:.meta, color:.secondary)
+              Text(String(caption.suffix(120)), style:.meta)
+            }
           }
-          if let cue { Text("Suggestion", style:.meta, color:.secondary); Text(cue, style:.body) }
-          else if let note, !paused { Text("Your note", style:.meta, color:.secondary); Text(String(note.prefix(80)), style:.body) }
-          else if caption == nil { Text(paused ? "Copilot paused" : "Copilot", style:.meta, color:.secondary) }
           ButtonGroup {
             if paused {
-              Button(label:"Resume", onClick:{ [weak self] in Task { @MainActor in self?.onResume?() } })
+              Button(label:"Resume analysis", onClick:{ [weak self] in Task { @MainActor in self?.onResume?() } })
             } else {
               if cue != nil { Button(label:"Dismiss", onClick:{ [weak self] in Task { @MainActor in self?.onDismiss?() } }) }
-              Button(label:"Help", onClick:{ [weak self] in Task { @MainActor in self?.onHelp?() } })
+              Button(label:"Analyze now", onClick:{ [weak self] in Task { @MainActor in self?.onHelp?() } })
               Button(label:"Pause", onClick:{ [weak self] in Task { @MainActor in self?.onPause?() } })
             }
             Button(label:"Stop", onClick:{ [weak self] in Task { @MainActor in self?.onStop?() } })

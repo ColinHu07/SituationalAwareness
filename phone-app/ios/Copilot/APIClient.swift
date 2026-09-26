@@ -10,14 +10,28 @@ struct TranscriptEntry: Codable, Identifiable {
   enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence }
 }
 struct SampledFrame: Codable { let dataUrl: String; let capturedAtMs: Double }
-struct CueRequest: Encodable { let transcript: [TranscriptEntry]; let frame: SampledFrame?; let context: [String]; let manual: Bool }
+struct AudioContext: Encodable, Sendable {
+  let capturedAtMs: Double
+  let windowMs: Double
+  let activityRatio: Double
+  let rmsDbFS: Double
+  let source: String
+}
+struct CueRequest: Encodable {
+  let transcript: [TranscriptEntry]
+  let frame: SampledFrame?
+  let context: [String]
+  let manual: Bool
+  var analysisMode = "conversation"
+  var audioContext: AudioContext? = nil
+}
 struct CueResult: Decodable { let cue: String; let reason: String; let confidence: Double; let type: String; let should_display: Bool }
 struct CueResponse: Decodable {
   struct Metrics: Decodable { let apiMs: Double?; let inputTokens: Int?; let outputTokens: Int?; let estimatedCostUsd: Double? }
   let result: CueResult
   let metrics: Metrics?
 }
-struct AudioChunk: Encodable {
+struct AudioChunk: Encodable, Sendable {
   let audioBase64: String
   let mimeType = "audio/wav"
   let sampleRate = 16000
@@ -36,7 +50,7 @@ struct APIClient {
   private static let session: URLSession = {
     let config = URLSessionConfiguration.ephemeral
     config.timeoutIntervalForRequest = 10
-    config.timeoutIntervalForResource = 12
+    config.timeoutIntervalForResource = 22
     config.urlCache = nil
     return URLSession(configuration: config)
   }()
@@ -49,6 +63,7 @@ struct APIClient {
   }
   func post<Input: Encodable, Output: Decodable>(_ path: String, _ value: Input) async throws -> (Output, Int) {
     var request = URLRequest(url: try url(path))
+    if path == "api/cue" { request.timeoutInterval = 20 }
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

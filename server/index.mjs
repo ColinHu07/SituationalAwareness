@@ -45,8 +45,10 @@ export function createServer({ env = process.env, provider = createProvider(env)
       let body; try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { return json(400, { error: 'Invalid JSON' }); }
       if (path === '/api/cue') {
         const input = validateInput(body), last = input.transcript.at(-1);
-        if (!last || Date.now() - last.endMs > LIMITS.speechMs || (last.confidence !== null && last.confidence < 0.65))
-          return json(200, { result: abstain('Recent clear speech is required.'), metrics: { apiMs: 0, estimatedCostUsd: 0, simulated: provider.mode === 'mock' } });
+        const recentSpeech = last && Date.now() - last.endMs <= LIMITS.speechMs && (last.confidence === null || last.confidence >= 0.65);
+        const recentScene = input.analysisMode === 'surroundings' && input.frame !== null;
+        if (!recentSpeech && !recentScene)
+          return json(200, { result: abstain(input.analysisMode === 'surroundings' ? 'A recent image or clear speech is required.' : 'Recent clear speech is required.'), metrics: { apiMs: 0, estimatedCostUsd: 0, simulated: provider.mode === 'mock' } });
         return json(200, await provider.cue(input, controller.signal));
       }
       return json(200, await provider.transcribe(validateAudio(body), controller.signal));

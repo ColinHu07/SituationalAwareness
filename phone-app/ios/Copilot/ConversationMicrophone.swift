@@ -12,6 +12,10 @@ final class ConversationMicrophone: @unchecked Sendable {
     var lastVoice: Double = 0
     var started = false
     var converter: AVAudioConverter?
+    var energySum = 0.0
+    var energySamples = 0
+    var activeSamples = 0
+    var streamPCM = false
   }
   private let lock = OSAllocatedUnfairLock(initialState: State())
   private let engine = AVAudioEngine()
@@ -21,6 +25,7 @@ final class ConversationMicrophone: @unchecked Sendable {
   private var tapInstalled = false
   var onChunk: (@Sendable (AudioChunk) -> Void)?
   var onVoice: (@Sendable (Double) -> Void)?
+  var onContext: (@Sendable (AudioContext) -> Void)?
   var onFailure: (@Sendable (String) -> Void)?
   private(set) var actualSampleRate: Double = 0
 
@@ -41,8 +46,28 @@ final class ConversationMicrophone: @unchecked Sendable {
     try await start(portType:.builtInMic, uid:nil)
   }
 
+  @MainActor func startStreamPCM() async throws {
+    guard await AVAudioApplication.requestRecordPermission() else {
+      throw CopilotError(message:"Microphone permission denied. Enable it in iOS Settings.")
+    }
+    try Task.checkCancellation()
+    // DAT owns ambient capture. No HFP routing or AVAudioEngine tap is needed.
+    prepareStreamPCM()
+  }
+
+  // Initializes the consumer independently of capture permission/transport.
+  @MainActor func prepareStreamPCM() {
+    lock.withLockUnchecked { $0 = State(); $0.started = true; $0.streamPCM = true }
+    actualSampleRate = 16000 // The DAT configuration explicitly requests 16 kHz mono PCM.
+  }
+
+  func receiveStreamPCM(_ buffer: AVAudioPCMBuffer, at timestamp: Double) {
+    receive(buffer, at:timestamp, streamPCM:true)
+  }
+
   @MainActor private func start(portType: AVAudioSession.Port, uid requestedUID: String?) async throws {
     guard await AVAudioApplication.requestRecordPermission() else { throw CopilotError(message:"Microphone permission denied. Enable it in iOS Settings.") }
+    try Task.checkCancellation()
     let session = AVAudioSession.sharedInstance()
     try session.setCategory(.playAndRecord, mode:.videoRecording, options:portType == .bluetoothHFP ? [.allowBluetoothHFP] : [.defaultToSpeaker])
     try session.setActive(true)
@@ -84,14 +109,19 @@ final class ConversationMicrophone: @unchecked Sendable {
     try engine.start()
   }
 
-  private func receive(_ buffer: AVAudioPCMBuffer) {
+  private func receive(_ buffer: AVAudioPCMBuffer, at timestamp: Double = nowMs(), streamPCM: Bool = false) {
     // Drop the buffer at the source if the OS has switched to a different microphone.
-    guard AVAudioSession.sharedInstance().currentRoute.inputs.contains(where: { $0.portType == selectedPortType && $0.uid == selectedUID }) else { return }
-    let timestamp = nowMs()
-    var chunk: AudioChunk?
-    var voice = false
+    guard streamPCM || AVAudioSession.sharedInstance().currentRoute.inputs.contains(where: { $0.portType == selectedPortType && $0.uid == selectedUID }) else { return }
+    var chunks: [AudioChunk] = []
+    var contexts: [AudioContext] = []
+    var latestVoice: Double?
     lock.withLockUnchecked { state in
-      guard state.started, let converter = state.converter,
+      guard state.started, state.streamPCM == streamPCM, buffer.format.sampleRate > 0 else { return }
+      if state.converter == nil {
+        guard let output = AVAudioFormat(commonFormat:.pcmFormatInt16, sampleRate:16000, channels:1, interleaved:true) else { return }
+        state.converter = AVAudioConverter(from:buffer.format, to:output)
+      }
+      guard let converter = state.converter,
             let output = AVAudioPCMBuffer(pcmFormat:converter.outputFormat, frameCapacity:AVAudioFrameCount(ceil(Double(buffer.frameLength) * 16000 / buffer.format.sampleRate) + 64)) else { return }
       // AVAudioConverter invokes its input block synchronously during convert.
       nonisolated(unsafe) var supplied = false
@@ -102,21 +132,39 @@ final class ConversationMicrophone: @unchecked Sendable {
       }
       guard error == nil, let pointer = output.int16ChannelData?[0], output.frameLength > 0 else { return }
       let samples = Array(UnsafeBufferPointer(start:pointer, count:Int(output.frameLength)))
-      let rms = sqrt(samples.reduce(0.0) { $0 + pow(Double($1) / 32768, 2) } / Double(samples.count))
-      voice = rms > 0.012 // provisional energy VAD; calibrate against glasses noise on hardware
-      if voice { state.lastVoice = timestamp }
-      if state.samples.isEmpty { state.chunkStart = timestamp - Double(samples.count) / 16 }
-      state.samples.append(contentsOf:samples)
-      // Flush early after silence; cap continuous speech at six seconds. Silence-only chunks never upload.
-      if state.samples.count >= 96000 || (state.samples.count >= 16000 && timestamp - state.lastVoice > 450) {
-        if state.lastVoice >= state.chunkStart {
-          chunk = AudioChunk(audioBase64:Self.wav(state.samples).base64EncodedString(), startedAtMs:state.chunkStart, endedAtMs:state.lastVoice)
+      var cursor = 0
+      while cursor < samples.count {
+        // Split at both bounds: SDK callback sizes need not divide one/six seconds.
+        let count = min(samples.count - cursor, 16000 - state.energySamples, 96000 - state.samples.count)
+        let part = samples[cursor..<(cursor + count)]
+        let endedAt = timestamp - Double(samples.count - cursor - count) / 16
+        let energy = part.reduce(0.0) { $0 + pow(Double($1) / 32768, 2) }
+        let voice = sqrt(energy / Double(count)) > 0.012 // Uncalibrated energy activity, not speech detection.
+        if voice { state.lastVoice = endedAt; latestVoice = endedAt }
+        state.energySum += energy; state.energySamples += count
+        if voice { state.activeSamples += count }
+        if state.energySamples == 16000 {
+          contexts.append(AudioContext(capturedAtMs:endedAt, windowMs:1000,
+            activityRatio:Double(state.activeSamples) / 16000,
+            rmsDbFS:max(-120, min(0, 10 * log10(max(1e-12, state.energySum / 16000)))),
+            source:state.streamPCM ? "glasses_pcm" : selectedPortType == .bluetoothHFP ? "glasses_hfp" : "phone"))
+          state.energySum = 0; state.energySamples = 0; state.activeSamples = 0
         }
-        state.samples.removeAll(keepingCapacity:true)
+        if state.samples.isEmpty { state.chunkStart = endedAt - Double(count) / 16 }
+        state.samples.append(contentsOf:part)
+        // Flush after silence or at exactly six seconds; carry the remainder forward.
+        if state.samples.count == 96000 || (state.samples.count >= 16000 && endedAt - state.lastVoice > 450) {
+          if state.lastVoice >= state.chunkStart {
+            chunks.append(AudioChunk(audioBase64:Self.wav(state.samples).base64EncodedString(), startedAtMs:state.chunkStart, endedAtMs:state.lastVoice))
+          }
+          state.samples.removeAll(keepingCapacity:true)
+        }
+        cursor += count
       }
     }
-    if voice { onVoice?(timestamp) }
-    if let chunk { onChunk?(chunk) }
+    if let latestVoice { onVoice?(latestVoice) }
+    for context in contexts { onContext?(context) }
+    for chunk in chunks { onChunk?(chunk) }
   }
 
   @MainActor func stop() {

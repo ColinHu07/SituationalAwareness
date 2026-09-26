@@ -67,7 +67,7 @@ Chat usage fields are `prompt_tokens`, `completion_tokens`, `total_tokens`, `pro
 
 `reasoning_effort:"low"` is documented for faster direct answers; `minimal` also exists. `none` is rejected. Output budgets include hidden reasoning, so an overly small budget can produce no useful visible output. Streaming has an initial reasoning delay and streams output, not camera input. No published end-to-end latency SLA for this task was found; measure actual requests. [Reasoning](https://dev.meta.ai/docs/reasoning)
 
-Chat Completions recommends `max_completion_tokens` (`max_tokens` remains a deprecated alias). The prototype uses a 1024-token reasoning-plus-output ceiling and must benchmark truncation before tuning it. `store` defaults to false on this endpoint, but that does not override policy/security retention. [Chat schemas](https://dev.meta.ai/docs/api-reference/chat-completions/schemas)
+Chat Completions recommends `max_completion_tokens` (`max_tokens` remains a deprecated alias). The prototype now uses a 4096-token reasoning-plus-output ceiling. September 25 synthetic live checks exhausted the old 1024-token budget before visible JSON (1021 reasoning tokens); 4096 produced valid structured output. Surroundings uses `minimal` reasoning; conversation uses `low`. The two successful synthetic calls took 9.51 and 10.09 seconds, so the proxy default and native cue HTTP timeout are now 20 seconds. This is a small transport/schema check, not a model quality or latency benchmark. `store` defaults to false on this endpoint, but that does not override policy/security retention. [Chat schemas](https://dev.meta.ai/docs/api-reference/chat-completions/schemas)
 
 ## Audio: an actual streaming API, with separate semantics
 

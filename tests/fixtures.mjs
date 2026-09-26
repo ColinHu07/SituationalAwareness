@@ -1,10 +1,15 @@
 // Synthetic test fixtures only. No recorded participant media or external credentials.
 export const NOW = 1_800_000_000_000;
-export const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jFuoAAAAASUVORK5CYII=';
+// Valid original 32×32 solid-color PNG for image transport tests.
+export const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAK0lEQVR4nGO4//oJTRHDqAWjFoxaMGrBqAWjFoxaMGrBqAWjFoxaMFQsAABHEbiX+36ZeQAAAABJRU5ErkJggg==';
 export const CUE = Object.freeze({ cue: 'Ask what they meant by Friday.', reason: 'Recent speech asks whether it will be ready Friday.', confidence: 0.94, type: 'clarify', should_display: true });
 export function input(now = NOW) {
   return { transcript: [{ text: 'Will you have it ready Friday?', startMs: now - 3000, endMs: now - 2000, confidence: null }],
     frame: { dataUrl: PNG, capturedAtMs: now - 2500 }, context: ['Mention my internship'], manual: false };
+}
+export function surroundingsInput(now = NOW) {
+  return { ...input(now), analysisMode: 'surroundings', transcript: [],
+    audioContext: { capturedAtMs: now - 1000, windowMs: 4000, activityRatio: 0.05, rmsDbFS: -65, source: 'glasses_hfp' } };
 }
 export function deferred() {
   let resolve, reject;

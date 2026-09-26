@@ -2,6 +2,7 @@ import Foundation
 import os
 import Observation
 import UIKit
+import CoreMedia
 import MWDATCore
 import MWDATCamera
 import MWDATDisplay
@@ -11,6 +12,39 @@ private final class FrameDeliveryGate: Sendable {
   private let pending = OSAllocatedUnfairLock(initialState:false)
   func begin() -> Bool { pending.withLock { value in if value { return false }; value = true; return true } }
   func finish() { pending.withLock { $0 = false } }
+}
+
+// Camera audio and video share a presentation clock. Anchor it once per session;
+// the local epoch includes link latency, so this is not a sensor-clock calibration.
+final class GlassesStreamClock: Sendable {
+  private struct State {
+    var active = true
+    var anchorPTS: Double?
+    var anchorEpoch: Double = 0
+    var lastVideo: Double = -.infinity
+    var lastAudio: Double = -.infinity
+    var hasAudio = false
+  }
+  private let state = OSAllocatedUnfairLock(initialState:State())
+  var hasAudio: Bool { state.withLock { $0.hasAudio } }
+  func stop() { state.withLock { $0.active = false } }
+  func timestamp(for presentationTime: CMTime, audio: Bool, arrival: Double = nowMs()) -> Double? {
+    let milliseconds = CMTimeGetSeconds(presentationTime) * 1000
+    guard milliseconds.isFinite, arrival.isFinite else { return nil }
+    return state.withLock { value in
+      guard value.active else { return nil }
+      if value.anchorPTS == nil { value.anchorPTS = milliseconds; value.anchorEpoch = arrival }
+      guard let anchor = value.anchorPTS else { return nil }
+      let mapped = value.anchorEpoch + milliseconds - anchor
+      // Reject a reset clock, delayed backlog, or out-of-order frames instead of
+      // relabeling their arrival as newly captured data.
+      guard mapped <= arrival + 1000, arrival - mapped <= 15000,
+            mapped > (audio ? value.lastAudio : value.lastVideo) else { return nil }
+      if audio { value.lastAudio = mapped; value.hasAudio = true }
+      else { value.lastVideo = mapped }
+      return mapped
+    }
+  }
 }
 
 @Observable @MainActor
@@ -36,8 +70,10 @@ final class GlassesController {
   @ObservationIgnored private var camera: MWDATCamera.Camera?
   @ObservationIgnored var display: Display?
   @ObservationIgnored private var tokens: [AnyListenerToken] = []
+  @ObservationIgnored private var audioToken: AnyListenerToken?
+  @ObservationIgnored private var streamClock: GlassesStreamClock?
+  @ObservationIgnored private var captureStopTask: Task<Void, Never>?
   @ObservationIgnored private var observers: [Task<Void, Never>] = []
-  @ObservationIgnored private let decoder = VideoFrameDecoder()
   @ObservationIgnored private let frameGate = FrameDeliveryGate()
   @ObservationIgnored private var stopping = false
   @ObservationIgnored var operation: Task<Void, Never>?
@@ -87,9 +123,18 @@ final class GlassesController {
     stopping = false
     sessionRevision += 1
     let revision = sessionRevision
+    lastPreviewAt = 0
     sessionHasStarted = false; cameraHasStreamed = false; displayHasStarted = false
-    let permission = try await wearables.requestPermission(.camera)
-    guard permission == .granted else { throw CopilotError(message:"Glasses camera permission denied in Meta AI.") }
+    let permissions: [Permission] = withDisplay ? [.camera, .microphone] : [.camera]
+    for permission in permissions {
+      if try await wearables.checkPermissionStatus(permission) != .granted {
+        guard try await wearables.requestPermission(permission) == .granted else {
+          throw CopilotError(message:"Glasses \(permission) permission denied in Meta AI.")
+        }
+      }
+      try Task.checkCancellation()
+      guard sessionRevision == revision, !stopping else { throw CancellationError() }
+    }
     try Task.checkCancellation()
     let deviceSession = try wearables.createSession(deviceSelector:selector)
     session = deviceSession
@@ -109,9 +154,15 @@ final class GlassesController {
       try await Task.sleep(for:.milliseconds(100))
       guard Date() < deadline, sessionRevision == revision else { throw CopilotError(message:"Glasses session did not start. Check pairing, DAT glasses app and firmware.") }
     }
-    // Strict order from official HFP guide: add camera, settle HFP, then start video.
-    guard let camera = try deviceSession.addCamera(config:StreamConfiguration(videoCodec:.hvc1, resolution:.low, frameRate:15)) else { throw CopilotError(message:"Could not attach camera.") }
+    // Display uses DAT 1.0 ambient PCM alongside low-rate video. Regular glasses
+    // retain their existing HFP path: add camera, settle HFP, then start video.
+    let configuration = withDisplay
+      ? StreamConfiguration(videoCodec:.hvc1, audioCodec:.pcm(sampleRate:.rate16000, numberOfChannels:1), resolution:.low, frameRate:2)
+      : StreamConfiguration(videoCodec:.hvc1, resolution:.low, frameRate:15)
+    guard let camera = try deviceSession.addCamera(config:configuration) else { throw CopilotError(message:"Could not attach camera.") }
     self.camera = camera
+    let clock = GlassesStreamClock()
+    streamClock = clock
     tokens.append(camera.stream.statePublisher.listen { [weak self] state in
       Task { @MainActor in
         guard let self, self.sessionRevision == revision else { return }
@@ -123,12 +174,13 @@ final class GlassesController {
     tokens.append(camera.stream.errorPublisher.listen { [weak self] error in
       Task { @MainActor in guard self?.sessionRevision == revision else { return }; self?.fail(error.localizedDescription) }
     })
-    let decoder = self.decoder
+    let decoder = VideoFrameDecoder()
     let frameGate = self.frameGate
     tokens.append(camera.stream.videoFramePublisher.listen { [weak self] frame in
-      let captured = nowMs()
       // Decode every HEVC dependency but publish at most 2 Hz to the UI/sampler.
-      guard let image = decoder.decode(frame.sampleBuffer), frameGate.begin() else { return }
+      guard let image = decoder.decode(frame.sampleBuffer),
+            let captured = clock.timestamp(for:CMSampleBufferGetPresentationTimeStamp(frame.sampleBuffer), audio:false),
+            frameGate.begin() else { return }
       Task { @MainActor in
         defer { frameGate.finish() }
         guard let self, self.sessionRevision == revision, !self.stopping else { return }
@@ -139,6 +191,16 @@ final class GlassesController {
         self.onFrame?(image, captured)
       }
     })
+    if withDisplay {
+      audioToken = camera.stream.audioFramePublisher.listen { frame in
+        let buffer = frame.pcmBuffer
+        guard buffer.format.sampleRate > 0, buffer.frameLength > 0 else { return }
+        // The shared microphone pipeline expects a buffer-end timestamp.
+        let duration = CMTime(seconds:Double(buffer.frameLength) / buffer.format.sampleRate, preferredTimescale:1_000_000)
+        guard let captured = clock.timestamp(for:CMTimeAdd(frame.presentationTimeStamp, duration), audio:true) else { return }
+        microphone.receiveStreamPCM(buffer, at:captured)
+      }
+    }
     if withDisplay {
     let cap = try deviceSession.addDisplay()
     display = cap
@@ -153,20 +215,33 @@ final class GlassesController {
     })
     cap.start()
     } else { displayState = "Phone output (no glasses display)" }
-    try await microphone.start(uid:audioUID)
+    if withDisplay { try await microphone.startStreamPCM() }
+    else { try await microphone.start(uid:audioUID) }
     try Task.checkCancellation()
     guard sessionRevision == revision else { throw CancellationError() }
     camera.stream.start()
     let streamDeadline = Date().addingTimeInterval(12)
-    while (withDisplay && !displayReady) || camera.stream.state != .streaming {
+    while (withDisplay && (!displayReady || !clock.hasAudio)) || camera.stream.state != .streaming {
       try await Task.sleep(for:.milliseconds(100))
-      guard Date() < streamDeadline, sessionRevision == revision else { throw CopilotError(message:"Camera or display not ready. No conversation data has been sent.") }
+      guard Date() < streamDeadline, sessionRevision == revision else {
+        throw CopilotError(message:withDisplay
+          ? "Camera, ambient audio or display not ready. Check DAT 1.0 audio permission and development/beta access. No conversation data has been sent."
+          : "Camera not ready. No conversation data has been sent.")
+      }
     }
   }
 
   func pauseCapture() {
     stopping = true
-    camera?.stop(); camera = nil
+    streamClock?.stop()
+    let previousStop = captureStopTask
+    let camera = self.camera, audioToken = self.audioToken
+    self.camera = nil; self.audioToken = nil
+    captureStopTask = Task {
+      await previousStop?.value
+      await audioToken?.cancel()
+      camera?.stop()
+    }
     preview = nil; previewAtMs = 0
     show(nil, paused:true)
   }
@@ -174,6 +249,10 @@ final class GlassesController {
   func stop() async {
     stopping = true
     sessionRevision += 1
+    streamClock?.stop()
+    await captureStopTask?.value
+    captureStopTask = nil
+    await audioToken?.cancel(); audioToken = nil
     camera?.stop(); camera = nil
     preview = nil; previewAtMs = 0
     clear()
@@ -182,6 +261,7 @@ final class GlassesController {
     camera = nil; display = nil; session = nil
     for token in tokens { await token.cancel() }
     tokens.removeAll()
+    streamClock = nil
     displayReady = false; cameraState = "Stopped"; displayState = "Stopped"
     preview = nil; previewAtMs = 0
   }
