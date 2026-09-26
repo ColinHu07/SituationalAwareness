@@ -720,12 +720,14 @@ final class SessionModel {
     guard phase == .active else { return }
     guard cueTask == nil else { if manual { feedback("Analyzing…") }; return }
     let timestamp = nowMs()
-    guard !isTranscribing else {
+    let surroundings = analyzesSurroundings
+    // Camera analysis can use the latest completed transcript while the next
+    // audio chunk is transcribed. Continuous speech must not starve the scene.
+    guard surroundings || !isTranscribing else {
       if manual { queueManualAnalysis("Finishing speech, then analyzing…", at:timestamp) }
       return
     }
     if let issue = liveInputIssue(at:timestamp) { if manual { queueManualAnalysis(issue, at:timestamp) }; return }
-    let surroundings = analyzesSurroundings
     let last = sceneOnly ? nil : transcript.last
     let freshSpeech = last.flatMap { timestamp - $0.endMs <= 15000 ? $0 : nil }
     let frame = latestFrame.flatMap { timestamp - $0.capturedAtMs <= SurroundingsPolicy.frameFreshnessMs && $0.capturedAtMs <= timestamp ? $0 : nil }
