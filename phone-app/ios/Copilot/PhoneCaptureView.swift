@@ -45,6 +45,7 @@ struct PhoneCaptureView: View {
             }.frame(maxWidth:.infinity,alignment:.leading)
               .padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
           }
+          if !model.sceneOnly {
           captions
           VStack(alignment:.leading,spacing:8) {
             Label("YOUR NOTES",systemImage:"note.text").font(.caption.bold()).tracking(1)
@@ -53,6 +54,7 @@ struct PhoneCaptureView: View {
               .onChange(of:model.contextText) { _, _ in model.contextChanged() }
             Text("Kept for this session and cleared on Stop.").font(.caption).foregroundStyle(.secondary)
           }.padding(18).background(mint.opacity(0.45),in:RoundedRectangle(cornerRadius:18))
+          }
         }.padding(20)
       }.background(Color(red:0.95,green:0.97,blue:0.95))
         .safeAreaInset(edge:.bottom) { captureControls }
@@ -86,7 +88,7 @@ struct PhoneCaptureView: View {
           }.foregroundStyle(.white).padding(24)
         }
       }.aspectRatio(16.0/9.0,contentMode:.fit)
-      Text(cameraEnabled ? "Live preview. Muse receives occasional image samples and short audio chunks; no video file is saved." : "Audio-only session. No camera frames are captured.")
+      Text(model.sceneOnly ? "Muse checks fresh images automatically. Ambient audio levels are included when available; speech transcription is off." : cameraEnabled ? "Live preview. Muse receives occasional image samples and short audio chunks; no video file is saved." : "Audio-only session. No camera frames are captured.")
         .font(.caption).foregroundStyle(.secondary)
     }
   }
@@ -123,7 +125,7 @@ struct PhoneCaptureView: View {
             .buttonStyle(.bordered).disabled(model.phase != .active)
         }
       } else if model.analyzesSurroundings {
-        Text("Camera and audio stay on until Pause or Stop. Muse checks about every 8–20 seconds, or 30 seconds in reduced-power mode. Results take time to return.")
+        Text(model.sceneOnly ? "Muse checks the scene every 10 seconds, or 30 seconds in reduced-power mode. Pause or Stop ends capture. The recommendation stays until the next result." : "Camera and audio stay on until Pause or Stop. Muse checks about every 8–20 seconds, or 30 seconds in reduced-power mode. Results take time to return.")
           .font(.caption).foregroundStyle(.secondary)
       }
       if model.phase == .paused && !model.connectionTestOnly {
@@ -190,7 +192,7 @@ struct PhoneCaptureView: View {
   private var cueCard: some View {
     VStack(alignment:.leading,spacing:16) {
       HStack {
-        Label(model.captureMode.hasGlassesDisplay ? "PHONE + GLASSES CUE" : "SOCIAL CUE",systemImage:"sparkle")
+        Label(model.sceneOnly ? "SCENE RECOMMENDATION" : model.captureMode.hasGlassesDisplay ? "PHONE + GLASSES CUE" : "SOCIAL CUE",systemImage:"sparkle")
           .font(.caption.bold()).tracking(1)
         Spacer()
       }.foregroundStyle(mint)
@@ -202,19 +204,23 @@ struct PhoneCaptureView: View {
         ? "This phone mirrors the cue sent to the glasses. Check the lens to verify it appears."
         : "Muse adds a brief suggestion when the scene or conversation calls for one.")
         .font(.caption).foregroundStyle(.white.opacity(0.7))
-      HStack {
+      if !model.sceneOnly { HStack {
         Button("Analyze now") { model.requestCue(manual:true) }
           .disabled(model.phase != .active || model.isThinking || model.isTranscribing || model.connectionTestOnly)
         Spacer()
         Button("Dismiss") { model.dismiss() }.disabled(model.cue == nil)
-      }.font(.subheadline.weight(.semibold)).tint(mint)
-      if model.cue != nil {
+      }.font(.subheadline.weight(.semibold)).tint(mint) }
+      if model.cue != nil && !model.sceneOnly {
         Text("Cues clear after 8 seconds.").font(.caption2).foregroundStyle(.white.opacity(0.6))
       }
     }.padding(22).background(ink,in:RoundedRectangle(cornerRadius:20))
   }
 
   private var emptyCueText: String {
+    if model.sceneOnly && !model.connectionTestOnly {
+      if model.phase != .active { return "Start streaming to check the scene." }
+      return model.analysisFeedback ?? "Waiting for a fresh camera frame…"
+    }
     guard model.connectionTestOnly else { return "Room to listen." }
     switch model.phase {
     case .starting: return "Starting capture test…"

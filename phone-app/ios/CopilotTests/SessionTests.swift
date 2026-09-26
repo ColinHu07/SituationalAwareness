@@ -6,6 +6,34 @@ import MWDATCore
 
 @MainActor
 final class SessionTests: XCTestCase {
+  func testSceneOnlyStartsAnalysisWithoutSpeechAndSkipsASR() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    model.phase = .active
+    model.consent = true
+    model.endpoint = "invalid-endpoint" // Never contact a real service in this test.
+    model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:nowMs())
+    model.transcribe(AudioChunk(audioBase64:"test",startedAtMs:nowMs()-1000,endedAtMs:nowMs()))
+    XCTAssertFalse(model.isTranscribing)
+    XCTAssertTrue(model.transcript.isEmpty)
+    model.requestCue(manual:false)
+    XCTAssertEqual(model.requests,1,"A camera frame automatically starts scene analysis without any speech")
+    XCTAssertTrue(model.isThinking)
+    model.requestCue(manual:false)
+    XCTAssertEqual(model.requests,1,"Only one analysis may run at a time")
+    XCTAssertEqual(model.analysisInterval(reducedPower:false),10)
+    XCTAssertEqual(model.analysisInterval(reducedPower:true),30)
+    model.stop()
+  }
+
+  func testSceneOnlyDisplayHasAutomaticAnalysisAndTwoControls() {
+    let screen = GlassesScreen(cue:"This looks like a library. Keep your voice low.",caption:nil,note:nil,
+      paused:false,captionsEnabled:false,ready:false,starting:false,testOnly:false,sceneOnly:true)
+    XCTAssertEqual(screen.labels,["Pause","Stop"])
+    XCTAssertEqual(screen.actions,[.pause,.stop])
+    XCTAssertNotNil(screen.cue)
+  }
+
   func testStartupFailureKeepsDisplayAndAllowsRetry() {
     let model = SessionModel()
     model.captureMode = .displayGlasses
@@ -544,13 +572,13 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(captured.allSatisfy { abs($0.endedAtMs-$0.startedAtMs-6000) < 1 })
   }
 
-  func testLiveGlassesNeedFreshCameraAndAudio() {
+  func testSceneOnlyNeedsFreshCameraAndPhoneStillRequiresAudio() {
     let model = SessionModel()
     model.captureMode = .displayGlasses
     let time = nowMs()
     XCTAssertNotNil(model.liveInputIssue(at:time))
     model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:time)
-    XCTAssertNotNil(model.liveInputIssue(at:time), "Camera alone does not prove a full live capture path")
+    XCTAssertNil(model.liveInputIssue(at:time), "Scene-only checks can proceed without ambient audio")
     model.latestAudioContext = AudioContext(capturedAtMs:time,windowMs:1000,activityRatio:0,rmsDbFS:-80,source:"glasses_pcm")
     XCTAssertNil(model.liveInputIssue(at:time), "Silent ambient PCM is valid live audio")
     XCTAssertNotNil(model.liveInputIssue(at:time+10001))

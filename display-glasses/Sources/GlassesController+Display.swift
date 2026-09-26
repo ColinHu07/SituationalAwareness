@@ -11,10 +11,12 @@ struct GlassesScreen: Equatable, Sendable {
   let testOnly: Bool
   let feedback: String?
   let status: String?
+  let sceneOnly: Bool
   init(cue: String?, caption: String?, note: String?, paused: Bool,
-       captionsEnabled: Bool, ready: Bool, starting: Bool, testOnly: Bool, feedback: String? = nil, status: String? = nil) {
+       captionsEnabled: Bool, ready: Bool, starting: Bool, testOnly: Bool, feedback: String? = nil, status: String? = nil, sceneOnly: Bool = false) {
     mode = starting ? .starting : paused ? (ready ? .ready : .paused) : .streaming
     self.testOnly = testOnly
+    self.sceneOnly = sceneOnly
     self.status = mode == .paused ? status.map { String($0.prefix(80)) } : nil
     self.feedback = mode == .streaming ? feedback.map { String($0.prefix(64)) } : nil
     self.cue = mode == .streaming ? cue.map { String($0.prefix(90)) } : nil
@@ -41,7 +43,7 @@ struct GlassesScreen: Equatable, Sendable {
     case .ready: return ["Start", "Close"]
     case .paused: return ["Resume", "Stop", "Close"]
     case .starting: return ["Cancel"]
-    case .streaming: return ["Pause", testOnly ? "Test cue" : "Analyze", "Stop"]
+    case .streaming: if sceneOnly && !testOnly { return ["Pause", "Stop"] }; return ["Pause", testOnly ? "Test cue" : "Analyze", "Stop"]
     }
   }
   var actions: [GlassesController.ControlAction] {
@@ -49,7 +51,7 @@ struct GlassesScreen: Equatable, Sendable {
     case .ready: return [.start, .close]
     case .paused: return [.start, .stop, .close]
     case .starting: return [.stop]
-    case .streaming: return [.pause, .help, .stop]
+    case .streaming: return sceneOnly && !testOnly ? [.pause, .stop] : [.pause, .help, .stop]
     }
   }
 }
@@ -60,10 +62,10 @@ extension GlassesController {
   // controls; clearing before every send produces a visible blank-frame flash.
   func show(_ cue: String?, caption: String? = nil, note: String? = nil, paused: Bool = false,
             status: String? = nil, captionsEnabled: Bool = false, ready: Bool = false,
-            starting: Bool = false, testOnly: Bool = false, feedback: String? = nil) {
+            starting: Bool = false, testOnly: Bool = false, feedback: String? = nil, sceneOnly: Bool = false) {
     guard displayReady else { return }
     let screen = GlassesScreen(cue:cue, caption:caption, note:note, paused:paused,
-      captionsEnabled:captionsEnabled, ready:ready, starting:starting, testOnly:testOnly, feedback:feedback, status:status)
+      captionsEnabled:captionsEnabled, ready:ready, starting:starting, testOnly:testOnly, feedback:feedback, status:status, sceneOnly:sceneOnly)
     guard screen != requestedScreen else { return }
     requestedScreen = screen
     displayRevision += 1
@@ -82,7 +84,7 @@ extension GlassesController {
             Text("Cue: " + cue, style:screen.detail == nil ? .body : .meta)
           }
           if screen.cue == nil && screen.detail == nil {
-            Text(screen.status ?? (screen.mode == .ready ? "Select Start to stream." : screen.mode == .paused ? "Select Resume when ready." : screen.mode == .starting ? "Connecting camera and audio." : "Say a sentence, then Analyze."), style:.body)
+            Text(screen.status ?? (screen.mode == .ready ? "Select Start to stream." : screen.mode == .paused ? "Select Resume when ready." : screen.mode == .starting ? "Connecting camera and audio." : screen.sceneOnly ? "Watching the scene automatically." : "Say a sentence, then Analyze."), style:.body)
           }
           // At most three short labels; never append Dismiss and widen the row.
           ButtonGroup {

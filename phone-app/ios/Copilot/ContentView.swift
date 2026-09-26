@@ -76,7 +76,7 @@ struct ContentView: View {
               }
             }.controlSize(.large)
             if model.captureMode.hasGlassesDisplay && (model.phase == .stopped || model.phase == .paused) {
-              Text("Start glasses opens the controls on the lens. Select Start there to turn on camera and audio. While streaming: Pause suspends capture, Analyze requests a Muse cue, and Stop returns to Start.")
+              Text("Start glasses opens the controls on the lens. Select Start there to turn on camera and audio. Muse checks the scene automatically every 10 seconds. Pause suspends capture; Stop returns to Start.")
                 .font(.caption).foregroundStyle(.secondary)
             }
             if !model.simulate && model.phase != .stopped {
@@ -89,17 +89,17 @@ struct ContentView: View {
               Text(model.simulate ? "SIMULATED SOCIAL CUE" : model.captureMode.hasGlassesDisplay ? "PHONE + GLASSES CUE" : "AI SUGGESTION").font(.caption.bold()).tracking(1)
               Spacer(); Image(systemName:"sparkle")
             }.foregroundStyle(mint)
-            Text(model.cue ?? "Room to listen.").font(.system(size:25,weight:.medium,design:.rounded)).foregroundStyle(.white)
+            Text(model.cue ?? (model.sceneOnly ? model.analysisFeedback ?? "Start streaming to check the scene." : "Room to listen.")).font(.system(size:25,weight:.medium,design:.rounded)).foregroundStyle(.white)
               .frame(maxWidth:.infinity,minHeight:64,alignment:.leading)
             if model.cue == nil { Text(model.analyzesSurroundings ? "A brief cue for the room or conversation, when it helps." : "A cue will appear when there is enough clear context.").font(.caption).foregroundStyle(.white.opacity(0.6)) }
-            HStack {
+            if !model.sceneOnly { HStack {
               Button(model.analyzesSurroundings ? "Analyze now" : "Help me respond") { model.requestCue(manual:true) }.disabled(model.phase != .active || model.isThinking || model.isTranscribing || model.connectionTestOnly)
               Spacer()
               Button("Dismiss") { model.dismiss() }.disabled(model.cue == nil)
-            }.font(.subheadline.weight(.semibold)).tint(mint)
+            }.font(.subheadline.weight(.semibold)).tint(mint) }
           }.padding(22).background(ink,in:RoundedRectangle(cornerRadius:20))
           if model.cue != nil { Button("That cue was distracting") { model.markDistracting() }.font(.caption).tint(.secondary) }
-          VStack(alignment:.leading,spacing:12) {
+          if !model.sceneOnly { VStack(alignment:.leading,spacing:12) {
             Label(model.simulate ? "SIMULATED CAPTIONS" : "CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
             Text(model.captionText ?? (model.connectionTestOnly ? "Capture test: no transcription." : "Speech will appear here."))
               .font(.system(size:25,weight:.medium,design:.rounded))
@@ -114,6 +114,7 @@ struct ContentView: View {
               .lineLimit(2...4).onChange(of:model.contextText) { _, _ in model.contextChanged() }
             Text("Written by you. Kept for this session and cleared on Stop.").font(.caption).foregroundStyle(.secondary)
           }.padding(20).background(mint.opacity(0.45),in:RoundedRectangle(cornerRadius:18))
+          }
 
           if model.simulate { simulation }
           else if model.captureMode == .phone { phone }
@@ -124,7 +125,7 @@ struct ContentView: View {
               Text("Glasses frame received · \(model.glasses.framesReceived) total").font(.caption)
             }
           }
-          DisclosureGroup("Recent transcript · memory only") {
+          if !model.sceneOnly { DisclosureGroup("Recent transcript · memory only") {
             VStack(alignment:.leading,spacing:10) {
               if model.transcript.isEmpty { Text("No speech captured.").foregroundStyle(.secondary) }
               ForEach(model.transcript) { entry in
@@ -134,6 +135,7 @@ struct ContentView: View {
                 }.frame(maxWidth:.infinity,alignment:.leading)
               }
             }.padding(.top,12)
+          }
           }
           DisclosureGroup("Session measurements") {
             Grid(alignment:.leading,horizontalSpacing:20,verticalSpacing:10) {
@@ -260,10 +262,10 @@ struct ContentView: View {
         Section("This conversation") {
           TextField("Things you chose to remember (one per line)",text:$model.contextText,axis:.vertical).lineLimit(3...5).onChange(of:model.contextText) { _, _ in model.contextChanged() }
           if model.analyzesSurroundings {
-            if model.captureMode.hasGlassesDisplay {
+            if model.captureMode.hasGlassesDisplay && !model.sceneOnly {
               Toggle("Captions on glasses",isOn:$model.displayCaptions).onChange(of:model.displayCaptions) { _, _ in model.refreshDisplay() }
             }
-            Text("Muse checks about every 8 seconds near conversation, 20 seconds without recent speech, or 30 seconds in reduced-power mode. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
+            Text(model.sceneOnly ? "Scene-only test: Muse checks fresh camera images every 10 seconds (30 in reduced-power mode), with audio levels when available. No speech transcription. Recommendations update automatically." : "Muse checks about every 8 seconds near conversation, 20 seconds without recent speech, or 30 seconds in reduced-power mode. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
           } else {
             Stepper("Image sample every \(Int(model.sampleInterval)) seconds",value:$model.sampleInterval,in:3...30,step:1)
           }

@@ -298,7 +298,7 @@ final class GlassesController {
     guard sessionRevision == revision, cameraRevision == captureRevision else { throw CancellationError() }
     camera.stream.start()
     let streamDeadline = Date().addingTimeInterval(12)
-    while !clock.hasVideo || (withDisplay && (!displayReady || !clock.hasAudio)) || camera.stream.state != .streaming {
+    while !clock.hasVideo || (withDisplay && !displayReady) || camera.stream.state != .streaming {
       try await Task.sleep(for:.milliseconds(100))
       guard Date() < streamDeadline, sessionRevision == revision, cameraRevision == captureRevision else {
         var missing: [String] = []
