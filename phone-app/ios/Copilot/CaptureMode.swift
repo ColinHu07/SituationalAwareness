@@ -14,12 +14,13 @@ enum CaptureMode: String, CaseIterable, Identifiable {
 enum SurroundingsPolicy {
   /// Seconds between automatic checks. Only one check runs at a time, so model latency also limits the rate.
   static func analysisInterval(recentSpeech: Bool, reducedPower: Bool) -> Double {
-    reducedPower ? 15 : recentSpeech ? 3 : 5
+    reducedPower ? 15 : 10
   }
   /// A cue stays on screen at least this long before a different one replaces it, so it can be read.
-  static let minimumDwellMs = 5_000.0
+  static let minimumDwellMs = 10_000.0
   /// After the wearer dismisses a cue, automatic checks wait this long.
   static let dismissQuietMs = 10_000.0
+  static let contextWindowMs = 10_000.0
   /// Session memory: summaries kept and sent with each check.
   static let momentCount = 8
   static let frameFreshnessMs = 10_000.0

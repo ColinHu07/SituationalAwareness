@@ -115,10 +115,10 @@ test('surroundings still validates the strict response and blocks unsupported pe
 
 test('mock surroundings uses labeled speech fixtures and never pretends to inspect an image', async () => {
   const provider = createProvider({ MODEL_MODE: 'mock' }, () => { throw new Error('Mock must not use network'); });
-  const scene = surroundingsInput();
+  const scene = surroundingsInput(Date.now());
   assert.equal((await provider.cue(scene)).result.should_display, false);
   for (const [text, type] of [["We're in the library.", 'reminder'], ['I need some space.', 'respond']]) {
-    scene.transcript = [{ ...input().transcript[0], text }];
+    scene.transcript = [{ ...input(Date.now()).transcript[0], text }];
     const response = await provider.cue(scene);
     assert.equal(response.result.should_display, true); assert.equal(response.result.type, type);
     assert.match(response.result.reason, /SIMULATED/); assert.equal(response.metrics.simulated, true);
@@ -236,4 +236,39 @@ test('cue requests carry session memory and the cue on screen; summaries survive
 test('live credential is required and Contributor model is prohibited', () => {
   assert.throws(() => createProvider({ MODEL_MODE: 'live' }), /requires MUSE_API_KEY/);
   assert.throws(() => createProvider({ ...env, MUSE_MODEL: 'muse-spark-1.3-contributor' }), /standard/);
+});
+
+test('summary request contains only the last ten seconds of reliable speech', async () => {
+  const now = Date.now();
+  const scene = surroundingsInput(now);
+  const recent = { text: 'Could we review this proposal?', startMs: now - 2000, endMs: now - 1000, confidence: 0.9, speaker: 'P2' };
+  scene.transcript = [
+    { ...recent, text: 'Old discussion', startMs: now - 14000, endMs: now - 11000 },
+    { ...recent, text: 'Unclear audio', confidence: 0.3 },
+    recent,
+  ];
+  const provider = createProvider(env, async (_url, options) => {
+    const body = JSON.parse(options.body), sent = JSON.parse(body.messages[1].content[0].text);
+    assert.deepEqual(sent.transcript, [recent]);
+    assert.equal(sent.contextWindowMs, 10000);
+    assert.match(body.messages[0].content, /Then base cue on that summary/);
+    assert.match(body.messages[0].content, /no clear recent conversation/);
+    return { ok: true, json: async () => completion({ ...CUE, summary: 'Discussing a proposal and asking to review it.' }) };
+  });
+  assert.equal((await provider.cue(scene)).result.summary, 'Discussing a proposal and asking to review it.');
+});
+
+test('silence with old conversation sends scene and ambient context without reviving speech', async () => {
+  const now = Date.now(), scene = surroundingsInput(now);
+  scene.transcript = [{ text: 'An earlier meeting', startMs: now - 30000, endMs: now - 20000, confidence: null }];
+  scene.audioContext.windowMs = 10000;
+  const provider = createProvider(env, async (_url, options) => {
+    const body = JSON.parse(options.body), sent = JSON.parse(body.messages[1].content[0].text);
+    assert.deepEqual(sent.transcript, []);
+    assert.deepEqual(sent.audioContext, scene.audioContext);
+    assert.match(body.messages[0].content, /must not revive an old topic during silence/);
+    assert.equal(body.messages[1].content[1].type, 'image_url');
+    return { ok: true, json: async () => completion({ ...CUE, cue: 'This looks like a study area; speak softly.', summary: 'A study area with low captured background activity.' }) };
+  });
+  assert.match((await provider.cue(scene)).result.summary, /study area/);
 });

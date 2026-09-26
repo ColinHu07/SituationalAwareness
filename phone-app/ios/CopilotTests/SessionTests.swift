@@ -22,7 +22,7 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(model.isThinking)
     model.requestCue(manual:false)
     XCTAssertEqual(model.requests,1,"Only one analysis may run at a time")
-    XCTAssertEqual(model.analysisInterval(reducedPower:false),4)
+    XCTAssertEqual(model.analysisInterval(reducedPower:false),10)
     XCTAssertEqual(model.analysisInterval(reducedPower:true),15)
     model.stop()
   }
@@ -100,12 +100,11 @@ final class SessionTests: XCTestCase {
     XCTAssertNotNil(model.cue)
   }
 
-  func testCaptionsAndAnalysisFeedbackAreVisibleWithoutExtraButtons() {
-    XCTAssertTrue(SessionModel().displayCaptions)
+  func testAnalysisFeedbackStaysVisibleWithoutCaptionsOrExtraButtons() {
     let screen = GlassesScreen(cue:nil,caption:"Hello there",note:nil,paused:false,captionsEnabled:true,
       ready:false,starting:false,testOnly:false,feedback:"Analyzing…")
     XCTAssertEqual(screen.title,"Analyzing…")
-    XCTAssertEqual(screen.detail,"Heard: Hello there")
+    XCTAssertNil(screen.detail)
     XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
   }
 
@@ -135,8 +134,8 @@ final class SessionTests: XCTestCase {
     model.addSimulationLine("How is the robotics project?")
     model.requestCue(manual:true)
     try await Task.sleep(for:.milliseconds(1000))
-    XCTAssertEqual(model.cue,"Ask what they meant by Friday.","A different cue waits until the current one has been up 5 seconds")
-    try await Task.sleep(for:.milliseconds(3500))
+    XCTAssertEqual(model.cue,"Ask what they meant by Friday.","A different cue waits until the current one has been up 10 seconds")
+    try await Task.sleep(for:.milliseconds(8500))
     XCTAssertEqual(model.cue,"Ask how their robotics project is going.")
     model.contextChanged()
     XCTAssertEqual(model.cue,"Ask how their robotics project is going.","Editing notes or people keeps the cue on screen")
@@ -208,23 +207,23 @@ final class SessionTests: XCTestCase {
       captionsEnabled:true,ready:false,starting:false,testOnly:false)
     XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
     XCTAssertEqual(screen.cue?.count,90)
-    XCTAssertEqual(screen.detail,"Heard: Caption text","A social cue must not hide enabled captions; newlines must not crowd out controls")
+    XCTAssertNil(screen.detail,"Captions stay on the phone even if an older caller enables them")
     let test = GlassesScreen(cue:nil,caption:nil,note:nil,paused:false,captionsEnabled:false,ready:false,starting:false,testOnly:true)
     XCTAssertEqual(test.labels,["Pause","Test cue","Stop"])
   }
 
-  func testEnabledCaptionsUpdateAlongsideCueAndSurviveItsRemoval() {
+  func testCaptionArgumentsNeverReachLensEvenWhenCueIsRemoved() {
     let controller = GlassesController()
     controller.displayReady = true
     controller.show("Ask what they meant.",caption:"We can meet Friday.",captionsEnabled:true)
     let revision = controller.displayRevision
     controller.show("Ask what they meant.",caption:"Friday afternoon works.",captionsEnabled:true)
-    XCTAssertEqual(controller.displayRevision,revision+1,"New captions must reach the lens while a cue is visible")
+    XCTAssertEqual(controller.displayRevision,revision,"New captions must not redraw the lens")
     XCTAssertEqual(controller.requestedScreen?.cue,"Ask what they meant.")
-    XCTAssertEqual(controller.requestedScreen?.detail,"Heard: Friday afternoon works.")
+    XCTAssertNil(controller.requestedScreen?.detail)
     controller.show(nil,caption:"Friday afternoon works.",captionsEnabled:true)
     XCTAssertNil(controller.requestedScreen?.cue)
-    XCTAssertEqual(controller.requestedScreen?.detail,"Heard: Friday afternoon works.")
+    XCTAssertNil(controller.requestedScreen?.detail)
     controller.show("Ask what they meant.",caption:"Friday afternoon works.",captionsEnabled:false)
     XCTAssertEqual(controller.requestedScreen?.cue,"Ask what they meant.")
     XCTAssertNil(controller.requestedScreen?.detail,"Turning captions off must still work during a cue")
@@ -239,7 +238,7 @@ final class SessionTests: XCTestCase {
     }
     let excerpt = GlassesScreen(cue:"A cue",caption:String(repeating:"a",count:100),note:nil,
       paused:false,captionsEnabled:true,ready:false,starting:false,testOnly:false)
-    XCTAssertEqual(excerpt.detail,"Heard: …" + String(repeating:"a",count:60))
+    XCTAssertNil(excerpt.detail)
   }
 
   func testPhoneStartGlassesOnlyOpensControls() {
@@ -515,15 +514,15 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(model.cue,"They mentioned a hard day. Listen and give them space.")
   }
 
-  func testAdaptiveCadenceAndPauseErasesAudioSummary() async throws {
+  func testSteadyCadenceAndPauseErasesAudioSummary() async throws {
     let model = try await activeModel()
     model.simulateSurroundings = true
     let timestamp = nowMs()
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),5)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),10)
     model.lastVoiceAt = timestamp
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),3)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),10)
     XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:true),15)
-    XCTAssertEqual(model.analysisInterval(at:timestamp+30001,reducedPower:false),5)
+    XCTAssertEqual(model.analysisInterval(at:timestamp+30001,reducedPower:false),10)
     model.latestAudioContext = AudioContext(capturedAtMs:timestamp,windowMs:1000,activityRatio:0.5,rmsDbFS:-30,source:"glasses_pcm")
     model.pause()
     XCTAssertNil(model.latestAudioContext)

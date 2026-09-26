@@ -27,7 +27,7 @@ struct PhoneCaptureView: View {
           if !model.sceneOnly { captions }
           if model.lastSceneSummary != nil || model.lastAnalysisOutcome != nil {
             VStack(alignment:.leading,spacing:8) {
-              Label("SEEING",systemImage:"eye").font(.caption.bold()).tracking(1)
+              Label("RECENT CONTEXT",systemImage:"text.bubble").font(.caption.bold()).tracking(1)
               if let summary = model.lastSceneSummary { Text(summary).font(.subheadline) }
               if let outcome = model.lastAnalysisOutcome {
                 Text(outcome).font(.caption).foregroundStyle(.secondary)

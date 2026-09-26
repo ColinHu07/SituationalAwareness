@@ -38,10 +38,11 @@ final class SessionModel {
   var contextText = ""
   var sampleInterval = 8.0
   var simulateSurroundings = false
-  var displayCaptions = true
   var analysisFeedback: String?
   var pendingManualAnalysisAt: Double?
   var latestAudioContext: AudioContext?
+  @ObservationIgnored private var ambientWindow = AmbientWindow()
+  @ObservationIgnored private var conversationWindow = ConversationWindow()
   var reducedPower = false
   var nextAnalysisAt: Double = 0
   var transcript: [TranscriptEntry] = []
@@ -173,6 +174,7 @@ final class SessionModel {
     microphone.onContext = { [weak self] context in Task { @MainActor in
       guard let self, self.phase == .active, context.capturedAtMs >= self.captureStartedAt else { return }
       self.latestAudioContext = context
+      self.ambientWindow.append(context)
     } }
     microphone.onFailure = { [weak self] message in Task { @MainActor in self?.captureFailed(message) } }
   }
@@ -223,12 +225,11 @@ final class SessionModel {
     return analyzesSurroundings ? "Watching surroundings" : "Listening for context"
   }
   func analysisInterval(at timestamp: Double = nowMs(), reducedPower: Bool) -> Double {
-    if sceneOnly { return reducedPower ? 15 : 4 }
     return SurroundingsPolicy.analysisInterval(recentSpeech:lastVoiceAt > 0 && timestamp - lastVoiceAt < 30000, reducedPower:reducedPower)
   }
   private func publishDisplay() {
     guard captureMode.hasGlassesDisplay, phase == .active else { return }
-    glasses.show(cue, caption:sceneOnly ? nil : captionText, note:sceneOnly ? nil : savedNote, captionsEnabled:displayCaptions && !sceneOnly, testOnly:connectionTestOnly, feedback:analysisFeedback, sceneOnly:sceneOnly)
+    glasses.show(cue, testOnly:connectionTestOnly, feedback:cue == nil ? analysisFeedback : "Social cue", sceneOnly:sceneOnly)
   }
   private func feedback(_ message: String) {
     analysisFeedback = message
@@ -413,6 +414,7 @@ final class SessionModel {
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeCaptions()
+    ambientWindow = AmbientWindow()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     latestFrame = nil; latestAudioContext = nil; latestSampleAt = 0; transcript.removeAll(); lastVoiceAt = 0; captionText = nil; captionAtMs = 0
@@ -438,6 +440,7 @@ final class SessionModel {
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeCaptions()
+    ambientWindow = AmbientWindow()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
@@ -790,6 +793,7 @@ final class SessionModel {
     realtimeRelay?.onEvent = nil; realtimeRelay?.onFailure = nil; realtimeRelay?.onSend = nil
     realtimeRelay?.stop(); realtimeRelay = nil
     realtimeRoster = PhoneCaptionRoster(); realtimeClock.reset()
+    conversationWindow = ConversationWindow()
     finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []
     speechMode = "Not started"
   }
@@ -807,11 +811,12 @@ final class SessionModel {
           ["transcript.partial", "speaker.updated", "transcript.final"].contains(event.type) else { return }
     let time = nowMs()
     if let speaker = event.speaker { realtimeSpeakers[id] = speaker }
+    let range = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:time)
+    conversationWindow.consume(event, at:min(time, realtimeClock.captureTime(audioProcessedMs:event.audioProcessedMs) ?? range.endMs))
     realtimeRoster.consume(event, at:time)
     captionRows = realtimeRoster.rows
     captionText = captionRows.isEmpty ? nil : captionRows.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
     captionAtMs = time
-    publishDisplay()
     guard event.type == "transcript.final", !finalizedTurns.contains(id) else { return }
     finalizedTurns.insert(id)
     // Bound deduplication bookkeeping during long sessions.
@@ -819,7 +824,6 @@ final class SessionModel {
       finalizedTurns.remove(oldest); realtimeSpeakers[oldest] = nil
     }
     guard let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty else { return }
-    let range = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:time)
     let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:range.startMs, endMs:range.endMs,
                                 confidence:nil, speaker:realtimeSpeakers[id])
     transcript.append(entry); transcript.sort { $0.endMs < $1.endMs }
@@ -898,7 +902,6 @@ final class SessionModel {
   func setCaption(_ text: String, capturedAtMs: Double) {
     guard phase == .active, capturedAtMs >= captionAtMs, nowMs()-capturedAtMs <= 15000, capturedAtMs <= nowMs()+1000 else { return }
     captionText = String(text.suffix(240)); captionAtMs = capturedAtMs
-    publishDisplay()
   }
   func expireCaption(at timestamp: Double = nowMs()) {
     if realtimeRelay != nil {
@@ -907,15 +910,19 @@ final class SessionModel {
       if updated != captionRows {
         captionRows = updated
         captionText = updated.isEmpty ? nil : updated.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
-        publishDisplay()
       }
       return
     }
-    if captionText != nil, timestamp-captionAtMs > 15000 { captionText = nil; publishDisplay() }
+    if captionText != nil, timestamp-captionAtMs > 15000 { captionText = nil }
   }
   func sceneBecameInactive() {
     // Phone camera is a foreground experience. Do not claim pocket camera support.
     if captureMode == .phone { pause("Phone session paused when the app left the foreground. Resume deliberately.") }
+  }
+  func recentCueTranscript(at timestamp: Double = nowMs()) -> [TranscriptEntry] {
+    guard !sceneOnly else { return [] }
+    if realtimeRelay != nil { return conversationWindow.entries(at:timestamp) }
+    return transcript.filter { timestamp - $0.endMs <= SurroundingsPolicy.contextWindowMs && $0.endMs <= timestamp + 1000 && ($0.confidence ?? 1) >= 0.65 }
   }
   func requestCue(manual: Bool) {
     guard !uploadsDisabled else { if manual { notice = "Connection test makes no API requests. Use Manual display test." }; return }
@@ -930,8 +937,9 @@ final class SessionModel {
       return
     }
     if let issue = liveInputIssue(at:timestamp) { if manual { queueManualAnalysis(issue, at:timestamp) }; return }
-    let last = sceneOnly ? nil : transcript.last
-    let freshSpeech = last.flatMap { timestamp - $0.endMs <= 15000 ? $0 : nil }
+    let entries = recentCueTranscript(at:timestamp)
+    let last = entries.last
+    let freshSpeech = last
     let frame = latestFrame.flatMap { timestamp - $0.capturedAtMs <= SurroundingsPolicy.frameFreshnessMs && $0.capturedAtMs <= timestamp ? $0 : nil }
     // Silence does not imply missing context: a fresh library image can support a cue.
     guard timestamp - captureStartedAt >= 1500,
@@ -951,9 +959,7 @@ final class SessionModel {
     }
     let revision = generation, thisEpoch = epoch
     let context = (sceneOnly ? "" : contextText).split(separator:"\n").prefix(5).map { String($0.prefix(160)) }
-    // Older lines in the 60-second window are background; the model is told to weigh recent speech most.
-    let entries = sceneOnly ? [] : transcript
-    let audio = surroundings ? latestAudioContext.flatMap { timestamp - $0.capturedAtMs <= 10000 ? $0 : nil } : nil
+    let audio = surroundings ? (ambientWindow.context(at:timestamp) ?? latestAudioContext.flatMap { timestamp - $0.capturedAtMs <= 10000 ? $0 : nil }) : nil
     let present = presentPeople
     let request = CueRequest(transcript:entries, frame:frame, context:context, manual:manual,
                              analysisMode:surroundings ? "surroundings" : "conversation", audioContext:audio,
@@ -995,7 +1001,7 @@ final class SessionModel {
           }
           // Always-on display: ongoing speech with no specific fixture gets a steady listening cue.
           if message.isEmpty, freshSpeech != nil { message = "Keep listening, then ask a follow-up question." }
-          response = CueResponse(result:CueResult(cue:message, reason:"Local scripted demo fixture", confidence:message.isEmpty ? 0 : 0.95, type:surroundings ? "reminder" : "clarify", should_display:!message.isEmpty,
+          response = CueResponse(result:CueResult(cue:message, reason:"Local scripted demo fixture", confidence:message.isEmpty ? 0 : 0.95, type:message.isEmpty ? "abstain" : surroundings ? "reminder" : "clarify", should_display:!message.isEmpty,
                                                   scene:["library", "funeral"].contains(fixtureScene) ? fixtureScene : "",
                                                   summary:freshSpeech.map { "SIMULATED: conversation mentioning \"\($0.text.prefix(60))\"." }), metrics:nil)
           modelMode = "LOCAL SCRIPTED MOCK"
@@ -1018,10 +1024,22 @@ final class SessionModel {
         apiMs = response.metrics?.apiMs ?? 0; recordCost(response.metrics?.estimatedCostUsd ?? (simulate && localMock ? 0 : nil))
         let result = response.result
         if let scene = result.scene?.trimmingCharacters(in:.whitespaces), !scene.isEmpty, scene != currentScene { currentScene = scene }
-        lastSceneSummary = String(result.reason.prefix(400))
+        let summary = result.summary?.trimmingCharacters(in:.whitespacesAndNewlines)
+        lastSceneSummary = summary.flatMap { $0.isEmpty ? nil : String($0.prefix(200)) }
         remember(result.summary, at:evidenceAt)
         lastAnalysisOutcome = "No new social cue needed."
         lastAnalysisAtMs = completedAt
+        if !result.should_display && result.type == "abstain" {
+          // No supported current context: do not leave an earlier conversation's advice on the lens.
+          let wait = lastCueAt + SurroundingsPolicy.minimumDwellMs - nowMs()
+          if cue != nil, wait > 0 { try await Task.sleep(for:.milliseconds(Int(wait))) }
+          guard epoch == thisEpoch, generation == revision, phase == .active else { return }
+          cue = nil
+          lastAnalysisOutcome = "Waiting for clearer context."
+          feedback("Listening for context…")
+          notice = ""
+          return
+        }
         let text = result.cue.trimmingCharacters(in:.whitespacesAndNewlines)
         let normalized = text.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace }
         guard result.should_display, result.confidence.isFinite, result.confidence >= 0.6, result.confidence <= 1,

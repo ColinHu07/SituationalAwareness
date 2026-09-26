@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
-import { createProvider } from './model.mjs';
+import { createProvider, recentConversation } from './model.mjs';
 import { attachRealtimeASR } from './realtime-asr.mjs';
 import { validateInput, validateAudio, validateLearnInput, validateToneInput } from './validation.mjs';
 import { abstain, LIMITS } from '../shared/protocol.mjs';
@@ -51,7 +51,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
       for await (const chunk of req) { bytes += chunk.length; if (bytes > 1_000_000) { json(413, { error: 'Payload exceeds 1 MB' }); req.destroy(); return; } chunks.push(chunk); }
       let body; try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { return json(400, { error: 'Invalid JSON' }); }
       if (path === '/api/cue') {
-        const input = validateInput(body), last = input.transcript.at(-1);
+        const input = validateInput(body), last = recentConversation(input.transcript).at(-1);
         const recentSpeech = last && Date.now() - last.endMs <= LIMITS.speechMs && (last.confidence === null || last.confidence >= 0.65);
         const recentScene = input.analysisMode === 'surroundings' && input.frame !== null;
         if (!recentSpeech && !recentScene)

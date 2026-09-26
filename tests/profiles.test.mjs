@@ -72,7 +72,7 @@ test('cues carry a normalized scene label, even when abstaining', async () => {
   assert.equal(validateCue(base).scene, '', 'scene is optional for fixtures');
   assert.throws(() => validateCue({ ...base, scene: 5 }));
   assert.equal(mockCue({ transcript: [{ text: "We're at the funeral now" }], analysisMode: 'surroundings', manual: false }).scene, 'funeral');
-  for (const prompt of [SYSTEM_PROMPT, SURROUNDINGS_PROMPT]) assert.match(prompt, /Looks like a funeral\. Stay quiet and somber\./);
+  for (const prompt of [SYSTEM_PROMPT, SURROUNDINGS_PROMPT]) assert.match(prompt, /Set scene to a short lowercase label only when fresh visual evidence or explicit recent words support the setting/);
   assert.equal(validateInput({ ...input(), currentScene: 'library' }, NOW).currentScene, 'library');
   assert.throws(() => validateInput({ ...input(), currentScene: 'x'.repeat(41) }, NOW), InputError);
 });
