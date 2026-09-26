@@ -5,6 +5,19 @@ import MWDATCore
 @testable import Copilot
 
 @MainActor
+private final class FakeRealtimeASRTransport: RealtimeASRTransport {
+  var ready = false
+  var onEvent: ((RealtimeASREvent) -> Void)?
+  var onFailure: ((String) -> Void)?
+  private(set) var languageBias: [String] = []
+  private(set) var frames: [Data] = []
+  func start(languageBias: [String]) async throws { self.languageBias = languageBias; ready = true }
+  func sendPCM(_ data: Data) { frames.append(data) }
+  func stop() { ready = false }
+  func fail() { onFailure?("Realtime test failure; switching to fallback.") }
+}
+
+@MainActor
 final class SessionTests: XCTestCase {
   func testSceneOnlyStartsAnalysisWithoutSpeech() {
     let model = SessionModel()
@@ -669,7 +682,11 @@ final class SessionTests: XCTestCase {
                    URL(string:"wss://example.com/api/asr/realtime"))
     XCTAssertEqual(try RealtimeASRClient.webSocketURL(endpoint:"http://127.0.0.1:8787"),
                    URL(string:"ws://127.0.0.1:8787/api/asr/realtime"))
-    XCTAssertThrowsError(try RealtimeASRClient.webSocketURL(endpoint:"http://192.168.1.5:8787"))
+    XCTAssertEqual(try RealtimeASRClient.webSocketURL(endpoint:"http://192.168.1.5:8787"),
+                   URL(string:"ws://192.168.1.5:8787/api/asr/realtime"))
+    XCTAssertEqual(try RealtimeASRClient.webSocketURL(endpoint:"http://my-mac.local:8787"),
+                   URL(string:"ws://my-mac.local:8787/api/asr/realtime"))
+    XCTAssertThrowsError(try RealtimeASRClient.webSocketURL(endpoint:"http://8.8.8.8:8787"))
     XCTAssertThrowsError(try RealtimeASRClient.webSocketURL(endpoint:"https://user:secret@example.com"))
     XCTAssertThrowsError(try RealtimeASRClient.webSocketURL(endpoint:"https://example.com?token=secret"))
   }
@@ -713,12 +730,34 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(captured[0].1,123456)
   }
 
+  func testSessionStreamsPCMToRealtimeWithoutWaitingForWAVChunk() async throws {
+    let microphone = ConversationMicrophone()
+    let relay = FakeRealtimeASRTransport()
+    let model = SessionModel(people:PeopleStore(fileURL:nil), microphone:microphone,
+                             realtimeASRFactory:{ _, _ in relay })
+    model.phase = .starting
+    try await model.startRealtimeASR()
+    microphone.prepareStreamPCM()
+    defer { model.stop() }
+    let format = try XCTUnwrap(AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:16000,channels:1,interleaved:false))
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat:format,frameCapacity:1024))
+    buffer.frameLength = 1024
+    let samples = try XCTUnwrap(buffer.floatChannelData?[0])
+    for i in 0..<1024 { samples[i] = 0.02 }
+    microphone.receiveStreamPCM(buffer,at:123456)
+    for _ in 0..<20 where relay.frames.isEmpty { try await Task.sleep(for:.milliseconds(10)) }
+    XCTAssertEqual(relay.languageBias,["English","Hindi"])
+    XCTAssertEqual(relay.frames.map(\.count),[2048])
+    XCTAssertEqual(model.speechMode,"Realtime diarization")
+  }
+
   func testRealtimePartialAndFinalKeepSessionSpeakerAlias() async throws {
     let model = try await activeModel()
     defer { model.stop() }
     let timestamp = nowMs()
-    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:1,text:"kal milna"),receivedAtMs:timestamp)
-    XCTAssertEqual(model.captionText,"kal milna")
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:1,text:"kal"),receivedAtMs:timestamp)
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:1,text:"kal milna"),receivedAtMs:timestamp+1)
+    XCTAssertEqual(model.captionText,"kal milna","A cumulative partial replaces the prior hypothesis")
     XCTAssertTrue(model.transcript.isEmpty)
     model.applyRealtimeEvent(RealtimeASREvent(type:"speaker.updated",turnId:1,speaker:"P1"),receivedAtMs:timestamp+10)
     XCTAssertEqual(model.captionText,"P1: kal milna")
@@ -728,6 +767,9 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(model.transcript.last?.speaker,"P1")
     XCTAssertEqual(model.transcript.last?.text,"Kal milna thoda mushkil hoga.")
     XCTAssertEqual(model.captionText,"P1: Kal milna thoda mushkil hoga.")
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.final",turnId:1,speaker:"P1",text:"Duplicate."),
+                             receivedAtMs:timestamp+30)
+    XCTAssertEqual(model.transcript.count,1,"A finalized turn is committed only once")
   }
 
   func testDelayedFinalDoesNotOverwriteNewerPartialCaption() async throws {
@@ -740,6 +782,44 @@ final class SessionTests: XCTestCase {
                              receivedAtMs:timestamp+20)
     XCTAssertEqual(model.captionText,"P2: new turn")
     XCTAssertEqual(model.transcript.last?.speaker,"P1")
+  }
+
+  func testPauseClearsRealtimePartialState() async throws {
+    let model = try await activeModel()
+    let timestamp = nowMs()
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:1,speaker:"P1",text:"hello"),receivedAtMs:timestamp)
+    model.pause()
+    XCTAssertNil(model.captionText)
+    XCTAssertTrue(model.transcript.isEmpty)
+    model.phase = .active
+    model.applyRealtimeEvent(RealtimeASREvent(type:"speaker.updated",turnId:1,speaker:"P2"),receivedAtMs:timestamp+10)
+    XCTAssertNil(model.captionText,"A paused session must not retain an old turn hypothesis")
+    model.stop()
+  }
+
+  func testStopResetsRealtimeSpeakerTurnState() async throws {
+    let model = try await activeModel()
+    let timestamp = nowMs()
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:1,speaker:"P1",text:"old"),receivedAtMs:timestamp)
+    model.stop()
+    model.phase = .active
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:1,text:"new"),receivedAtMs:timestamp+10)
+    XCTAssertEqual(model.captionText,"new","A new session cannot inherit an earlier speaker alias")
+    model.stop()
+  }
+
+  func testRealtimeFailureSwitchesToChunkedFallback() async throws {
+    let relay = FakeRealtimeASRTransport()
+    let model = SessionModel(people:PeopleStore(fileURL:nil),
+                             realtimeASRFactory:{ _, _ in relay })
+    model.phase = .active
+    try await model.startRealtimeASR()
+    relay.fail()
+    XCTAssertEqual(model.speechMode,"Chunked fallback")
+    XCTAssertFalse(model.realtimeASRReady)
+    XCTAssertEqual(model.realtimeFallbacks,1)
+    XCTAssertTrue(model.notice.contains("fallback"))
+    model.stop()
   }
 
   func testDisplaySceneModeCanShowSpeakerCaptionWithoutChangingControls() {
@@ -810,5 +890,14 @@ final class SessionTests: XCTestCase {
     XCTAssertFalse(json.contains("localization"))
     XCTAssertFalse(json.contains("नमस्ते"))
     XCTAssertTrue(json.contains("\"speaker\":\"P1\""))
+  }
+
+  func testTranscriptSpeakerRejectsIdentityAndProviderLabels() throws {
+    let identity = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speaker:"Ary")
+    let provider = TranscriptEntry(text:"hello",startMs:1,endMs:2,confidence:nil,speaker:"A")
+    XCTAssertNil(identity.speaker)
+    XCTAssertNil(provider.speaker)
+    let json = try XCTUnwrap(String(data:JSONEncoder().encode(identity),encoding:.utf8))
+    XCTAssertFalse(json.contains("Ary"))
   }
 }

@@ -80,6 +80,18 @@ test('turn assembler replaces cumulative partials and keeps stable session speak
     [{ type: 'speaker.updated', turnId: 3, speaker: 'P1', audioProcessedMs: 620 }]);
 });
 
+test('speaker aliases reset for every realtime session', () => {
+  const first = new DiarizedTurnAssembler();
+  first.consume({ type: 'speechStart', turnId: 1 });
+  assert.equal(first.consume({ type: 'speaker', label: 'provider-a' })[0].speaker, 'P1');
+  first.consume({ type: 'speechStart', turnId: 2 });
+  assert.equal(first.consume({ type: 'speaker', label: 'provider-b' })[0].speaker, 'P2');
+
+  const next = new DiarizedTurnAssembler();
+  next.consume({ type: 'speechStart', turnId: 1 });
+  assert.equal(next.consume({ type: 'speaker', label: 'provider-b' })[0].speaker, 'P1');
+});
+
 test('relay waits for Meta acknowledgement, forwards raw PCM, and never sends the model key to the client', async () => {
   const client = new FakeSocket();
   await runRealtimeSession(client, { apiKey: 'server-secret', WebSocketClass: FakeUpstream, sessionId: 'local-session' });
@@ -97,4 +109,22 @@ test('idle authenticated realtime clients cannot occupy a relay slot indefinitel
   });
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(client.closed?.code, 1008);
+});
+
+test('invalid and oversized client frames close safely without echoing participant content', async () => {
+  const invalid = new FakeSocket();
+  await runRealtimeSession(invalid, { apiKey: 'server-secret', WebSocketClass: FakeUpstream });
+  invalid.emit('message', Buffer.from('{"participant":"private participant words"}'), false);
+  await flush();
+  assert.equal(invalid.closed?.code, 1008);
+  assert.equal(invalid.closed?.reason, 'Realtime transcription unavailable.');
+  assert.equal(JSON.stringify(invalid.closed).includes('private participant words'), false);
+
+  const oversized = new FakeSocket();
+  await runRealtimeSession(oversized, { apiKey: 'server-secret', WebSocketClass: FakeUpstream });
+  oversized.emit('message', Buffer.from(JSON.stringify({ type: 'start' })), false);
+  await flush(); await flush();
+  oversized.emit('message', Buffer.alloc(64 * 1024 + 1), true);
+  assert.equal(oversized.closed?.code, 1009);
+  assert.equal(oversized.closed?.reason, 'Realtime transcription unavailable.');
 });
