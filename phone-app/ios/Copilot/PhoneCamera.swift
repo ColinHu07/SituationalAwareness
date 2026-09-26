@@ -80,7 +80,7 @@ final class PhoneCamera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
 
   func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
     let captured = nowMs()
-    guard captured - lastFrameAt >= 500, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    guard captured - lastFrameAt >= 33, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
     let generation: Int? = state.withLock { s in
       guard s.active, !s.deliveryPending else { return nil }; s.deliveryPending = true; return s.generation
     }

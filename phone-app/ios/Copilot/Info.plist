@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Conversation Copilot</string>
+	<string>Situational Awareness</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Copilot</string>
+	<string>Situational Awareness</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
@@ -66,13 +66,14 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_bonjour._tcp</string>
+		<string>_aside._tcp</string>
 	</array>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>This lets your phone find and connect to your glasses over Wi-Fi.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>With everyone’s consent, transcribe the explicitly selected iPhone or glasses microphone for captions and conversation cues.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>With everyone’s consent, sample the iPhone rear camera for optional conversational context. You can choose audio-only.</string>
+	<string>Sample the iPhone rear camera for optional conversational context. You can choose audio-only.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>This lets your phone find your glasses and the Aside server over Wi-Fi.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Transcribe the explicitly selected iPhone or glasses microphone for captions and conversation cues.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -94,6 +95,10 @@
 	<array>
 		<string>arm64</string>
 	</array>
+	<key>UISupportedExternalAccessoryProtocols</key>
+	<array>
+		<string>com.meta.ar.wearable</string>
+	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -105,9 +110,7 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>UISupportedExternalAccessoryProtocols</key>
-	<array>
-		<string>com.meta.ar.wearable</string>
-	</array>
+	<key>UIUserInterfaceStyle</key>
+	<string>Light</string>
 </dict>
 </plist>

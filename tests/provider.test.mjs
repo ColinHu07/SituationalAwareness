@@ -30,7 +30,7 @@ test('documented Chat Completions request sends actual supplied image and strict
   assert.equal(JSON.parse(parts.find(x => x.type === 'text').text).analysisMode, 'conversation');
   assert.equal(parts.find(x => x.type === 'image_url').image_url.url, input().frame.dataUrl);
   assert.equal(JSON.parse(parts.find(x => x.type === 'text').text).frameCapturedAtMs, input().frame.capturedAtMs);
-  assert.deepEqual(response.result, CUE); assert.equal(response.metrics.simulated, false);
+  assert.deepEqual(response.result, { ...CUE, scene: '' }); assert.equal(response.metrics.simulated, false);
   assert.equal(response.metrics.inputTokens, 1000); assert.equal(response.metrics.cachedTokens, 800);
   assert.equal(response.metrics.outputTokens, 100);
   assert.equal(response.metrics.estimatedCostUsd, (200 * 1.25 + 800 * 0.15 + 100 * 4.25) / 1e6);
@@ -61,7 +61,7 @@ test('surroundings sends real scene and coarse audio context with a separate evi
     assert.equal(body.response_format.json_schema.schema.additionalProperties, false);
     return { ok: true, json: async () => completion(cue) };
   });
-  assert.deepEqual((await provider.cue(scene)).result, cue);
+  assert.deepEqual((await provider.cue(scene)).result, { ...cue, scene: '' });
 });
 
 test('automatic scene analysis accepts a neutral sleeping-room observation without speech or advice', async () => {
@@ -77,7 +77,7 @@ test('automatic scene analysis accepts a neutral sleeping-room observation witho
     assert.match(body.messages[0].content, /low energy or absent speech does not prove the surroundings are quiet/);
     return { ok: true, json: async () => completion(cue) };
   });
-  assert.deepEqual((await provider.cue(scene)).result, cue);
+  assert.deepEqual((await provider.cue(scene)).result, { ...cue, scene: '' });
 });
 
 test('visible resting posture can produce a considerate cue without speech', async () => {
@@ -93,7 +93,7 @@ test('visible resting posture can produce a considerate cue without speech', asy
     assert.match(body.messages[0].content, /If the activity is unclear/);
     return { ok: true, json: async () => completion(cue) };
   });
-  assert.deepEqual((await provider.cue(scene)).result, cue);
+  assert.deepEqual((await provider.cue(scene)).result, { ...cue, scene: '' });
 });
 
 test('conversation provider excludes coarse audio metadata and retains speech-grounded policy', async () => {

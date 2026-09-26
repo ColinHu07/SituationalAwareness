@@ -12,17 +12,54 @@ export const cueSchema = {
     confidence: { type: 'number' },
     type: { type: 'string', enum: ['clarify', 'follow_up', 'reminder', 'respond', 'abstain'] },
     should_display: { type: 'boolean' },
+    scene: { type: 'string' },
   },
-  required: ['cue', 'reason', 'confidence', 'type', 'should_display'],
+  required: ['cue', 'reason', 'confidence', 'type', 'should_display', 'scene'],
 };
 
-export function abstain(reason = 'Insufficient concrete conversational evidence.') {
-  return { cue: '', reason, confidence: 0, type: 'abstain', should_display: false };
+const stringList = { type: 'array', items: { type: 'string' } };
+export const learnSchema = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    people: { type: 'array', items: { type: 'object', additionalProperties: false,
+      properties: { id: { type: 'string' }, facts: stringList, topics: stringList, tags: stringList, groups: stringList },
+      required: ['id', 'facts', 'topics', 'tags', 'groups'] } },
+    groups: { type: 'array', items: { type: 'object', additionalProperties: false,
+      properties: { name: { type: 'string' }, topics: stringList, slang: stringList, style: { type: 'string' } },
+      required: ['name', 'topics', 'slang', 'style'] } },
+  },
+  required: ['people', 'groups'],
+};
+
+// Profile updates are proposals the wearer reviews; trim rather than reject noisy lists.
+export function validateLearn(value, input) {
+  if (!value || typeof value !== 'object' || !Array.isArray(value.people) || !Array.isArray(value.groups))
+    throw new Error('Invalid structured profile response');
+  const clean = (list, max, count = 8) => (Array.isArray(list) ? list : [])
+    .filter(s => typeof s === 'string').map(s => s.trim()).filter(s => s && s.length <= max).slice(0, count);
+  const ids = new Set(input.people.map(p => p.id));
+  const people = value.people.filter(p => p && ids.has(p.id)).map(p => ({
+    id: p.id, facts: clean(p.facts, 160), topics: clean(p.topics, 60), tags: clean(p.tags, 30, 6), groups: clean(p.groups, 40, 4),
+  }));
+  const groups = value.groups.filter(g => g && typeof g.name === 'string' && g.name.trim() && g.name.trim().length <= 40).slice(0, 6)
+    .map(g => ({ name: g.name.trim(), topics: clean(g.topics, 60), slang: clean(g.slang, 80), style: typeof g.style === 'string' ? g.style.trim().slice(0, 200) : '' }));
+  return { people, groups };
+}
+
+export function abstain(reason = 'Insufficient concrete conversational evidence.', scene = '') {
+  return { cue: '', reason, confidence: 0, type: 'abstain', should_display: false, scene };
+}
+
+/** Short lowercase label for the setting ("library", "funeral"), or "" when unclear. */
+export function normalizeScene(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase().replace(/[^a-z0-9 '&-]/g, '').slice(0, 40) : '';
 }
 
 export function validateCue(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).sort().join() !== [...cueSchema.required].sort().join() ||
+      // scene is optional for fixtures and older providers.
+      ![cueSchema.required, cueSchema.required.filter(k => k !== 'scene')].some(keys => Object.keys(value).sort().join() === [...keys].sort().join()) ||
+      (value.scene !== undefined && (typeof value.scene !== 'string' || value.scene.length > 60)) ||
       typeof value.cue !== 'string' || typeof value.reason !== 'string' ||
       typeof value.should_display !== 'boolean' ||
       !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1 ||
@@ -30,13 +67,14 @@ export function validateCue(value) {
       value.cue.length > LIMITS.cueChars || value.cue.trim().split(/\s+/).length > 14) {
     throw new Error('Invalid structured cue response');
   }
-  if (!value.should_display) return abstain(value.reason);
+  const scene = normalizeScene(value.scene);
+  if (!value.should_display) return abstain(value.reason, scene);
   if (!value.cue.trim() || value.type === 'abstain') throw new Error('Inconsistent cue response');
   // This guard is additional defense, not a substitute for model evaluation.
   if (/\b(autis\w*|alzheimer\w*|diagnos\w*|depress\w*|angry|anxious|lying|attracted|emotion|facial expression)\b/i.test(value.cue)) {
-    return abstain('Unsupported personal inference blocked.');
+    return abstain('Unsupported personal inference blocked.', scene);
   }
-  return { ...value, cue: value.cue.trim() };
+  return { ...value, cue: value.cue.trim(), scene };
 }
 
 export function boundedTranscript(items, now = Date.now()) {

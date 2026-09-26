@@ -7,42 +7,7 @@ struct TranscriptEntry: Codable, Identifiable {
   let startMs: Double
   let endMs: Double
   let confidence: Double?
-  let speaker: String?
-  var localization: LocalizationResult? = nil
-  init(text: String, startMs: Double, endMs: Double, confidence: Double?, speaker: String? = nil) {
-    self.text = text; self.startMs = startMs; self.endMs = endMs
-    self.confidence = confidence; self.speaker = speaker
-  }
-  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence, speaker }
-}
-struct LocalizationContextTurn: Encodable, Sendable {
-  let text: String
-  let speaker: String?
-}
-struct LocalizationRequest: Encodable, Sendable {
-  let text: String
-  let speaker: String?
-  let targetLanguage: String
-  let context: [LocalizationContextTurn]
-}
-struct LocalizationResult: Decodable, Equatable, Sendable {
-  let sourceLanguage: String
-  let targetLanguage: String
-  let translation: String
-  let literalMeaning: String
-  let pragmaticNote: String
-  let confidence: Double
-  let changedForPragmatics: Bool
-}
-struct LocalizationResponse: Decodable, Sendable {
-  struct Metrics: Decodable, Sendable {
-    let apiMs: Double?
-    let inputTokens: Int?
-    let outputTokens: Int?
-    let estimatedCostUsd: Double?
-  }
-  let result: LocalizationResult
-  let metrics: Metrics?
+  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence }
 }
 struct SampledFrame: Codable { let dataUrl: String; let capturedAtMs: Double }
 struct AudioContext: Encodable, Sendable {
@@ -59,8 +24,15 @@ struct CueRequest: Encodable {
   let manual: Bool
   var analysisMode = "conversation"
   var audioContext: AudioContext? = nil
+  var people: [PersonContext] = []
+  var groups: [GroupContext] = []
+  var currentScene = ""
 }
-struct CueResult: Decodable { let cue: String; let reason: String; let confidence: Double; let type: String; let should_display: Bool }
+struct CueResult: Decodable {
+  let cue: String; let reason: String; let confidence: Double; let type: String; let should_display: Bool
+  /// Where the wearer seems to be ("library", "funeral"), or "" when unclear.
+  var scene: String? = nil
+}
 struct CueResponse: Decodable {
   struct Metrics: Decodable { let apiMs: Double?; let inputTokens: Int?; let outputTokens: Int?; let estimatedCostUsd: Double? }
   let result: CueResult
@@ -74,9 +46,16 @@ struct AudioChunk: Encodable, Sendable {
   let endedAtMs: Double
 }
 struct TranscriptionResponse: Decodable { let text: String; let confidence: Double?; let transcriptionMs: Double?; let estimatedCostUsd: Double? }
-struct HealthResponse: Decodable { let modelMode: String? }
+struct HealthResponse: Decodable { let modelMode: String?; let tokenValid: Bool? }
 struct CopilotError: LocalizedError { let message: String; var errorDescription: String? { message } }
 func nowMs() -> Double { Date().timeIntervalSince1970 * 1000 }
+/// Plain HTTP is allowed only to this device or the local network (e.g. a Mac on the same Wi-Fi).
+func isLocalNetworkHost(_ host: String) -> Bool {
+  if ["localhost", "127.0.0.1", "::1"].contains(host) || host.hasSuffix(".local") { return true }
+  let parts = host.split(separator:".").compactMap { Int($0) }
+  guard parts.count == 4, host.split(separator:".").count == 4 else { return false }
+  return parts[0] == 10 || (parts[0] == 192 && parts[1] == 168) || (parts[0] == 172 && (16...31).contains(parts[1])) || (parts[0] == 169 && parts[1] == 254)
+}
 
 struct APIClient {
   let endpoint: String
@@ -92,20 +71,28 @@ struct APIClient {
   private func url(_ path: String) throws -> URL {
     guard let base = URL(string: endpoint), let host = base.host,
           base.user == nil, base.password == nil,
-          base.scheme == "https" || (base.scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(host))
-    else { throw CopilotError(message: "Use your trusted HTTPS proxy URL. HTTP is allowed only on simulator localhost.") }
+          base.scheme == "https" || (base.scheme == "http" && isLocalNetworkHost(host))
+    else { throw CopilotError(message: "Use an HTTPS server URL, or http:// with a local network address.") }
     return base.appendingPathComponent(path)
   }
+  // Learning reads a whole conversation, so it gets a longer overall limit than live cues.
+  private static let learnSession: URLSession = {
+    let config = URLSessionConfiguration.ephemeral
+    config.timeoutIntervalForRequest = 40
+    config.timeoutIntervalForResource = 45
+    config.urlCache = nil
+    return URLSession(configuration: config)
+  }()
   func post<Input: Encodable, Output: Decodable>(_ path: String, _ value: Input) async throws -> (Output, Int) {
     var request = URLRequest(url: try url(path))
     if path == "api/cue" { request.timeoutInterval = 20 }
-    else if path == "api/localize" { request.timeoutInterval = 12 }
+    if path == "api/learn" { request.timeoutInterval = 40 }
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     request.httpBody = try JSONEncoder().encode(value)
     let bytes = request.httpBody?.count ?? 0
-    let (data, response) = try await Self.session.data(for: request)
+    let (data, response) = try await (path == "api/learn" ? Self.learnSession : Self.session).data(for: request)
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
       throw CopilotError(message: "Proxy request failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)). Check the server configuration; session remains under your control.")
     }
@@ -113,6 +100,7 @@ struct APIClient {
   }
   func health() async throws -> HealthResponse {
     var request = URLRequest(url: try url("api/health"))
+    request.timeoutInterval = 4
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     let (data, response) = try await Self.session.data(for: request)
     guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw CopilotError(message: "Proxy health check failed.") }

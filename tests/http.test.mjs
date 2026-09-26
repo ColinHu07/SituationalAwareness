@@ -141,13 +141,13 @@ test('provider timeout and rate limit are distinguishable for client recovery', 
 });
 
 test('server concurrency is bounded and overflow is dropped without queuing', async t => {
-  const gates = [deferred(), deferred()], started = deferred(); let calls = 0;
-  const server = await serverFor(t, { mode: 'mock', cue: () => { const index = calls++; if (calls === 2) started.resolve(); return gates[index].promise; } });
-  const first = server.post(input(Date.now())), second = server.post(input(Date.now()));
+  const gates = [deferred(), deferred(), deferred(), deferred()], started = deferred(); let calls = 0;
+  const server = await serverFor(t, { mode: 'mock', cue: () => { const index = calls++; if (calls === 4) started.resolve(); return gates[index].promise; } });
+  const pending = gates.map(() => server.post(input(Date.now())));
   await started.promise;
-  assert.equal((await server.post(input(Date.now()))).status, 429); assert.equal(calls, 2);
+  assert.equal((await server.post(input(Date.now()))).status, 429); assert.equal(calls, 4);
   for (const gate of gates) gate.resolve(providerResult);
-  assert.equal((await first).status, 200); assert.equal((await second).status, 200);
+  for (const response of pending) assert.equal((await response).status, 200);
 });
 
 test('client disconnect propagates cancellation to provider work', async t => {
@@ -177,4 +177,22 @@ test('mock end-to-end flow displays a cue then clears it on subject change and p
   session.append('Let us talk about lunch instead.'); assert.equal(session.cue, null);
   session.dismiss(); session.pause(); assert.equal(session.state, 'paused'); assert.equal(session.cue, null);
   assert.deepEqual(session.transcript, []);
+});
+
+test('learn route validates a finished conversation and returns profile proposals', async t => {
+  const server = await serverFor(t), now = Date.now();
+  const body = { transcript: [{ text: 'Jake, I love fantasy football', startMs: now - 5000, endMs: now - 3000 }],
+    people: [{ id: 'p1', name: 'Jake', groups: [], tags: [], topics: [], notes: [] }], groups: [] };
+  const response = await server.post(body, { path: '/api/learn' }), result = await response.json();
+  assert.equal(response.status, 200);
+  assert.deepEqual(result.result.people[0].facts, ['Jake, I love fantasy football']);
+  assert.equal((await server.post({ ...body, people: [] }, { path: '/api/learn' })).status, 400);
+});
+
+test('health reports whether a supplied proxy token is valid', async t => {
+  const server = await serverFor(t, createProvider({ MODEL_MODE: 'mock' }), { COPILOT_PROXY_TOKEN: TOKEN });
+  const check = async auth => (await (await fetch(`${server.url}/api/health`, { headers: auth ? { Authorization: auth } : {} })).json()).tokenValid;
+  assert.equal(await check(`Bearer ${TOKEN}`), true);
+  assert.equal(await check('Bearer wrong'), false);
+  assert.equal(await check(null), undefined);
 });
