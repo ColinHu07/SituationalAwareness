@@ -294,8 +294,9 @@ struct ContentView: View {
             LabeledContent("Match distance ≤ \(String(format:"%.2f",model.faceThreshold))") {
               Slider(value:$model.faceThreshold,in:0.5...1.1,step:0.01)
             }
+            Toggle("Save stills from video",isOn:$model.saveFaceStills)
           }
-          Text("Add face photos in People. Matching runs on this iPhone; unmatched faces are discarded. Two face matches within 10 seconds, or one plus their name spoken within 30 seconds, adds someone to Who's here. A name alone only suggests them. Introductions like \"my name is Priya\" or \"this is my friend Dev\" add a new person automatically. If exactly one unrecognized face is in view right after their name is heard, it is offered for their profile in the review when you stop; faces of people never named are not kept. Lower the distance if strangers match; raise it if friends are missed. FaceNet distances are not confidence percentages. Similar-looking or unclear faces remain unknown. Thresholds need testing with your camera and enrolled friends.").font(.caption)
+          Text("Matching runs on this iPhone. Confident, new-looking stills of friends who are here are saved to their photos automatically (up to 3 per conversation). Saying a new name to someone (\"Hey Marcus\") while one unknown face is in view adds them as a new friend. Lower the distance if strangers match; raise it if friends are missed.").font(.caption)
         }
         Section("Provisional cue rules") {
           Text(model.sceneOnly ? "Muse checks every 4 seconds (15 in reduced-power mode). Recommendations stay until the next result. Pause and Stop clear captured context." : "Surroundings checks submit a frame ≤10 seconds old or recognized speech ≤15 seconds old, with 1.5 seconds after the last recognized speech. Scene results expire when their image is 20 seconds old. Each check also sends up to 8 one-sentence summaries of earlier moments. A cue stays until replaced, at least 5 seconds; an unchanged cue is not redrawn. Cue confidence ≥0.6. Dismiss pauses automatic checks for 10 seconds.").font(.caption)

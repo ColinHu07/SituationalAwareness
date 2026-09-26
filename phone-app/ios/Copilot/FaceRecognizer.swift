@@ -9,6 +9,9 @@ struct FaceSample: Codable, Identifiable, Hashable {
   var thumbnail: Data
   var embedding: [Float]? = nil
   var modelID: String? = nil
+  /// Set when saved automatically from live video; nil for photos the wearer added.
+  var capturedAt: Date? = nil
+  var fromVideo: Bool { capturedAt != nil }
   var isCompatible: Bool { modelID == FaceEmbedding.modelID && embedding.flatMap(FaceEmbedding.normalized) != nil }
 }
 
@@ -105,6 +108,33 @@ enum FaceRecognizer {
         throw CopilotError(message:"This face also matches \(other.name). Check the selected profile before adding it.")
       }
     }
+  }
+
+  // MARK: Stills saved from live video
+
+  /// Only confident matches are saved, so a lookalike can't slowly take over a profile.
+  static let stillMaxDistance: Float = 0.70
+  /// A still must differ this much from every saved photo of the person (new angle or lighting).
+  static let stillMinNovelty: Float = 0.30
+  static let stillMinArea: CGFloat = 120 * 120
+  static let maxUploadedFaces = 8
+  static let maxVideoFaces = 12
+
+  /// A still worth adding to this person's photos, or nil when it is too uncertain, too small,
+  /// a near-duplicate of a saved photo, or also resembles someone else.
+  static func stillWorthKeeping(_ face: DetectedFace, personID: UUID, distance: Float, people: [Person]) -> FaceSample? {
+    guard distance <= stillMaxDistance, face.area >= stillMinArea,
+          let person = people.first(where: { $0.id == personID }) else { return nil }
+    let saved = person.faces.compactMap { $0.isCompatible ? $0.embedding : nil }
+    guard saved.allSatisfy({ FaceEmbedding.distance(face.embedding, $0).map { $0 >= stillMinNovelty } ?? false }),
+          var sample = sample(from:face) else { return nil }
+    sample.capturedAt = Date()
+    guard (try? validateEnrollment(sample, personID:personID, people:people)) != nil else { return nil }
+    return sample
+  }
+  /// Uploaded photos (up to 8) are always kept; video stills keep the newest 12.
+  static func trimmed(_ faces: [FaceSample]) -> [FaceSample] {
+    Array(faces.filter { !$0.fromVideo }.suffix(maxUploadedFaces)) + Array(faces.filter(\.fromVideo).suffix(maxVideoFaces))
   }
 
   static func sample(from face: DetectedFace) -> FaceSample? {
@@ -259,6 +289,34 @@ struct PresenceTracker {
   private static let notNames: Set<String> = ["i", "the", "here", "there", "so", "just", "really", "sorry", "fine", "good", "great", "not",
     "going", "glad", "happy", "sure", "okay", "ok", "back", "done", "ready", "home", "right", "well", "actually", "very", "what", "that",
     "it", "is", "a", "an", "my", "your", "our", "his", "her", "their", "everyone", "everybody", "you", "all", "also", "still"]
+
+  /// Names said *to* someone: "Hey Marcus", "Marcus, did you…", "Thanks, Marcus", "See you later, Lena".
+  /// A name only talked about ("Did Marcus text you?") is not included: that person may not be here.
+  static func addressedNames(in text: String) -> [String] {
+    let name = #"(\p{Lu}[\p{Ll}'-]{1,20})"#
+    let greeting = #"(?i:hey|hi|hello|yo|sup|thanks|thank you|bye|morning|good morning|good to see you|see you|see ya|what's up|how are you)"#
+    let patterns = [
+      #"\b"# + greeting + #",?\s+"# + name + #"\b"#,                              // (oh) hey Marcus / Thanks, Marcus
+      #"(?:^|[.!?]\s+)"# + name + #"\s*,"#,                                       // Marcus, did you finish?
+      #",\s*"# + name + #"\s*[.!?]?\s*$"#,                                       // …see you later, Lena.
+    ]
+    var found: [String] = []
+    for pattern in patterns {
+      guard let regex = try? NSRegularExpression(pattern:pattern) else { continue }
+      for match in regex.matches(in:text, range:NSRange(text.startIndex..., in:text)) {
+        guard let range = Range(match.range(at:1), in:text) else { continue }
+        let candidate = String(text[range])
+        if !notNames.contains(candidate.lowercased()), !notAddressees.contains(candidate.lowercased()), !found.contains(candidate) { found.append(candidate) }
+      }
+    }
+    return found
+  }
+  /// Capitalized words people use to address someone that are not names.
+  private static let notAddressees: Set<String> = ["guys", "man", "dude", "bro", "bud", "buddy", "team", "folks", "sir", "ma'am", "madam",
+    "babe", "honey", "mom", "dad", "mum", "god", "siri", "alexa", "google", "yes", "no", "yeah", "yep", "nope", "well", "okay", "anyway",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "today", "tomorrow", "tonight", "and", "but", "or",
+    "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december", "then",
+    "look", "listen", "wait", "please", "hey", "hi", "hello", "thanks", "bye", "oh", "um", "uh", "like", "because", "if", "when", "which"]
 
   /// Saved people whose first or full name appears as a whole, capitalized word in this speech.
   /// Capitalization is required (ASR capitalizes names) so "will" or "mark my words" don't add Will or Mark.

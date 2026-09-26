@@ -103,6 +103,21 @@ final class SessionModel {
   /// In-memory face seen while a just-introduced person had no enrolled face. Proposed at Stop; never saved unless approved.
   struct FaceCandidate { var sample: FaceSample; var embedding: [Float]; var area: CGFloat; var sightings: Int }
   private(set) var faceCandidates: [UUID: FaceCandidate] = [:]
+  /// Save new stills of recognized friends from live video to improve matching.
+  var saveFaceStills = true
+  /// Stills saved during this conversation, shown on the live screen.
+  private(set) var stillsSaved = 0
+  @ObservationIgnored private var lastStillAt: [UUID: Double] = [:]
+  @ObservationIgnored private var stillsThisSession: [UUID: Int] = [:]
+  static let stillIntervalMs = 20_000.0
+  /// An unrecognized face seen during this conversation. Held in memory only; saved only once linked to a name.
+  struct UnknownFace { var embedding: [Float]; var sample: FaceSample; var area: CGFloat; var sightings: Int; var lastSeen: Double }
+  @ObservationIgnored private var unknownFaces: [UnknownFace] = []
+  /// Names said to someone who isn't saved yet, waiting for an unambiguous face.
+  @ObservationIgnored private var pendingNames: [(name: String, at: Double)] = []
+  static let unknownFaceMemoryMs = 60_000.0
+  static let nameFaceWindowMs = 15_000.0
+  static let maxStillsPerSession = 3
   @ObservationIgnored lazy var glasses = GlassesController()
   @ObservationIgnored private let phoneCamera = PhoneCamera()
   @ObservationIgnored private let microphone = ConversationMicrophone()
@@ -439,6 +454,7 @@ final class SessionModel {
     learn(from:log)
     // Who's here is per conversation; the next session starts from scratch.
     faceTask?.cancel(); faceTask = nil; faceReadout = nil; faceCandidates = [:]
+    lastStillAt = [:]; stillsThisSession = [:]; stillsSaved = 0; unknownFaces = []; pendingNames = []
     presence.reset(); presentIDs = []
   }
   private func learn(from log: [TranscriptEntry]) {
@@ -493,23 +509,24 @@ final class SessionModel {
     guard recognizeFaces, phase == .active, faceTask == nil, time - lastFaceCheckAt >= 1000 else { return }
     let enrolled = people.people
     if faceGallery.key != FaceGallery.key(for:enrolled) { faceGallery = FaceGallery(people:enrolled) }
-    guard !faceGallery.isEmpty || presentPeople.contains(where: { $0.faces.isEmpty }) else {
-      faceReadout = enrolled.contains(where: { !$0.faces.isEmpty }) ? "Add new face photos in People to enable FaceNet" : "Add face photos in People"
-      return
-    }
+    // Runs even with no saved faces: unknown faces can become new friends when named.
     lastFaceCheckAt = time
     let gallery = faceGallery, thisEpoch = epoch, threshold = Float(faceThreshold)
     faceTask = Task { [weak self] in
-      let result = await Task.detached(priority:.utility) { () -> (matches: [FaceMatch], unmatched: [FaceRecognizer.DetectedFace], error: String?) in
+      let result = await Task.detached(priority:.utility) { () -> (matches: [FaceMatch], unmatched: [FaceRecognizer.DetectedFace], matched: [(FaceMatch, FaceRecognizer.DetectedFace)], error: String?) in
         do {
           let faces = try FaceRecognizer.faces(in:image)
           let matches = FaceRecognizer.match(faces, gallery:gallery, threshold:threshold)
+          // Pair each unambiguous match with its face so confident ones can be saved as stills.
+          let matched = faces.compactMap { face in
+            FaceRecognizer.match([face], gallery:gallery, threshold:threshold).first.flatMap { matches.contains($0) ? ($0, face) : nil }
+          }
           // Ambiguous near-matches must never become new enrollment candidates.
           let unmatched = faces.filter { face in
             FaceRecognizer.rank(face, gallery:gallery).first.map { $0.distance > threshold + FaceRecognizer.ambiguityMargin } ?? true
           }
-          return (matches, unmatched, nil)
-        } catch { return ([], [], error.localizedDescription) }
+          return (matches, unmatched, matched, nil)
+        } catch { return ([], [], [], error.localizedDescription) }
       }.value
       guard let self, !Task.isCancelled else { return }
       faceTask = nil
@@ -521,7 +538,21 @@ final class SessionModel {
         return "\(name) · distance \(String(format:"%.2f", match.distance))"
       }.joined(separator:" · ")
       applyFaceMatches(result.matches.map(\.personID), at:time)
+      saveStills(result.matched, at:time)
       considerFaceCandidate(result.unmatched, at:time)
+      trackUnknownFaces(result.unmatched, at:time)
+    }
+  }
+  /// Adds confident, new-looking stills of friends who are confirmed here to their photos.
+  func saveStills(_ matched: [(FaceMatch, FaceRecognizer.DetectedFace)], at time: Double) {
+    guard saveFaceStills else { return }
+    for (match, face) in matched where presentIDs.contains(match.personID) {
+      let id = match.personID
+      guard time - (lastStillAt[id] ?? -.infinity) >= Self.stillIntervalMs,
+            (stillsThisSession[id] ?? 0) < Self.maxStillsPerSession,
+            let sample = FaceRecognizer.stillWorthKeeping(face, personID:id, distance:match.distance, people:people.people) else { continue }
+      people.addFace(sample, to:id)
+      lastStillAt[id] = time; stillsThisSession[id, default:0] += 1; stillsSaved += 1
     }
   }
   /// Links an unrecognized face to someone only when it is unambiguous: exactly one unmatched face
@@ -540,6 +571,13 @@ final class SessionModel {
     } else if let sample = FaceRecognizer.sample(from:face) {
       faceCandidates[id] = FaceCandidate(sample:sample, embedding:face.embedding, area:face.area, sightings:1)
     }
+    // Two consistent sightings: save right away so they're recognized later in this conversation.
+    if saveFaceStills, var candidate = faceCandidates[id], candidate.sightings >= 2 {
+      candidate.sample.capturedAt = Date()
+      guard (try? FaceRecognizer.validateEnrollment(candidate.sample, personID:id, people:people.people)) != nil else { return }
+      people.addFace(candidate.sample, to:id)
+      faceCandidates[id] = nil; lastStillAt[id] = time; stillsThisSession[id, default:0] += 1; stillsSaved += 1
+    }
   }
   func applyFaceMatches(_ ids: [UUID], at time: Double) { _ = presence.recordFaces(ids, at:time); syncPresence() }
   func noteNames(in entry: TranscriptEntry) {
@@ -555,6 +593,54 @@ final class SessionModel {
     }
     let ids = PresenceTracker.mentionedPeople(in:entry.text, people:people.people)
     _ = presence.recordNames(ids, at:entry.endMs)
+    // A name said to someone new: wait for the one unknown face it belongs to.
+    for name in PresenceTracker.addressedNames(in:entry.text) where person(named:name) == nil {
+      pendingNames.removeAll { $0.name == name }
+      pendingNames.append((name, entry.endMs))
+    }
+    linkNamesToFaces(at:entry.endMs)
+    syncPresence()
+  }
+  private func person(named name: String) -> Person? {
+    people.people.first { person in
+      person.name.caseInsensitiveCompare(name) == .orderedSame
+        || person.name.split(separator:" ").first.map { $0.caseInsensitiveCompare(name) == .orderedSame } == true
+    }
+  }
+  /// Groups unrecognized faces across frames so one stranger counts as one face.
+  func trackUnknownFaces(_ unmatched: [FaceRecognizer.DetectedFace], at time: Double) {
+    unknownFaces.removeAll { time - $0.lastSeen > Self.unknownFaceMemoryMs }
+    for face in unmatched {
+      if let index = unknownFaces.firstIndex(where: { FaceEmbedding.distance(face.embedding, $0.embedding).map { $0 <= Float(faceThreshold) } ?? false }) {
+        unknownFaces[index].sightings += 1; unknownFaces[index].lastSeen = time
+        if face.area > unknownFaces[index].area, let sample = FaceRecognizer.sample(from:face) {
+          unknownFaces[index].sample = sample; unknownFaces[index].embedding = face.embedding; unknownFaces[index].area = face.area
+        }
+      } else if let sample = FaceRecognizer.sample(from:face) {
+        unknownFaces.append(UnknownFace(embedding:face.embedding, sample:sample, area:face.area, sightings:1, lastSeen:time))
+      }
+    }
+    linkNamesToFaces(at:time)
+  }
+  /// Creates a new friend when a name said to someone new lines up with exactly one unknown face
+  /// (seen at least twice) within 15 seconds, and no other unknown face or new name competes.
+  private func linkNamesToFaces(at time: Double) {
+    guard saveFaceStills, phase == .active else { return }
+    pendingNames.removeAll { time - $0.at > Self.nameFaceWindowMs }
+    guard pendingNames.count == 1, let pending = pendingNames.first else { return }
+    let nearby = unknownFaces.filter { abs($0.lastSeen - pending.at) <= Self.nameFaceWindowMs }
+    guard nearby.count == 1, let face = nearby.first, face.sightings >= 2, person(named:pending.name) == nil else { return }
+    var sample = face.sample
+    sample.capturedAt = Date()
+    guard let id = people.addPerson(pending.name) else { return }
+    guard (try? FaceRecognizer.validateEnrollment(sample, personID:id, people:people.people)) != nil else {
+      people.people.removeAll { $0.id == id }; pendingNames = []; return // looks like someone already saved
+    }
+    people.addFace(sample, to:id)
+    pendingNames = []
+    unknownFaces.removeAll { $0.embedding == face.embedding }
+    presence.introduce(id, at:time)
+    notice = "Met \(pending.name)."
     syncPresence()
   }
   // MARK: Tone check — coaching on the wearer's own words
