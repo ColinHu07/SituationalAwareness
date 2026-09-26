@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
   @Bindable var model: SessionModel
   @State private var showSettings = false
+  @State private var showCamera = false
   private let ink = Color(red:0.05,green:0.14,blue:0.15)
   private let mint = Color(red:0.78,green:0.94,blue:0.83)
   var body: some View {
@@ -131,6 +132,10 @@ struct ContentView: View {
         .toolbar { ToolbarItem(placement:.topBarTrailing) { Button("Settings",systemImage:"slider.horizontal.3") { showSettings = true } } }
         .sheet(isPresented:$showSettings) { settings }
     }.tint(ink)
+      .fullScreenCover(isPresented:$showCamera) { PhoneCaptureView(model:model) }
+      .onChange(of:model.phase) { _, phase in
+        if phase == .starting && model.captureMode == .phone { showCamera = true }
+      }
   }
   @ViewBuilder private func metric(_ name:String,_ value:String) -> some View { GridRow { Text(name).foregroundStyle(.secondary); Text(value).monospacedDigit() } }
   private var simulation: some View {
@@ -155,7 +160,9 @@ struct ContentView: View {
     }
   }
   private var phone: some View {
-    DisclosureGroup("iPhone camera preview") {
+    VStack(alignment:.leading, spacing:12) {
+      if model.phase == .active { Button("Open camera view") { showCamera = true } }
+      Text("iPhone camera preview").font(.headline)
       if let image = model.phonePreview {
         Image(uiImage:image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius:14))
         Text("Rear camera · \(model.phoneFramesReceived) received frames. Only occasional samples are sent for suggestions.").font(.caption)
