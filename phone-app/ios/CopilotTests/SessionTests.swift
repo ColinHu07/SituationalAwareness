@@ -6,6 +6,36 @@ import MWDATCore
 
 @MainActor
 final class SessionTests: XCTestCase {
+  func testStartupFailureKeepsDisplayAndAllowsRetry() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    model.consent = true
+    model.phase = .starting
+    model.glasses.displayReady = true
+    model.captureFailed("Camera permission denied")
+    XCTAssertEqual(model.phase,.paused)
+    XCTAssertTrue(model.canStart)
+    XCTAssertTrue(model.consent)
+    XCTAssertTrue(model.glasses.displayReady)
+    XCTAssertEqual(model.notice,"Camera permission denied")
+    XCTAssertEqual(model.glasses.requestedScreen?.mode,.paused)
+    XCTAssertEqual(model.glasses.requestedScreen?.labels,["Resume","Stop","Close"])
+    XCTAssertEqual(model.glasses.requestedScreen?.status,"Capture paused. Check phone, then Resume.")
+    XCTAssertNil(model.latestFrame)
+    XCTAssertNil(model.latestAudioContext)
+    // A late failure cannot replace the original actionable error after pause.
+    model.captureFailed("Late transport error")
+    XCTAssertEqual(model.notice,"Camera permission denied")
+    model.stop()
+  }
+
+  func testRecoveryMessageDoesNotLeakIntoNextStream() {
+    let screen = GlassesScreen(cue:nil,caption:nil,note:nil,paused:false,
+      captionsEnabled:true,ready:false,starting:false,testOnly:false,status:"Previous failure")
+    XCTAssertNil(screen.status)
+    XCTAssertEqual(screen.title,"Streaming")
+  }
+
   func testQuietGlassesPCMStillReachesTranscription() throws {
     let microphone = ConversationMicrophone()
     let chunks = OSAllocatedUnfairLock(initialState:[AudioChunk]())

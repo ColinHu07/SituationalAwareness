@@ -10,10 +10,12 @@ struct GlassesScreen: Equatable, Sendable {
   let detail: String?
   let testOnly: Bool
   let feedback: String?
+  let status: String?
   init(cue: String?, caption: String?, note: String?, paused: Bool,
-       captionsEnabled: Bool, ready: Bool, starting: Bool, testOnly: Bool, feedback: String? = nil) {
+       captionsEnabled: Bool, ready: Bool, starting: Bool, testOnly: Bool, feedback: String? = nil, status: String? = nil) {
     mode = starting ? .starting : paused ? (ready ? .ready : .paused) : .streaming
     self.testOnly = testOnly
+    self.status = mode == .paused ? status.map { String($0.prefix(80)) } : nil
     self.feedback = mode == .streaming ? feedback.map { String($0.prefix(64)) } : nil
     self.cue = mode == .streaming ? cue.map { String($0.prefix(90)) } : nil
     if mode == .streaming && captionsEnabled {
@@ -61,7 +63,7 @@ extension GlassesController {
             starting: Bool = false, testOnly: Bool = false, feedback: String? = nil) {
     guard displayReady else { return }
     let screen = GlassesScreen(cue:cue, caption:caption, note:note, paused:paused,
-      captionsEnabled:captionsEnabled, ready:ready, starting:starting, testOnly:testOnly, feedback:feedback)
+      captionsEnabled:captionsEnabled, ready:ready, starting:starting, testOnly:testOnly, feedback:feedback, status:status)
     guard screen != requestedScreen else { return }
     requestedScreen = screen
     displayRevision += 1
@@ -80,7 +82,7 @@ extension GlassesController {
             Text("Cue: " + cue, style:screen.detail == nil ? .body : .meta)
           }
           if screen.cue == nil && screen.detail == nil {
-            Text(screen.mode == .ready ? "Select Start to stream." : screen.mode == .paused ? "Select Resume when ready." : screen.mode == .starting ? "Connecting camera and audio." : "Say a sentence, then Analyze.", style:.body)
+            Text(screen.status ?? (screen.mode == .ready ? "Select Start to stream." : screen.mode == .paused ? "Select Resume when ready." : screen.mode == .starting ? "Connecting camera and audio." : "Say a sentence, then Analyze."), style:.body)
           }
           // At most three short labels; never append Dismiss and widen the row.
           ButtonGroup {

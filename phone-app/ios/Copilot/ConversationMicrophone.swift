@@ -23,6 +23,7 @@ final class ConversationMicrophone: @unchecked Sendable {
   private var selectedUID = ""
   private var selectedPortType: AVAudioSession.Port = .bluetoothHFP
   private var tapInstalled = false
+  private var ownsAudioSession = false
   var onChunk: (@Sendable (AudioChunk) -> Void)?
   var onVoice: (@Sendable (Double) -> Void)?
   var onContext: (@Sendable (AudioContext) -> Void)?
@@ -71,6 +72,7 @@ final class ConversationMicrophone: @unchecked Sendable {
     let session = AVAudioSession.sharedInstance()
     try session.setCategory(.playAndRecord, mode:.videoRecording, options:portType == .bluetoothHFP ? [.allowBluetoothHFP] : [.defaultToSpeaker])
     try session.setActive(true)
+    ownsAudioSession = true
     guard let port = session.availableInputs?.first(where: { $0.portType == portType && (requestedUID == nil || $0.uid == requestedUID) }) else {
       try? session.setActive(false)
       throw CopilotError(message:"Selected microphone unavailable. No other microphone was substituted.")
@@ -176,7 +178,12 @@ final class ConversationMicrophone: @unchecked Sendable {
     engine.stop()
     if tapInstalled { engine.inputNode.removeTap(onBus:0); tapInstalled = false }
     observers.forEach(NotificationCenter.default.removeObserver); observers.removeAll()
-    try? AVAudioSession.sharedInstance().setActive(false, options:.notifyOthersOnDeactivation)
+    // DAT owns ambient audio. Pausing its PCM consumer must not deactivate
+    // the shared audio session underneath the still-connected glasses SDK.
+    if ownsAudioSession {
+      try? AVAudioSession.sharedInstance().setActive(false, options:.notifyOthersOnDeactivation)
+      ownsAudioSession = false
+    }
   }
 
   static func wav(_ samples: [Int16]) -> Data {

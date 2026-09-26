@@ -263,7 +263,7 @@ final class GlassesController {
       }
     })
     cameraTokens.append(camera.stream.errorPublisher.listen { [weak self] error in
-      Task { @MainActor in guard self?.sessionRevision == revision, self?.cameraRevision == captureRevision else { return }; self?.fail(error.localizedDescription) }
+      Task { @MainActor in guard self?.sessionRevision == revision, self?.cameraRevision == captureRevision else { return }; self?.fail("Camera error: \(String(describing:error)). \(error.localizedDescription)") }
     })
     let decoder = VideoFrameDecoder()
     let frameGate = self.frameGate
@@ -301,9 +301,12 @@ final class GlassesController {
     while !clock.hasVideo || (withDisplay && (!displayReady || !clock.hasAudio)) || camera.stream.state != .streaming {
       try await Task.sleep(for:.milliseconds(100))
       guard Date() < streamDeadline, sessionRevision == revision, cameraRevision == captureRevision else {
-        throw CopilotError(message:withDisplay
-          ? "Decoded camera frames, ambient audio or display not ready. Check DAT 1.0 audio permission and development/beta access. No conversation data has been sent."
-          : "No decoded camera frames received. Check the glasses connection. No conversation data has been sent.")
+        var missing: [String] = []
+        if !clock.hasVideo { missing.append("decoded camera frames") }
+        if withDisplay && !clock.hasAudio { missing.append("ambient audio") }
+        if withDisplay && !displayReady { missing.append("display connection") }
+        if camera.stream.state != .streaming { missing.append("camera streaming (\(camera.stream.state))") }
+        throw CopilotError(message:"Capture timed out waiting for \(missing.joined(separator:", ")). Check Meta AI permissions and the glasses connection, then Resume. No conversation data has been sent.")
       }
     }
   }

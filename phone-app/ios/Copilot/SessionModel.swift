@@ -96,7 +96,7 @@ final class SessionModel {
       guard let self, self.phase == .active, self.captureMode == .phone else { return }
       self.phonePreview = image; self.phoneFramesReceived += 1; self.sample(image, at:time)
     }
-    phoneCamera.onFailure = { [weak self] message in self?.pause(message) }
+    phoneCamera.onFailure = { [weak self] message in self?.captureFailed(message) }
     microphone.onVoice = { [weak self] timestamp in Task { @MainActor in
       guard let self, self.phase == .active, timestamp >= self.captureStartedAt else { return }
       // Ambient energy includes fans/music/crowds. Only recognized speech should
@@ -110,11 +110,11 @@ final class SessionModel {
       guard let self, self.phase == .active, context.capturedAtMs >= self.captureStartedAt else { return }
       self.latestAudioContext = context
     } }
-    microphone.onFailure = { [weak self] message in Task { @MainActor in self?.pause(message) } }
+    microphone.onFailure = { [weak self] message in Task { @MainActor in self?.captureFailed(message) } }
   }
   private func configureGlassesCallbacks() {
     glasses.onFrame = { [weak self] image, time in self?.sample(image, at:time) }
-    glasses.onFailure = { [weak self] message in self?.pause(message) }
+    glasses.onFailure = { [weak self] message in self?.captureFailed(message) }
     glasses.onHelp = { [weak self] in
       guard let self else { return }
       if self.connectionTestOnly { self.manualDisplayTest() }
@@ -219,7 +219,7 @@ final class SessionModel {
           modelMode = health.modelMode ?? "Unknown"
           guard modelMode == "live" else { throw CopilotError(message:"Real transcription needs a live Muse proxy. Configure your server, or enable Capture test only for a no-upload hardware check.") }
         } catch {
-          if epoch == thisEpoch, !Task.isCancelled { phase = .paused; openingGlassesControls = false; notice = error.localizedDescription }
+          if epoch == thisEpoch, !Task.isCancelled { captureFailed(error.localizedDescription) }
           return
         }
         }
@@ -247,12 +247,8 @@ final class SessionModel {
         } catch {
           guard epoch == thisEpoch else { return }
           let needsGlassesUpdate = captureMode.needsGlasses && GlassesController.requiresGlassesAppUpdate(error)
-          microphone.stop(); phoneCamera.stop()
-          if captureMode.needsGlasses { await glasses.stop() }
-          guard epoch == thisEpoch else { return }
-          phase = .paused; openingGlassesControls = false
+          captureFailed(needsGlassesUpdate ? GlassesController.updateInstructions : error.localizedDescription)
           if needsGlassesUpdate { glasses.report(error) }
-          notice = needsGlassesUpdate ? GlassesController.updateInstructions : error.localizedDescription
           return
         }
       }
@@ -281,6 +277,15 @@ final class SessionModel {
           } else { self.requestCue(manual:self.pendingManualAnalysisAt != nil) }
         }
       }
+    }
+  }
+  // Capture failure must not close a healthy display/device session. Only the
+  // explicit Close/phone Stop action tears down the control connection.
+  func captureFailed(_ message: String) {
+    guard phase == .starting || phase == .active else { return }
+    pause(message)
+    if captureMode.hasGlassesDisplay {
+      glasses.show(nil, paused:true, status:"Capture paused. Check phone, then Resume.")
     }
   }
   func pause(_ reason: String = "Paused. Camera, microphone and uploads stopped.") {
