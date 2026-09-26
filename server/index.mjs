@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { createProvider } from './model.mjs';
+import { attachRealtimeASR } from './realtime-asr.mjs';
 import { validateInput, validateAudio } from './validation.mjs';
 import { abstain, LIMITS } from '../shared/protocol.mjs';
 
@@ -15,7 +16,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
   let active = 0;
   const recent = [], MAX_PER_MINUTE = 60;
   const files = { '/': '../web/index.html', '/app.mjs': '../web/app.mjs', '/style.css': '../web/style.css', '/shared/protocol.mjs': '../shared/protocol.mjs' };
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -57,6 +58,8 @@ export function createServer({ env = process.env, provider = createProvider(env)
       json(status, { error: status === 400 ? error.message : status === 503 ? error.message : 'Processing unavailable. No cue shown; try again after a pause.' });
     } finally { if (acquired) active--; }
   });
+  attachRealtimeASR(server, { env, token });
+  return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
