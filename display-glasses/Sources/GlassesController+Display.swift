@@ -30,6 +30,17 @@ struct GlassesScreen: Equatable, Sendable {
     case .streaming: return testOnly ? "Camera test · no uploads" : feedback ?? "Streaming"
     }
   }
+  /// What the mascot says in its speech bubble: the cue, or otherwise the current status.
+  var message: String {
+    if let cue { return cue }
+    if let status { return status }
+    switch mode {
+    case .ready: return "Select Start to stream."
+    case .paused: return "Select Resume when ready."
+    case .starting: return "Connecting camera and audio."
+    case .streaming: return sceneOnly ? "Watching the scene automatically." : "Listening for context automatically."
+    }
+  }
   var labels: [String] {
     switch mode {
     case .ready: return ["Start", "Close"]
@@ -69,14 +80,12 @@ extension GlassesController {
       do {
         let content = FlexBox(direction:.column, spacing:8) {
           Text(screen.title, style:.meta, color:.secondary)
-          if let detail = screen.detail {
-            Text(detail, style:.body)
-          }
-          if let cue = screen.cue {
-            Text("Cue: " + cue, style:screen.detail == nil ? .body : .meta)
-          }
-          if screen.cue == nil && screen.detail == nil {
-            Text(screen.status ?? (screen.mode == .ready ? "Select Start to stream." : screen.mode == .paused ? "Select Resume when ready." : screen.mode == .starting ? "Connecting camera and audio." : screen.sceneOnly ? "Watching the scene automatically." : "Listening for context automatically."), style:.body)
+          // The mascot "says" the cue or status in a speech-bubble card beside it.
+          FlexBox(direction:.row, spacing:10, crossAlignment:.center) {
+            Image(image:GlassesMascot.image, sizePreset:.icon)
+            FlexBox(direction:.column) {
+              Text(screen.message, style:screen.cue == nil ? .meta : .body, color:screen.cue == nil ? .secondary : .primary)
+            }.padding(10).background(.card).flexShrink(1).flexGrow(1)
           }
           // At most three short labels; never append Dismiss and widen the row.
           ButtonGroup {
