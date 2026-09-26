@@ -1,4 +1,5 @@
 import { boundedTranscript, LIMITS } from '../shared/protocol.mjs';
+import { LOCALIZATION_LANGUAGES } from './localization.mjs';
 export class InputError extends Error { constructor(message) { super(message); this.status = 400; } }
 const require = (condition, message) => { if (!condition) throw new InputError(message); };
 export function validateInput(body, now = Date.now()) {
@@ -70,4 +71,23 @@ export function validateAudio(body, now = Date.now()) {
   }
   require(validFormat && dataLength > 0 && dataLength <= 640000 && dataLength % 2 === 0, 'WAV must contain <=20s PCM16 mono 16kHz audio');
   return audio;
+}
+
+
+export function validateLocalizationInput(body) {
+  require(body && typeof body === 'object' && !Array.isArray(body) &&
+    Object.keys(body).every(key => ['text','speaker','targetLanguage','context'].includes(key)), 'Invalid localization fields');
+  require(typeof body.text === 'string' && body.text.trim() && body.text.length <= 500, 'Invalid localization text');
+  require(body.speaker == null || (typeof body.speaker === 'string' && /^P(?:[1-9]|[1-9][0-9])$/.test(body.speaker)), 'Invalid speaker label');
+  require(typeof body.targetLanguage === 'string' && LOCALIZATION_LANGUAGES.includes(body.targetLanguage), 'Unsupported target language');
+  require(Array.isArray(body.context) && body.context.length <= 2, 'Localization context must have at most 2 turns');
+  const context = body.context.map(item => {
+    require(item && typeof item === 'object' && !Array.isArray(item) &&
+      Object.keys(item).every(key => ['text','speaker'].includes(key)), 'Invalid localization context fields');
+    require(typeof item.text === 'string' && item.text.trim() && item.text.length <= 500, 'Invalid localization context text');
+    require(item.speaker == null || (typeof item.speaker === 'string' && /^P(?:[1-9]|[1-9][0-9])$/.test(item.speaker)), 'Invalid localization context speaker');
+    return { text:item.text.trim(), ...(item.speaker == null ? {} : { speaker:item.speaker }) };
+  });
+  return { text:body.text.trim(), ...(body.speaker == null ? {} : { speaker:body.speaker }),
+    targetLanguage:body.targetLanguage, context };
 }

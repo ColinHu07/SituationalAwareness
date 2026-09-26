@@ -4,11 +4,13 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { createProvider } from './model.mjs';
+import { createLocalizationProvider } from './localization.mjs';
 import { attachRealtimeASR } from './realtime-asr.mjs';
-import { validateInput, validateAudio } from './validation.mjs';
+import { validateInput, validateAudio, validateLocalizationInput } from './validation.mjs';
 import { abstain, LIMITS } from '../shared/protocol.mjs';
 
-export function createServer({ env = process.env, provider = createProvider(env) } = {}) {
+export function createServer({ env = process.env, provider = createProvider(env), localizer } = {}) {
+  localizer ??= createLocalizationProvider(env);
   const token = env.COPILOT_PROXY_TOKEN || '';
   const host = env.HOST || '127.0.0.1';
   if ((provider.mode === 'live' || !['127.0.0.1', 'localhost', '::1'].includes(host)) && token.length < 32)
@@ -34,7 +36,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
         const data = await readFile(new URL(files[path], import.meta.url));
         res.writeHead(200, { 'Content-Type': path.endsWith('.mjs') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html' }); return res.end(data);
       }
-      if (req.method !== 'POST' || !['/api/cue','/api/transcribe'].includes(path)) return json(404, { error: 'Not found' });
+      if (req.method !== 'POST' || !['/api/cue','/api/transcribe','/api/localize'].includes(path)) return json(404, { error: 'Not found' });
       const provided = Buffer.from((req.headers.authorization || '').replace(/^Bearer /, '')), expected = Buffer.from(token);
       if (token && (provided.length !== expected.length || !timingSafeEqual(provided, expected))) return json(401, { error: 'Enter the proxy token, not the model API key.' });
       if (!(req.headers['content-type'] || '').startsWith('application/json')) return json(415, { error: 'Expected application/json' });
@@ -44,6 +46,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
       let bytes = 0; const chunks = [];
       for await (const chunk of req) { bytes += chunk.length; if (bytes > 1_000_000) { json(413, { error: 'Payload exceeds 1 MB' }); req.destroy(); return; } chunks.push(chunk); }
       let body; try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { return json(400, { error: 'Invalid JSON' }); }
+      if (path === '/api/localize') return json(200, await localizer.localize(validateLocalizationInput(body), controller.signal));
       if (path === '/api/cue') {
         const input = validateInput(body), last = input.transcript.at(-1);
         const recentSpeech = last && Date.now() - last.endMs <= LIMITS.speechMs && (last.confidence === null || last.confidence >= 0.65);
