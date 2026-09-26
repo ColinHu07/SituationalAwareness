@@ -6,6 +6,8 @@ A runnable native iOS companion with **iPhone**, **regular Meta glasses**, and *
 
 ## Phone-first update · September 25
 
+The three device folders are **[phone-app/](phone-app/)**, **[regular-glasses/](regular-glasses/)** and **[display-glasses/](display-glasses/)**. The phone folder owns the runnable Xcode project; it compiles the glasses source modules into the same companion. Shared backend, protocol, tests and browser preview remain at the root.
+
 The reference [Read the Room repository](https://github.com/max-lee-dev/sbu-hacks-read-the-room) uses Gemini image analysis, ElevenLabs narration and NeuralSeek guidance. Its “transcription” field is scene narration, not recognized speech. [Full code review and provider mapping](docs/REFERENCE_COMPARISON.md).
 
 The iOS app now offers three real capture paths plus a labeled demo. **iPhone** uses the phone's built-in mic and optional rear camera without initializing DAT. **Meta glasses** uses their camera/HFP and shows results on the phone. **Display glasses** additionally renders captions and suggestions on the glasses. Regular-glasses spoken output is not implemented.
@@ -33,13 +35,13 @@ The backend uses Node built-ins; there are no npm runtime dependencies. The brow
 
 ## Native iPhone companion
 
-Open `ios/Copilot.xcodeproj` in Xcode. The project pins the official Meta DAT **0.9.0** package and includes camera/HEVC decoding, a shared camera/display session, explicit Bluetooth HFP input selection, WAV transcription, cue controls and local simulation. See [iOS setup](ios/README.md) for registration, developer mode, signing, firmware and proxy configuration.
+Open `phone-app/ios/Copilot.xcodeproj` in Xcode. The project pins the official Meta DAT **0.9.0** package and includes camera/HEVC decoding, a shared camera/display session, explicit Bluetooth HFP input selection, WAV transcription, cue controls and local simulation. See [iOS setup](phone-app/ios/README.md) for registration, developer mode, signing, firmware and proxy configuration.
 
 Build without changing the Mac's globally selected developer tools:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
-  -project ios/Copilot.xcodeproj -scheme Copilot \
+  -project phone-app/ios/Copilot.xcodeproj -scheme Copilot \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath artifacts/DerivedData CODE_SIGNING_ALLOWED=NO build
 ```
@@ -116,7 +118,9 @@ See [dated research and sources](docs/RESEARCH.md), [architecture and alternativ
 
 | Path | Purpose |
 |---|---|
-| `ios/` | Native Swift companion and pinned DAT dependency |
+| `phone-app/` | Native Swift companion, phone capture, Xcode project and native tests |
+| `regular-glasses/` | DAT session/camera transport and HEVC decoding, reused by Display mode |
+| `display-glasses/` | Glasses caption/suggestion rendering and display controls |
 | `server/` | Authenticated task-specific model/ASR proxy, validation, no content logging |
 | `shared/` | Strict cue schema and tested browser lifecycle policy |
 | `web/` | Local simulator and explicit browser input fallback |
@@ -124,4 +128,4 @@ See [dated research and sources](docs/RESEARCH.md), [architecture and alternativ
 | `scripts/` | Repeatable local benchmark and opt-in live image probe |
 | `docs/` | Research, architecture, acceptance script and recorded measurements |
 
-The HEVC decoder is adapted from Meta's official sample; attribution and license are retained under `ios/ThirdParty/`.
+The HEVC decoder is adapted from Meta's official sample; attribution and license are retained under `phone-app/ios/ThirdParty/`.

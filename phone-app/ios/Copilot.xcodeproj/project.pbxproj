@@ -2,9 +2,9 @@
 { archiveVersion = 1; classes = {}; objectVersion = 77; objects = {
 000000000000000000000001 = { isa = PBXProject; attributes = { LastUpgradeCheck = 2600; }; buildConfigurationList = 000000000000000000000002; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; knownRegions = (en, Base); mainGroup = 000000000000000000000003; productRefGroup = 000000000000000000000004; projectDirPath = ""; targets = (000000000000000000000005,000000000000000000000032); packageReferences = (000000000000000000000014); };
 000000000000000000000002 = { isa = XCConfigurationList; buildConfigurations = (00000000000000000000000A,00000000000000000000000B); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-000000000000000000000003 = { isa = PBXGroup; children = (000000000000000000000006,000000000000000000000035,000000000000000000000004); sourceTree = "<group>"; };
+000000000000000000000003 = { isa = PBXGroup; children = (000000000000000000000040,000000000000000000000041,000000000000000000000006,000000000000000000000035,000000000000000000000004); sourceTree = "<group>"; };
 000000000000000000000004 = { isa = PBXGroup; children = (000000000000000000000007,000000000000000000000036); name = Products; sourceTree = "<group>"; };
-000000000000000000000005 = { isa = PBXNativeTarget; buildConfigurationList = 000000000000000000000008; buildPhases = (00000000000000000000000C,00000000000000000000000D,00000000000000000000000E); buildRules = (); dependencies = (); fileSystemSynchronizedGroups = (000000000000000000000006); name = Copilot; packageProductDependencies = (00000000000000000000001E,00000000000000000000001F,000000000000000000000020); productName = Copilot; productReference = 000000000000000000000007; productType = "com.apple.product-type.application"; };
+000000000000000000000005 = { isa = PBXNativeTarget; buildConfigurationList = 000000000000000000000008; buildPhases = (00000000000000000000000C,00000000000000000000000D,00000000000000000000000E); buildRules = (); dependencies = (); fileSystemSynchronizedGroups = (000000000000000000000006,000000000000000000000040,000000000000000000000041); name = Copilot; packageProductDependencies = (00000000000000000000001E,00000000000000000000001F,000000000000000000000020); productName = Copilot; productReference = 000000000000000000000007; productType = "com.apple.product-type.application"; };
 000000000000000000000006 = { isa = PBXFileSystemSynchronizedRootGroup; exceptions = (000000000000000000000009); path = Copilot; sourceTree = "<group>"; };
 000000000000000000000007 = { isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Copilot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 000000000000000000000008 = { isa = XCConfigurationList; buildConfigurations = (00000000000000000000000F,000000000000000000000010); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
@@ -32,4 +32,6 @@
 000000000000000000000038 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 000000000000000000000039 = { isa = PBXContainerItemProxy; containerPortal = 000000000000000000000001; proxyType = 1; remoteGlobalIDString = 000000000000000000000005; remoteInfo = Copilot; };
 00000000000000000000003A = { isa = PBXTargetDependency; target = 000000000000000000000005; targetProxy = 000000000000000000000039; };
+000000000000000000000040 = { isa = PBXFileSystemSynchronizedRootGroup; path = "../../regular-glasses/Sources"; sourceTree = "<group>"; };
+000000000000000000000041 = { isa = PBXFileSystemSynchronizedRootGroup; path = "../../display-glasses/Sources"; sourceTree = "<group>"; };
 }; rootObject = 000000000000000000000001; }

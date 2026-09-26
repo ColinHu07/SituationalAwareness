@@ -11,13 +11,13 @@ Open `Copilot.xcodeproj` in Xcode 26.6 or newer. The project pins Meta Wearables
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  xcodebuild -project ios/Copilot.xcodeproj -scheme Copilot \
+  xcodebuild -project phone-app/ios/Copilot.xcodeproj -scheme Copilot \
   -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
   CODE_SIGNING_ALLOWED=NO build
 
 # Choose an installed iPhone simulator from `xcrun simctl list devices available`.
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  xcodebuild -project ios/Copilot.xcodeproj -scheme Copilot \
+  xcodebuild -project phone-app/ios/Copilot.xcodeproj -scheme Copilot \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
   CODE_SIGNING_ALLOWED=NO test
 ```
@@ -63,7 +63,7 @@ The app declares audio and Bluetooth background modes and uses HEVC/software dec
 
 ## Source attribution
 
-`Copilot/VideoFrameDecoder.swift` and its HEVC keyframe parser derive from Meta's official 0.9.0 CameraAccess sample, with copyright retained and modified stale-image behavior. Meta's developer terms are in `ThirdParty/Meta-DAT-LICENSE.txt`. The Swift package retains its own license/notice files. Other app code in this directory was written for this prototype.
+`../../regular-glasses/Sources/VideoFrameDecoder.swift` and its HEVC keyframe parser derive from Meta's official 0.9.0 CameraAccess sample, with copyright retained and modified stale-image behavior. Meta's developer terms are in `ThirdParty/Meta-DAT-LICENSE.txt`. The Swift package retains its own license/notice files. Other app code in this directory was written for this prototype.
 
 ## Previous verification (2026-09-23; before the phone-mode update)
 
@@ -79,4 +79,4 @@ An initial simulator test exposed DAT singleton access after a failed SDK config
 
 Simulator and unsigned iPhone builds passed. **12 native tests passed, 0 failed**, and all **75 backend/session tests passed**. The app installed and launched in the iPhone 17 Pro simulator. Visual UI inspection of this update was not completed; live camera/microphone and authenticated Muse calls remain unverified.
 
-See [reference comparison and phone acceptance](../docs/REFERENCE_COMPARISON.md) and the root README for current validation. The three-second reference app was inspected, not copied; its generated “transcription” is not speech recognition. Current captions use our Meta ASR path.
+See [reference comparison and phone acceptance](../../docs/REFERENCE_COMPARISON.md) and the root README for current validation. The three-second reference app was inspected, not copied; its generated “transcription” is not speech recognition. Current captions use our Meta ASR path.

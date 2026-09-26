@@ -34,16 +34,16 @@ final class GlassesController {
   @ObservationIgnored private var selector: AutoDeviceSelector?
   @ObservationIgnored private var session: DeviceSession?
   @ObservationIgnored private var camera: MWDATCamera.Camera?
-  @ObservationIgnored private var display: Display?
+  @ObservationIgnored var display: Display?
   @ObservationIgnored private var tokens: [AnyListenerToken] = []
   @ObservationIgnored private var observers: [Task<Void, Never>] = []
   @ObservationIgnored private let decoder = VideoFrameDecoder()
   @ObservationIgnored private let frameGate = FrameDeliveryGate()
   @ObservationIgnored private var stopping = false
-  @ObservationIgnored private var operation: Task<Void, Never>?
-  @ObservationIgnored private var displayRevision = 0
+  @ObservationIgnored var operation: Task<Void, Never>?
+  @ObservationIgnored var displayRevision = 0
   @ObservationIgnored private var sessionRevision = 0
-  @ObservationIgnored private var displayReady = false
+  @ObservationIgnored var displayReady = false
   @ObservationIgnored private var lastPreviewAt: Double = 0
   @ObservationIgnored private var sessionHasStarted = false
   @ObservationIgnored private var cameraHasStreamed = false
@@ -164,51 +164,6 @@ final class GlassesController {
     }
   }
 
-  // Serialize all display writes: a dismissal/stop queued behind an in-flight send always wins.
-  func show(_ cue: String?, caption: String? = nil, note: String? = nil, paused: Bool = false) {
-    displayRevision += 1
-    let revision = displayRevision
-    let previous = operation
-    operation = Task { [weak self] in
-      await previous?.value
-      guard let self, self.displayRevision == revision, let display = self.display, self.displayReady else { return }
-      do {
-        try await display.clearDisplay()
-        guard self.displayRevision == revision else { return }
-        let content = FlexBox(direction:.column, spacing:12) {
-          if let caption, !paused {
-            Text("Captions · completed speech", style:.meta, color:.secondary)
-            Text(String(caption.suffix(140)), style:.body)
-          }
-          if let cue { Text("Suggestion", style:.meta, color:.secondary); Text(cue, style:.body) }
-          else if let note, !paused { Text("Your note", style:.meta, color:.secondary); Text(String(note.prefix(80)), style:.body) }
-          else if caption == nil { Text(paused ? "Copilot paused" : "Copilot", style:.meta, color:.secondary) }
-          ButtonGroup {
-            if paused {
-              Button(label:"Resume", onClick:{ [weak self] in Task { @MainActor in self?.onResume?() } })
-            } else {
-              if cue != nil { Button(label:"Dismiss", onClick:{ [weak self] in Task { @MainActor in self?.onDismiss?() } }) }
-              Button(label:"Help", onClick:{ [weak self] in Task { @MainActor in self?.onHelp?() } })
-              Button(label:"Pause", onClick:{ [weak self] in Task { @MainActor in self?.onPause?() } })
-            }
-            Button(label:"Stop", onClick:{ [weak self] in Task { @MainActor in self?.onStop?() } })
-          }
-        }
-        try await display.send(content)
-        if self.displayRevision != revision { try await display.clearDisplay() }
-      } catch { self.fail("Display write failed: \(error.localizedDescription)") }
-    }
-  }
-
-  func clear() {
-    displayRevision += 1
-    let previous = operation
-    let cap = display
-    operation = Task { [weak self] in
-      await previous?.value
-      do { try await cap?.clearDisplay() } catch { self?.lastError = "Display clear failed: \(error.localizedDescription)" }
-    }
-  }
   func pauseCapture() {
     stopping = true
     camera?.stop(); camera = nil
@@ -230,5 +185,5 @@ final class GlassesController {
     displayReady = false; cameraState = "Stopped"; displayState = "Stopped"
     preview = nil; previewAtMs = 0
   }
-  private func fail(_ message: String) { lastError = message; if !stopping { onFailure?(message) } }
+  func fail(_ message: String) { lastError = message; if !stopping { onFailure?(message) } }
 }

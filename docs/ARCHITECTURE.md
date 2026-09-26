@@ -25,7 +25,7 @@ flowchart LR
     B[Labeled browser simulator] -->|Same proxy contracts| A
 ```
 
-`ios/Copilot` contains the native companion, DAT connection/display integration, HEVC frame handling, selected-HFP microphone capture, bounded speech/transcript state and API client. iOS DAT 0.9.0 and a single shared `DeviceSession` are the hardware route. Xcode 26.6 and a registered but offline iPhone were found on this Mac, so iOS was selected over Android. Actual pocket operation has not been established by a build or simulation.
+`phone-app/ios/Copilot` contains the native companion, phone camera, selected microphone capture, bounded speech/transcript state and API client. `regular-glasses/Sources` contains shared DAT connection/camera transport and HEVC decoding. `display-glasses/Sources` contains the glasses display rendering and clear operations. The Xcode project compiles all three folders into one companion app. iOS DAT 0.9.0 and a single shared `DeviceSession` are the hardware route. Xcode 26.6 and a registered but offline iPhone were found on this Mac, so iOS was selected over Android. Actual pocket operation has not been established by a build or simulation.
 
 `server/index.mjs` serves the simulator and two task-specific routes: `POST /api/cue` and `POST /api/transcribe`. `server/model.mjs` owns the model credential and Standard-tier provider calls. `server/validation.mjs` checks timestamps, bounds, image signatures and WAV format. `shared/protocol.mjs` defines the wire schema and browser cue policy. `web/` is the development interface and labeled mock-device surface, not an application deployed to the glasses.
 
