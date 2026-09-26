@@ -628,4 +628,71 @@ final class SessionTests: XCTestCase {
     XCTAssertNil(DevelopmentConnection.settings(from:["ASIDE_PROXY_URL":"https://test.example", "ASIDE_PROXY_TOKEN":"short"]))
     XCTAssertNil(DevelopmentConnection.settings(from:[:]))
   }
+
+  func testRealtimeURLRequiresTLSOutsideLoopback() throws {
+    XCTAssertEqual(try RealtimeASRClient.webSocketURL(endpoint:"https://example.com"),
+                   URL(string:"wss://example.com/api/asr/realtime"))
+    XCTAssertEqual(try RealtimeASRClient.webSocketURL(endpoint:"http://127.0.0.1:8787"),
+                   URL(string:"ws://127.0.0.1:8787/api/asr/realtime"))
+    XCTAssertThrowsError(try RealtimeASRClient.webSocketURL(endpoint:"http://192.168.1.5:8787"))
+    XCTAssertThrowsError(try RealtimeASRClient.webSocketURL(endpoint:"https://user:secret@example.com"))
+    XCTAssertThrowsError(try RealtimeASRClient.webSocketURL(endpoint:"https://example.com?token=secret"))
+  }
+
+  func testRealtimeClockMapsProviderAudioTimeToCaptureTime() {
+    var clock = RealtimeSpeechClock()
+    clock.notePCM(byteCount:3200, endedAtMs:10100) // 100 ms of PCM.
+    XCTAssertEqual(clock.originMs,10000)
+    XCTAssertEqual(clock.range(startAudioMs:100,endAudioMs:600,fallbackEndMs:11000),
+                   RealtimeSpeechRange(startMs:10100,endMs:10600))
+    clock.reset()
+    XCTAssertNil(clock.originMs)
+  }
+
+  func testConvertedPCMIsExposedWithoutWaitingForWAVChunk() throws {
+    let microphone = ConversationMicrophone()
+    let frames = OSAllocatedUnfairLock(initialState:[(Data,Double)]())
+    microphone.onPCM = { data, time in frames.withLock { $0.append((data,time)) } }
+    microphone.prepareStreamPCM()
+    defer { microphone.stop() }
+    let format = try XCTUnwrap(AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:16000,channels:1,interleaved:false))
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat:format,frameCapacity:1024))
+    buffer.frameLength = 1024
+    let samples = try XCTUnwrap(buffer.floatChannelData?[0])
+    for i in 0..<1024 { samples[i] = 0.02 }
+    microphone.receiveStreamPCM(buffer,at:123456)
+    let captured = frames.withLock { $0 }
+    XCTAssertEqual(captured.count,1)
+    XCTAssertEqual(captured[0].0.count,2048)
+    XCTAssertEqual(captured[0].1,123456)
+  }
+
+  func testRealtimePartialAndFinalKeepSessionSpeakerAlias() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    let timestamp = nowMs()
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:1,text:"kal milna"),receivedAtMs:timestamp)
+    XCTAssertEqual(model.captionText,"kal milna")
+    XCTAssertTrue(model.transcript.isEmpty)
+    model.applyRealtimeEvent(RealtimeASREvent(type:"speaker.updated",turnId:1,speaker:"P1"),receivedAtMs:timestamp+10)
+    XCTAssertEqual(model.captionText,"P1: kal milna")
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.final",turnId:1,speaker:"P1",
+                                              text:"Kal milna thoda mushkil hoga."),
+                             receivedAtMs:timestamp+20)
+    XCTAssertEqual(model.transcript.last?.speaker,"P1")
+    XCTAssertEqual(model.transcript.last?.text,"Kal milna thoda mushkil hoga.")
+    XCTAssertEqual(model.captionText,"P1: Kal milna thoda mushkil hoga.")
+  }
+
+  func testDelayedFinalDoesNotOverwriteNewerPartialCaption() async throws {
+    let model = try await activeModel()
+    defer { model.stop() }
+    let timestamp = nowMs()
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:1,speaker:"P1",text:"first"),receivedAtMs:timestamp)
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.partial",turnId:2,speaker:"P2",text:"new turn"),receivedAtMs:timestamp+10)
+    model.applyRealtimeEvent(RealtimeASREvent(type:"transcript.final",turnId:1,speaker:"P1",text:"First."),
+                             receivedAtMs:timestamp+20)
+    XCTAssertEqual(model.captionText,"P2: new turn")
+    XCTAssertEqual(model.transcript.last?.speaker,"P1")
+  }
 }

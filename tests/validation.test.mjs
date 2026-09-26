@@ -74,6 +74,20 @@ test('confidence missing from supported STT is preserved as unknown', () => {
   assert.equal(validateInput(body, NOW).transcript[0].confidence, null);
 });
 
+test('session speaker aliases are preserved while arbitrary transcript fields are rejected', () => {
+  const valid = input();
+  valid.transcript[0].speaker = 'P2';
+  assert.equal(validateInput(valid, NOW).transcript[0].speaker, 'P2');
+
+  const rawProviderLabel = input();
+  rawProviderLabel.transcript[0].speaker = 'A';
+  assert.throws(() => validateInput(rawProviderLabel, NOW), InputError);
+
+  const extra = input();
+  extra.transcript[0].identity = 'private-profile-name';
+  assert.throws(() => validateInput(extra, NOW), InputError);
+});
+
 test('WAV validation accepts genuine PCM16 mono header and bounds encoded duration', () => {
   assert.deepEqual(validateAudio(audioInput(), NOW), wav());
   const oversized = audioInput(); oversized.audioBase64 = wav(320001).toString('base64');

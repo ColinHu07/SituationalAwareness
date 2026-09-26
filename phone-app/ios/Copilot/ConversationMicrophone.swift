@@ -25,6 +25,7 @@ final class ConversationMicrophone: @unchecked Sendable {
   private var tapInstalled = false
   private var ownsAudioSession = false
   var onChunk: (@Sendable (AudioChunk) -> Void)?
+  var onPCM: (@Sendable (Data, Double) -> Void)?
   var onVoice: (@Sendable (Double) -> Void)?
   var onContext: (@Sendable (AudioContext) -> Void)?
   var onFailure: (@Sendable (String) -> Void)?
@@ -117,6 +118,7 @@ final class ConversationMicrophone: @unchecked Sendable {
     var chunks: [AudioChunk] = []
     var contexts: [AudioContext] = []
     var latestVoice: Double?
+    var pcm: Data?
     lock.withLockUnchecked { state in
       guard state.started, state.streamPCM == streamPCM, buffer.format.sampleRate > 0 else { return }
       if state.converter == nil {
@@ -134,6 +136,7 @@ final class ConversationMicrophone: @unchecked Sendable {
       }
       guard error == nil, let pointer = output.int16ChannelData?[0], output.frameLength > 0 else { return }
       let samples = Array(UnsafeBufferPointer(start:pointer, count:Int(output.frameLength)))
+      pcm = Data(bytes:pointer, count:Int(output.frameLength) * MemoryLayout<Int16>.size)
       var cursor = 0
       while cursor < samples.count {
         // Split at both bounds: SDK callback sizes need not divide one/six seconds.
@@ -168,6 +171,7 @@ final class ConversationMicrophone: @unchecked Sendable {
         cursor += count
       }
     }
+    if let pcm { onPCM?(pcm, timestamp) }
     if let latestVoice { onVoice?(latestVoice) }
     for context in contexts { onContext?(context) }
     for chunk in chunks { onChunk?(chunk) }

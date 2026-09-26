@@ -7,7 +7,12 @@ struct TranscriptEntry: Codable, Identifiable {
   let startMs: Double
   let endMs: Double
   let confidence: Double?
-  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence }
+  let speaker: String?
+  init(text: String, startMs: Double, endMs: Double, confidence: Double?, speaker: String? = nil) {
+    self.text = text; self.startMs = startMs; self.endMs = endMs
+    self.confidence = confidence; self.speaker = speaker
+  }
+  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence, speaker }
 }
 struct SampledFrame: Codable { let dataUrl: String; let capturedAtMs: Double }
 struct AudioContext: Encodable, Sendable {

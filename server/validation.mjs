@@ -6,11 +6,17 @@ export function validateInput(body, now = Date.now()) {
   const analysisMode = body.analysisMode === undefined ? 'conversation' : body.analysisMode;
   require(['conversation', 'surroundings'].includes(analysisMode), 'Invalid analysisMode');
   require(Array.isArray(body.transcript) && body.transcript.length <= 40, 'Transcript must have at most 40 entries');
+  const transcript = [];
   for (const item of body.transcript) {
+    require(item && typeof item === 'object' && !Array.isArray(item) &&
+      Object.keys(item).every(key => ['text', 'startMs', 'endMs', 'confidence', 'speaker'].includes(key)), 'Invalid transcript fields');
     require(item && typeof item.text === 'string' && item.text.length <= 500 && item.text.trim(), 'Invalid transcript text');
     require(Number.isFinite(item.startMs) && Number.isFinite(item.endMs) && item.startMs <= item.endMs &&
       item.endMs <= now + 1000 && item.startMs >= now - 120_000, 'Invalid transcript timestamp');
     require(item.confidence == null || (Number.isFinite(item.confidence) && item.confidence >= 0 && item.confidence <= 1), 'Invalid speech confidence');
+    require(item.speaker == null || (typeof item.speaker === 'string' && /^P(?:[1-9]|[1-9][0-9])$/.test(item.speaker)), 'Invalid speaker label');
+    transcript.push({ text:item.text, startMs:item.startMs, endMs:item.endMs, confidence:item.confidence ?? null,
+      ...(item.speaker == null ? {} : { speaker:item.speaker }) });
   }
   require(Array.isArray(body.context) && body.context.length <= 5 && body.context.every(s => typeof s === 'string' && s.length <= 160), 'Invalid session topics');
   require(typeof body.manual === 'boolean', 'manual must be boolean');
@@ -38,7 +44,7 @@ export function validateInput(body, now = Date.now()) {
     // Energy alone cannot establish a setting or identify speech, sounds, or mood.
     if (analysisMode === 'surroundings' && now - audio.capturedAtMs <= LIMITS.frameMs) audioContext = audio;
   }
-  return { transcript: boundedTranscript(body.transcript.map(x => ({ ...x, confidence: x.confidence ?? null })), now),
+  return { transcript: boundedTranscript(transcript, now),
     frame, context: body.context, manual: body.manual, analysisMode, audioContext };
 }
 

@@ -47,6 +47,7 @@ final class SessionModel {
   var latestFrame: SampledFrame?
   var isThinking = false
   var isTranscribing = false
+  var realtimeASRReady = false
   var apiMs: Double = 0
   var transcriptionMs: Double = 0
   var contextToDisplayMs: Double = 0
@@ -72,6 +73,10 @@ final class SessionModel {
   @ObservationIgnored private var asrTask: Task<Void, Never>?
   @ObservationIgnored private var startTask: Task<Void, Never>?
   @ObservationIgnored private var loopTask: Task<Void, Never>?
+  @ObservationIgnored private var realtimeASR: RealtimeASRClient?
+  @ObservationIgnored private var realtimeClock = RealtimeSpeechClock()
+  @ObservationIgnored private var realtimePartials: [Int:(text:String, speaker:String?)] = [:]
+  @ObservationIgnored private let speechLanguageBias = ["English", "Hindi"]
   @ObservationIgnored private var ttlTask: Task<Void, Never>?
   @ObservationIgnored private var latestSampleAt: Double = 0
   @ObservationIgnored private var transportTask: Task<Void, Never>?
@@ -105,6 +110,9 @@ final class SessionModel {
       guard !self.analyzesSurroundings else { return }
       self.lastVoiceAt = timestamp
       self.invalidateCue()
+    } }
+    microphone.onPCM = { [weak self] data, timestamp in Task { @MainActor in
+      self?.sendRealtimePCM(data, endedAtMs:timestamp)
     } }
     microphone.onChunk = { [weak self] chunk in Task { @MainActor in self?.transcribe(chunk) } }
     microphone.onContext = { [weak self] context in Task { @MainActor in
@@ -226,6 +234,12 @@ final class SessionModel {
           return
         }
         }
+        if !connectionTestOnly && !displayOnly {
+          do { try await startRealtimeASR() }
+          catch {
+            realtimeASRReady = false; realtimeASR = nil
+          }
+        }
         guard epoch == thisEpoch, !Task.isCancelled else { return }
         if captureMode.needsGlasses { configureGlassesCallbacks() }
         guard epoch == thisEpoch, !Task.isCancelled else { return }
@@ -298,6 +312,7 @@ final class SessionModel {
     openingGlassesControls = false; glassesControlsReady = false
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
+    stopRealtimeASR()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     latestFrame = nil; latestAudioContext = nil; latestSampleAt = 0; transcript.removeAll(); lastVoiceAt = 0; captionText = nil; captionAtMs = 0
@@ -320,6 +335,7 @@ final class SessionModel {
     openingGlassesControls = false; glassesControlsReady = false
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
+    stopRealtimeASR()
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
@@ -358,8 +374,84 @@ final class SessionModel {
     latestFrame = SampledFrame(dataUrl:"data:image/jpeg;base64," + data.base64EncodedString(), capturedAtMs:time)
     latestSampleAt = time
   }
+  private func startRealtimeASR() async throws {
+    stopRealtimeASR()
+    let relay = RealtimeASRClient(endpoint:endpoint, token:proxyToken)
+    relay.onEvent = { [weak self] event in self?.applyRealtimeEvent(event) }
+    relay.onFailure = { [weak self] message in
+      guard let self else { return }
+      self.realtimeASRReady = false
+      self.realtimeASR = nil
+      self.realtimeClock.reset()
+      self.realtimePartials.removeAll()
+      if self.phase == .active && !self.sceneOnly { self.notice = message }
+    }
+    try await relay.start(languageBias:speechLanguageBias)
+    realtimeASR = relay
+    realtimeASRReady = true
+    realtimeClock.reset()
+    realtimePartials.removeAll()
+  }
+  private func stopRealtimeASR() {
+    realtimeASR?.onEvent = nil
+    realtimeASR?.onFailure = nil
+    realtimeASR?.stop()
+    realtimeASR = nil
+    realtimeASRReady = false
+    realtimeClock.reset()
+    realtimePartials.removeAll()
+  }
+  private func sendRealtimePCM(_ data: Data, endedAtMs: Double) {
+    guard let relay = realtimeASR, realtimeASRReady, phase == .starting || phase == .active else { return }
+    realtimeClock.notePCM(byteCount:data.count, endedAtMs:endedAtMs)
+    uploadedBytes += data.count
+    relay.sendPCM(data)
+  }
+  func applyRealtimeEvent(_ event: RealtimeASREvent, receivedAtMs: Double = nowMs()) {
+    guard phase == .active else { return }
+    switch event.type {
+    case "transcript.partial":
+      guard let turnId = event.turnId, let raw = event.text else { return }
+      let text = raw.trimmingCharacters(in:.whitespacesAndNewlines)
+      guard !text.isEmpty else { return }
+      let speaker = event.speaker ?? realtimePartials[turnId]?.speaker
+      realtimePartials[turnId] = (String(text.prefix(500)), speaker)
+      setCaption(Self.speakerCaption(speaker, text), capturedAtMs:receivedAtMs)
+    case "speaker.updated":
+      guard let turnId = event.turnId, let speaker = event.speaker,
+            var partial = realtimePartials[turnId] else { return }
+      partial.speaker = speaker
+      realtimePartials[turnId] = partial
+      setCaption(Self.speakerCaption(speaker, partial.text), capturedAtMs:receivedAtMs)
+    case "transcript.final":
+      guard let turnId = event.turnId, let raw = event.text else { return }
+      let text = raw.trimmingCharacters(in:.whitespacesAndNewlines)
+      guard !text.isEmpty else { realtimePartials[turnId] = nil; return }
+      let prior = realtimePartials.removeValue(forKey:turnId)
+      let speaker = event.speaker ?? prior?.speaker
+      let timing = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:receivedAtMs)
+      if analyzesSurroundings { lastVoiceAt = timing.endMs }
+      transcript.append(TranscriptEntry(text:String(text.prefix(500)), startMs:timing.startMs, endMs:timing.endMs,
+                                        confidence:nil, speaker:speaker))
+      transcript.sort { $0.endMs < $1.endMs }
+      trimTranscript()
+      if !sceneOnly { invalidateCue() }
+      // speechComplete can arrive after the next turn has already started. Never
+      // replace a newer live partial with an older turn's delayed final text.
+      if realtimePartials.isEmpty {
+        setCaption(Self.speakerCaption(speaker, text), capturedAtMs:receivedAtMs)
+      }
+    default: break
+    }
+  }
+  private static func speakerCaption(_ speaker: String?, _ text: String) -> String {
+    speaker.map { "\($0): \(text)" } ?? text
+  }
   func transcribe(_ chunk: AudioChunk) {
-    guard !sceneOnly, !connectionTestOnly, phase == .active, chunk.startedAtMs >= captureStartedAt - 200 else { return }
+    // The file endpoint remains an explicit fallback if the realtime relay could
+    // not start or disconnects mid-session.
+    guard realtimeASR == nil, !sceneOnly, !connectionTestOnly, phase == .active,
+          chunk.startedAtMs >= captureStartedAt - 200 else { return }
     guard asrTask == nil else { audioDrops += 1; return }
     let thisEpoch = epoch
     let connection = client
