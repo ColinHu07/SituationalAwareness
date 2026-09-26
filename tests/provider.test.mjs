@@ -64,6 +64,22 @@ test('surroundings sends real scene and coarse audio context with a separate evi
   assert.deepEqual((await provider.cue(scene)).result, cue);
 });
 
+test('automatic scene analysis accepts a neutral sleeping-room observation without speech or advice', async () => {
+  const scene = { ...surroundingsInput(), manual: false, audioContext: null };
+  const cue = { cue: 'This looks like a sleeping room.', reason: 'A bed and bedroom furnishings are visible.', confidence: 0.93, type: 'reminder', should_display: true };
+  const provider = createProvider(env, async (_url, options) => {
+    const body = JSON.parse(options.body);
+    const observation = JSON.parse(body.messages.at(-1).content.find(part => part.type === 'text').text);
+    assert.deepEqual(observation.transcript, []);
+    assert.equal(observation.audioContext, null);
+    assert.match(observation.request, /supported scene description is sufficient/);
+    assert.match(body.messages[0].content, /A neutral scene description is a complete, useful result/);
+    assert.match(body.messages[0].content, /low energy or absent speech does not prove the surroundings are quiet/);
+    return { ok: true, json: async () => completion(cue) };
+  });
+  assert.deepEqual((await provider.cue(scene)).result, cue);
+});
+
 test('conversation provider excludes coarse audio metadata and retains speech-grounded policy', async () => {
   const provider = createProvider(env, async (_url, options) => {
     const body = JSON.parse(options.body);
