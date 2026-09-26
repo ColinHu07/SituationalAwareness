@@ -4,7 +4,17 @@
 
 A runnable native iOS companion with **iPhone**, **regular Meta glasses**, and **Display glasses** capture modes, a small credential-holding backend, and an explicitly simulated browser lab. The wearer starts deliberately, gets a brief social cue from the visible setting or recent recognized speech, and can dismiss, pause or stop.
 
-**Implemented and locally tested; physical glasses acceptance remains unverified.** Pocket operation, nearby-speaker transcription and display wake behavior need the hardware acceptance test. The prototype does not identify faces or infer emotions/intentions. Current and historical verification results are separated below.
+**Implemented and locally tested; physical glasses acceptance remains unverified.** Pocket operation, nearby-speaker transcription and display wake behavior need the hardware acceptance test. Friend matching runs locally against enrolled photos; Muse does not identify faces or infer emotions/intentions. Current and historical verification results are separated below.
+
+## Current merged app · September 26
+
+William’s full People, groups, friend matching, presence, profile learning, scene labels and simpler UI are integrated with the working glasses flow. **Start glasses** opens lens controls; select **Start** on the glasses to capture. Display glasses default to automatic scene cues every **10 seconds** (**30** in reduced-power mode), with one recent image and available audio-energy context. No transcription runs in this default mode. Recommendations stay until the next result; lens **Pause** and **Stop** control capture.
+
+Enable **Settings → Conversation and captions** before starting to add glasses speech transcription, name detection and profile learning. The People screen manages profiles and enrolled photos; proposed learned profile changes are reviewed before saving. The full merge passed **62 native tests** and **112 backend tests**, plus a signed iPhone build and a live synthetic Muse scene request. Real-world friend-matching accuracy remains to be tested. Earlier dated sections below describe historical builds.
+
+## Captions alongside cues · September 26
+
+The glasses now keep the **Heard:** caption visible alongside a separate **Cue:** suggestion. In conversation mode, captions are shown by default; Settings can hide them. Default glasses scene mode does not transcribe speech. Dismissing a cue preserves its caption, and Pause/Stop clears captured speech. The lens uses a short excerpt; the phone keeps a longer caption and recent transcript. These are app-owned, completed-chunk captions, with up to six seconds of capture plus ASR latency and possible dropped chunks while ASR is busy. This change does not add word-by-word streaming or reuse Meta's built-in Live Captions. **40 native tests passed** for the earlier caption-specific build, including simultaneous caption/cue updates and lifecycle checks. Combined lens readability and nearby-speaker accuracy still require hardware testing. See [SDK research and next tests](docs/research-captions.md).
 
 ## Display surroundings update · September 25
 

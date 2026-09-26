@@ -259,6 +259,7 @@ struct ContentView: View {
           if model.analyzesSurroundings {
             if model.captureMode.hasGlassesDisplay {
               Toggle("Captions on glasses",isOn:$model.displayCaptions).onChange(of:model.displayCaptions) { _, _ in model.refreshDisplay() }
+              Text("In conversation mode, recognized words stay visible alongside a social cue. Longer captions are shortened on the glasses; see the phone for more.").font(.caption).foregroundStyle(.secondary)
             }
             Text("Muse checks about every 8 seconds near conversation, 20 seconds without recent speech, or 30 seconds in reduced-power mode. Analyze now requests a fresh check. Camera and microphone stay on until Pause or Stop.").font(.caption)
           } else {
