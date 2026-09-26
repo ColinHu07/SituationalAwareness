@@ -211,6 +211,9 @@ struct ContentView: View {
         .disabled(model.phase == .active || model.phase == .starting)
         .accessibilityIdentifier("glasses.pair")
       Text(model.glasses.devices).font(.subheadline)
+      Button("Open Meta glasses app updater",systemImage:"arrow.up.forward.app") {
+        Task { await model.glasses.openGlassesAppUpdate() }
+      }.disabled(model.phase == .active || model.phase == .starting)
       if let error = model.glasses.lastError { Text(error).font(.caption).foregroundStyle(.red) }
       Text("DAT: \(model.glasses.registration) · Camera: \(model.glasses.cameraState) · Display: \(model.glasses.displayState)").font(.caption).foregroundStyle(.secondary)
       Toggle("Connection test only (no uploads)",isOn:$model.connectionTestOnly).disabled(model.phase != .stopped)

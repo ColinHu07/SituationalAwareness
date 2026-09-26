@@ -25,6 +25,9 @@ struct PhoneCaptureView: View {
             VStack(alignment:.leading,spacing:10) {
               Label("Glasses app update required",systemImage:"arrow.down.circle").font(.headline)
               Text(GlassesController.updateInstructions).font(.subheadline)
+              Button("Open Meta glasses app updater",systemImage:"arrow.up.forward.app") {
+                Task { await model.glasses.openGlassesAppUpdate() }
+              }.buttonStyle(.borderedProminent)
               Text("Capture cannot start until Meta completes this update.").font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth:.infinity,alignment:.leading)
               .padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))

@@ -34,7 +34,7 @@ This is live streaming with sampled analysis, not a saved video recording. Raw v
 
 ### If Resume immediately fails with an update message
 
-The DAT error `datAppOnTheGlassesUpdateRequired` means the on-glasses app must be updated before the SDK can start the session. Open **Meta AI → App Connections** and complete the offered app update. Return to Conversation Copilot and tap **Retry after update**. This is separate from the iPhone companion build; repeatedly tapping Resume or reinstalling the companion cannot satisfy this requirement. If Meta offers no update, preserve the exact message and check availability through Meta's developer support.
+The DAT error `datAppOnTheGlassesUpdateRequired` means the on-glasses app must be installed or updated before the SDK can start the session. Tap **Open Meta glasses app updater** in the recovery card or the setup screen's Glasses connection section; this calls the official `openDATGlassesAppUpdate()` SDK API. For Developer Mode, check **Meta AI → Settings → App Info** for the install/update action beside the glasses, as clarified in [Meta's developer response](https://github.com/facebook/meta-wearables-dat-ios/discussions/218). A general firmware screen can say up to date while this separate package is missing. Return to Conversation Copilot and tap **Retry after update**. Reinstalling the iPhone companion cannot satisfy this requirement. If Meta offers no package or installation fails, preserve the exact message and check availability through Meta's developer support.
 
 The capture screen displays this recovery above the preview, and the setup/capture retry buttons name the update requirement. Camera input remains unverified until a moving preview and received frames appear.
 

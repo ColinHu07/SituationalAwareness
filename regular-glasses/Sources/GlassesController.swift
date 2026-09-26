@@ -59,7 +59,12 @@ final class GlassesController {
   var framesReceived = 0
   var lastError: String?
   var updateRequired = false
-  static let updateInstructions = "Open Meta AI → App Connections and update the app on your glasses. When the update finishes, return here and retry."
+  static let updateInstructions = "Open Meta’s glasses app updater below. In Developer Mode, also check Meta AI → Settings → App Info and install or update the package beside your glasses. Return here after installation and retry."
+  func openGlassesAppUpdate() async {
+    guard let wearables else { fail(lastError ?? "DAT not configured."); return }
+    do { try await wearables.openDATGlassesAppUpdate() }
+    catch { lastError = "Could not open Meta’s updater: \(error.localizedDescription). Check Meta AI → Settings → App Info." }
+  }
   static func requiresGlassesAppUpdate(_ error: Error) -> Bool {
     (error as? DeviceSessionError) == .datAppOnTheGlassesUpdateRequired
   }
