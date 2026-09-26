@@ -83,6 +83,7 @@ export class DiarizedTurnAssembler {
       output.push({
         type: 'transcript.partial', turnId: turn.turnId,
         speaker: this.speakerName(turn.speakerLabel), text: event.transcript,
+        audioProcessedMs: Number.isFinite(event.audioProcessedMs) ? event.audioProcessedMs : null,
       });
       break;
     }
@@ -90,7 +91,10 @@ export class DiarizedTurnAssembler {
       const turn = this.turns.get(this.activeTurnId);
       if (!turn || typeof event.label !== 'string' || !/^[A-Za-z0-9_-]{1,16}$/.test(event.label)) return [];
       turn.speakerLabel = event.label;
-      output.push({ type: 'speaker.updated', turnId: turn.turnId, speaker: this.speakerName(event.label) });
+      output.push({
+        type: 'speaker.updated', turnId: turn.turnId, speaker: this.speakerName(event.label),
+        audioProcessedMs: Number.isFinite(event.audioProcessedMs) ? event.audioProcessedMs : null,
+      });
       break;
     }
     case 'speechEnd': {
@@ -110,6 +114,7 @@ export class DiarizedTurnAssembler {
         text: event.transcript,
         startAudioMs: turn.startAudioMs,
         endAudioMs: turn.endAudioMs,
+        audioProcessedMs: Number.isFinite(event.audioProcessedMs) ? event.audioProcessedMs : null,
       });
       this.turns.delete(event.turnId);
       if (this.activeTurnId === event.turnId) this.activeTurnId = null;
@@ -123,10 +128,11 @@ export class DiarizedTurnAssembler {
 function waitForOpen(socket, timeoutMs = 10_000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Upstream ASR connection timed out.')), timeoutMs);
-    const cleanup = () => { clearTimeout(timer); socket.off('open', opened); socket.off('error', failed); };
+    const cleanup = () => { clearTimeout(timer); socket.off('open', opened); socket.off('close', closed); socket.off('error', failed); };
     const opened = () => { cleanup(); resolve(); };
+    const closed = () => { cleanup(); reject(new Error('Upstream ASR closed before opening.')); };
     const failed = () => { cleanup(); reject(new Error('Upstream ASR connection failed.')); };
-    socket.once('open', opened); socket.once('error', failed);
+    socket.once('open', opened); socket.once('close', closed); socket.once('error', failed);
   });
 }
 
@@ -152,6 +158,7 @@ export async function runRealtimeSession(client, {
   upstreamURL = META_REALTIME_URL,
   WebSocketClass = WebSocket,
   sessionId = randomUUID(),
+  startTimeoutMs = 10_000,
 } = {}) {
   let upstream = null, started = false, ready = false, ending = false;
   const assembler = new DiarizedTurnAssembler();
@@ -164,10 +171,15 @@ export async function runRealtimeSession(client, {
       client.close(code, 'Realtime transcription unavailable.');
   };
 
+  const startTimer = setTimeout(() => {
+    if (!started) failClient(1008);
+  }, startTimeoutMs);
+
   const start = async value => {
     const config = validateStartMessage(value);
     if (started) throw new Error('ASR session already started.');
     started = true;
+    clearTimeout(startTimer);
     const url = `${upstreamURL}?sessionId=${encodeURIComponent(sessionId)}`;
     upstream = new WebSocketClass(url);
     await waitForOpen(upstream);
@@ -210,7 +222,15 @@ export async function runRealtimeSession(client, {
   });
 
   client.on('close', () => {
-    if (upstream && upstream.readyState === WebSocket.OPEN && !ending) upstream.close(1000, 'Client ended session.');
+    clearTimeout(startTimer);
+    if (!upstream || ending) return;
+    if (upstream.readyState === WebSocket.OPEN) {
+      upstream.close(1000, 'Client ended session.');
+    } else if (upstream.readyState === WebSocket.CONNECTING) {
+      // Stop pending upstream work when consent/capture ends before the provider connects.
+      if (typeof upstream.terminate === 'function') upstream.terminate();
+      else upstream.close(1000, 'Client ended session.');
+    }
   });
 }
 

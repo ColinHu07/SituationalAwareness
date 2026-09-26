@@ -11,11 +11,14 @@ struct RealtimeASREvent: Decodable, Sendable {
   let text: String?
   let startAudioMs: Double?
   let endAudioMs: Double?
+  let audioProcessedMs: Double?
 
   init(type: String, sessionId: String? = nil, turnId: Int? = nil, speaker: String? = nil,
-       text: String? = nil, startAudioMs: Double? = nil, endAudioMs: Double? = nil) {
+       text: String? = nil, startAudioMs: Double? = nil, endAudioMs: Double? = nil,
+       audioProcessedMs: Double? = nil) {
     self.type = type; self.sessionId = sessionId; self.turnId = turnId; self.speaker = speaker
     self.text = text; self.startAudioMs = startAudioMs; self.endAudioMs = endAudioMs
+    self.audioProcessedMs = audioProcessedMs
   }
 }
 
@@ -33,10 +36,15 @@ struct RealtimeSpeechClock: Sendable {
     originMs = endedAtMs - durationMs
   }
 
+  func captureTime(audioProcessedMs: Double?) -> Double? {
+    guard let originMs, let audioProcessedMs, audioProcessedMs >= 0 else { return nil }
+    return originMs + audioProcessedMs
+  }
+
   func range(startAudioMs: Double?, endAudioMs: Double?, fallbackEndMs: Double) -> RealtimeSpeechRange {
-    let mappedEnd = originMs.flatMap { origin in endAudioMs.map { origin + $0 } }
+    let mappedEnd = captureTime(audioProcessedMs:endAudioMs)
     let end = min(mappedEnd ?? fallbackEndMs, fallbackEndMs)
-    let mappedStart = originMs.flatMap { origin in startAudioMs.map { origin + $0 } }
+    let mappedStart = captureTime(audioProcessedMs:startAudioMs)
     let start = min(mappedStart ?? max(originMs ?? end, end - 1000), end)
     return RealtimeSpeechRange(startMs:start, endMs:end)
   }
@@ -46,7 +54,7 @@ struct RealtimeSpeechClock: Sendable {
 
 @MainActor
 final class RealtimeASRClient {
-  private static let maxFrameBytes = 64 * 1024
+  nonisolated static let maxFrameBytes = 64 * 1024
   private static let maxQueuedBytes = 512 * 1024
 
   private let endpoint: String
@@ -91,6 +99,19 @@ final class RealtimeASRClient {
     return url
   }
 
+  nonisolated static func pcmFrames(_ data: Data) -> [Data] {
+    guard !data.isEmpty else { return [] }
+    var frames: [Data] = []
+    frames.reserveCapacity((data.count + maxFrameBytes - 1) / maxFrameBytes)
+    var offset = 0
+    while offset < data.count {
+      let end = min(offset + maxFrameBytes, data.count)
+      frames.append(data.subdata(in:offset..<end))
+      offset = end
+    }
+    return frames
+  }
+
   func start(languageBias: [String]) async throws {
     guard socket == nil else { throw CopilotError(message:"Realtime transcription is already running.") }
     let url = try Self.webSocketURL(endpoint:endpoint)
@@ -105,8 +126,7 @@ final class RealtimeASRClient {
         throw CopilotError(message:"Could not encode realtime ASR settings.")
       }
       try await task.send(.string(text))
-      let first = try await task.receive()
-      let event = try Self.decode(first)
+      let event = try await receiveReady(task)
       guard event.type == "ready", event.sessionId?.isEmpty == false else {
         throw CopilotError(message:"Realtime ASR did not acknowledge the session.")
       }
@@ -119,12 +139,32 @@ final class RealtimeASRClient {
     }
   }
 
+  private func receiveReady(_ task: URLSessionWebSocketTask) async throws -> RealtimeASREvent {
+    try await withThrowingTaskGroup(of: RealtimeASREvent.self) { group in
+      group.addTask {
+        let message = try await task.receive()
+        return try Self.decode(message)
+      }
+      group.addTask {
+        try await Task.sleep(for:.seconds(10))
+        throw CopilotError(message:"Realtime ASR acknowledgement timed out.")
+      }
+      guard let event = try await group.next() else {
+        throw CopilotError(message:"Realtime ASR acknowledgement failed.")
+      }
+      group.cancelAll()
+      return event
+    }
+  }
+
   func sendPCM(_ data: Data) {
-    guard ready, !stopped, !data.isEmpty, data.count <= Self.maxFrameBytes else { return }
-    pendingPCM.append(data); pendingBytes += data.count
-    guard pendingBytes <= Self.maxQueuedBytes else {
-      fail("Realtime transcription fell behind; switching to fallback.")
-      return
+    guard ready, !stopped, !data.isEmpty else { return }
+    for frame in Self.pcmFrames(data) {
+      pendingPCM.append(frame); pendingBytes += frame.count
+      guard pendingBytes <= Self.maxQueuedBytes else {
+        fail("Realtime transcription fell behind; switching to fallback.")
+        return
+      }
     }
     pump()
   }

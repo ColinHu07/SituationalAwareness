@@ -56,11 +56,11 @@ test('turn assembler replaces cumulative partials and keeps stable session speak
   const a = new DiarizedTurnAssembler();
   assert.deepEqual(a.consume({ type: 'speechStart', turnId: 1, audioProcessedMs: 100 }), []);
   assert.deepEqual(a.consume({ type: 'transcript', transcript: 'hello', final: false, audioProcessedMs: 180 }),
-    [{ type: 'transcript.partial', turnId: 1, speaker: null, text: 'hello' }]);
+    [{ type: 'transcript.partial', turnId: 1, speaker: null, text: 'hello', audioProcessedMs: 180 }]);
   assert.deepEqual(a.consume({ type: 'speaker', label: 'A', audioProcessedMs: 200 }),
-    [{ type: 'speaker.updated', turnId: 1, speaker: 'P1' }]);
+    [{ type: 'speaker.updated', turnId: 1, speaker: 'P1', audioProcessedMs: 200 }]);
   assert.deepEqual(a.consume({ type: 'transcript', transcript: 'hello there', final: false, audioProcessedMs: 250 }),
-    [{ type: 'transcript.partial', turnId: 1, speaker: 'P1', text: 'hello there' }]);
+    [{ type: 'transcript.partial', turnId: 1, speaker: 'P1', text: 'hello there', audioProcessedMs: 250 }]);
   a.consume({ type: 'speechEnd', turnId: 1, audioProcessedMs: 300 });
 
   // A later turn can begin before turn 1 finishes post-processing.
@@ -68,14 +68,16 @@ test('turn assembler replaces cumulative partials and keeps stable session speak
   a.consume({ type: 'speaker', label: 'B', audioProcessedMs: 340 });
   assert.deepEqual(a.consume({ type: 'speechComplete', turnId: 1, transcript: 'Hello there.', audioProcessedMs: 300 }), [{
     type: 'transcript.final', turnId: 1, speaker: 'P1', text: 'Hello there.', startAudioMs: 100, endAudioMs: 300,
+    audioProcessedMs: 300,
   }]);
   assert.deepEqual(a.consume({ type: 'speechComplete', turnId: 2, transcript: 'Hi.', audioProcessedMs: 500 }), [{
     type: 'transcript.final', turnId: 2, speaker: 'P2', text: 'Hi.', startAudioMs: 320, endAudioMs: 500,
+    audioProcessedMs: 500,
   }]);
 
   a.consume({ type: 'speechStart', turnId: 3, audioProcessedMs: 600 });
   assert.deepEqual(a.consume({ type: 'speaker', label: 'A', audioProcessedMs: 620 }),
-    [{ type: 'speaker.updated', turnId: 3, speaker: 'P1' }]);
+    [{ type: 'speaker.updated', turnId: 3, speaker: 'P1', audioProcessedMs: 620 }]);
 });
 
 test('relay waits for Meta acknowledgement, forwards raw PCM, and never sends the model key to the client', async () => {
@@ -86,4 +88,13 @@ test('relay waits for Meta acknowledgement, forwards raw PCM, and never sends th
   const ready = client.sent.map(x => typeof x.value === 'string' ? JSON.parse(x.value) : null).find(x => x?.type === 'ready');
   assert.deepEqual(ready, { type: 'ready', sessionId: 'meta-session' });
   assert.equal(JSON.stringify(client.sent).includes('server-secret'), false);
+});
+
+test('idle authenticated realtime clients cannot occupy a relay slot indefinitely', async () => {
+  const client = new FakeSocket();
+  await runRealtimeSession(client, {
+    apiKey: 'server-secret', WebSocketClass: FakeUpstream, startTimeoutMs: 5,
+  });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(client.closed?.code, 1008);
 });

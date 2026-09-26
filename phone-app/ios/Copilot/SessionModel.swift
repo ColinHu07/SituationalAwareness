@@ -51,9 +51,13 @@ final class SessionModel {
   var isThinking = false
   var isTranscribing = false
   var realtimeASRReady = false
+  var speechMode = "Not started"
   var apiMs: Double = 0
   var transcriptionMs: Double = 0
+  var realtimeCaptionLatencyMs: Double = 0
+  var localizationMs: Double = 0
   var contextToDisplayMs: Double = 0
+  var realtimeFallbacks = 0
   var uploadedBytes = 0
   var estimatedCost: Double?
   @ObservationIgnored private var knownCostTotal: Double = 0
@@ -220,6 +224,8 @@ final class SessionModel {
     phase = .starting
     captureStartedAt = nowMs()
     lastAnalysisAt = 0; nextAnalysisAt = 0
+    realtimeCaptionLatencyMs = 0; localizationMs = 0
+    speechMode = simulate ? "Simulated" : connectionTestOnly ? "No uploads" : "Starting"
     invalidateCue()
     notice = displayOnly ? "Opening controls on glasses. Camera and microphone stay off." : simulate ? "SIMULATED INPUT. No camera or microphone recording." : captureMode == .phone ? "Starting the selected iPhone inputs…" : captureMode.hasGlassesDisplay ? "Opening glasses camera and ambient microphone permissions…" : "Opening glasses permissions, then selecting HFP microphone…"
     startTask = Task { [weak self] in
@@ -240,9 +246,7 @@ final class SessionModel {
         }
         if !connectionTestOnly && !displayOnly {
           do { try await startRealtimeASR() }
-          catch {
-            realtimeASRReady = false; realtimeASR = nil
-          }
+          catch { useChunkedFallback("Realtime transcription unavailable; using chunked fallback.") }
         }
         guard epoch == thisEpoch, !Task.isCancelled else { return }
         if captureMode.needsGlasses { configureGlassesCallbacks() }
@@ -318,6 +322,7 @@ final class SessionModel {
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeASR()
     cancelLocalization()
+    speechMode = "Paused"
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     latestFrame = nil; latestAudioContext = nil; latestSampleAt = 0; transcript.removeAll(); lastVoiceAt = 0; captionText = nil; captionAtMs = 0
@@ -342,6 +347,7 @@ final class SessionModel {
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeASR()
     cancelLocalization()
+    speechMode = "Stopped"
     loopTask?.cancel(); invalidateCue()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
@@ -386,17 +392,22 @@ final class SessionModel {
     relay.onEvent = { [weak self] event in self?.applyRealtimeEvent(event) }
     relay.onFailure = { [weak self] message in
       guard let self else { return }
-      self.realtimeASRReady = false
-      self.realtimeASR = nil
-      self.realtimeClock.reset()
-      self.realtimePartials.removeAll()
-      if self.phase == .active && !self.sceneOnly { self.notice = message }
+      self.useChunkedFallback(message)
     }
     try await relay.start(languageBias:speechLanguageBias)
     realtimeASR = relay
     realtimeASRReady = true
+    speechMode = "Realtime diarization"
     realtimeClock.reset()
     realtimePartials.removeAll()
+  }
+  private func useChunkedFallback(_ message: String) {
+    realtimeASR?.onEvent = nil; realtimeASR?.onFailure = nil; realtimeASR?.stop()
+    realtimeASR = nil; realtimeASRReady = false
+    realtimeClock.reset(); realtimePartials.removeAll()
+    if speechMode != "Chunked fallback" { realtimeFallbacks += 1 }
+    speechMode = "Chunked fallback"
+    if phase == .active { notice = message }
   }
   private func stopRealtimeASR() {
     realtimeASR?.onEvent = nil
@@ -413,10 +424,15 @@ final class SessionModel {
     uploadedBytes += data.count
     relay.sendPCM(data)
   }
+  private func updateRealtimeLatency(_ event: RealtimeASREvent, receivedAtMs: Double) {
+    guard let capturedAt = realtimeClock.captureTime(audioProcessedMs:event.audioProcessedMs) else { return }
+    realtimeCaptionLatencyMs = max(0, receivedAtMs - capturedAt)
+  }
   func applyRealtimeEvent(_ event: RealtimeASREvent, receivedAtMs: Double = nowMs()) {
     guard phase == .active else { return }
     switch event.type {
     case "transcript.partial":
+      updateRealtimeLatency(event, receivedAtMs:receivedAtMs)
       guard let turnId = event.turnId, let raw = event.text else { return }
       let text = raw.trimmingCharacters(in:.whitespacesAndNewlines)
       guard !text.isEmpty else { return }
@@ -430,6 +446,7 @@ final class SessionModel {
       realtimePartials[turnId] = partial
       setCaption(Self.speakerCaption(speaker, partial.text), capturedAtMs:receivedAtMs)
     case "transcript.final":
+      updateRealtimeLatency(event, receivedAtMs:receivedAtMs)
       guard let turnId = event.turnId, let raw = event.text else { return }
       let text = raw.trimmingCharacters(in:.whitespacesAndNewlines)
       guard !text.isEmpty else { realtimePartials[turnId] = nil; return }
@@ -465,6 +482,7 @@ final class SessionModel {
     let request = LocalizationRequest(text:entry.text, speaker:entry.speaker,
                                       targetLanguage:targetLanguage, context:Array(context))
     let thisEpoch = epoch
+    let requestedAt = nowMs()
     let connection = client
     localizationTasks[entryID] = Task { [weak self] in
       guard let self else { return }
@@ -473,6 +491,7 @@ final class SessionModel {
         let (response, bytes): (LocalizationResponse, Int) = try await connection.post("api/localize", request)
         guard self.epoch == thisEpoch, self.phase == .active, !Task.isCancelled else { return }
         self.uploadedBytes += bytes
+        self.localizationMs = response.metrics?.apiMs ?? max(0, nowMs() - requestedAt)
         self.recordCost(response.metrics?.estimatedCostUsd)
         self.applyLocalization(response.result, to:entryID)
       } catch {
@@ -511,6 +530,7 @@ final class SessionModel {
     guard realtimeASR == nil, !connectionTestOnly, phase == .active,
           chunk.startedAtMs >= captureStartedAt - 200 else { return }
     guard asrTask == nil else { audioDrops += 1; return }
+    speechMode = "Chunked fallback"
     let thisEpoch = epoch
     let connection = client
     isTranscribing = true

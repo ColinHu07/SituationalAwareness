@@ -641,10 +641,21 @@ final class SessionTests: XCTestCase {
     var clock = RealtimeSpeechClock()
     clock.notePCM(byteCount:3200, endedAtMs:10100) // 100 ms of PCM.
     XCTAssertEqual(clock.originMs,10000)
+    XCTAssertEqual(clock.captureTime(audioProcessedMs:250),10250)
     XCTAssertEqual(clock.range(startAudioMs:100,endAudioMs:600,fallbackEndMs:11000),
                    RealtimeSpeechRange(startMs:10100,endMs:10600))
     clock.reset()
     XCTAssertNil(clock.originMs)
+  }
+
+  func testRealtimePCMFramesSplitOversizedCallbackWithoutDataLoss() {
+    let source = Data((0..<150000).map { UInt8($0 % 251) })
+    let frames = RealtimeASRClient.pcmFrames(source)
+    XCTAssertEqual(frames.count,3)
+    XCTAssertTrue(frames.allSatisfy { !$0.isEmpty && $0.count <= RealtimeASRClient.maxFrameBytes })
+    var joined = Data()
+    frames.forEach { joined.append($0) }
+    XCTAssertEqual(joined,source)
   }
 
   func testConvertedPCMIsExposedWithoutWaitingForWAVChunk() throws {

@@ -151,16 +151,20 @@ struct ContentView: View {
           }
           DisclosureGroup("Stats") {
             Grid(alignment:.leading,horizontalSpacing:20,verticalSpacing:10) {
+              metric("Speech path",model.speechMode)
               metric("Cue API",String(format:"%.0f ms",model.apiMs))
-              metric("Transcription",String(format:"%.0f ms",model.transcriptionMs))
+              metric("Chunked transcription",String(format:"%.0f ms",model.transcriptionMs))
+              metric("Realtime caption age",model.realtimeCaptionLatencyMs > 0 ? String(format:"%.0f ms",model.realtimeCaptionLatencyMs) : "Unavailable")
+              metric("Localization API",model.localizationMs > 0 ? String(format:"%.0f ms",model.localizationMs) : "Unavailable")
               metric("Context → phone cue",String(format:"%.0f ms",model.contextToDisplayMs))
               metric("Successful upload JSON",String(format:"%.1f KB",Double(model.uploadedBytes)/1024))
               metric("Approx. model cost",model.estimatedCost.map { String(format:"$%.5f",$0) } ?? "Unavailable")
               metric("Cues / distracting","\(model.shown) / \(model.distracting)")
               metric("Stale / audio drops","\(model.staleDrops) / \(model.audioDrops)")
+              metric("Realtime fallbacks","\(model.realtimeFallbacks)")
               metric("Microphone source rate",model.audioRate > 0 ? "\(Int(model.audioRate)) Hz" : "Unmeasured")
             }.font(.caption).padding(.top,12)
-            Text("Timing ends at phone cue readiness, not hardware display acknowledgment. Zero means no reported measurement. Cost includes ASR when reported. Defaults need hardware calibration.").font(.caption2).foregroundStyle(.secondary).padding(.top,8)
+            Text("Realtime caption age is measured from provider audio progress to phone receipt. Timing does not include hardware display acknowledgment. Metrics contain no transcript or audio content.").font(.caption2).foregroundStyle(.secondary).padding(.top,8)
           }
           Text(model.captureMode.hasGlassesDisplay ? "Suggestions use visible context and recognized words. They do not read minds or identify people." : "No face identification, emotion reading or medical claims. Regular glasses HFP favors the wearer; partner speech may be suppressed.").font(.caption).foregroundStyle(.secondary)
         }.padding(24)
