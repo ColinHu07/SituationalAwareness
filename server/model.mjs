@@ -150,6 +150,8 @@ export function mockCue(input) {
 const MUSE_URL = 'https://api.meta.ai/v1', XAI_URL = 'https://api.x.ai/v1';
 // A cue and its reason fit well inside this; a non-reasoning model spends nothing on hidden reasoning.
 export const XAI_MAX_TOKENS = 256;
+// Grok usually answers in about a second. Past this, Muse is asked instead so the moment still gets a cue.
+export const XAI_TIMEOUT_MS = 3000;
 
 export function createProvider(env = process.env, fetcher = fetch) {
   const live = env.MODEL_MODE === 'live';
@@ -175,7 +177,7 @@ export function createProvider(env = process.env, fetcher = fetch) {
   return {
     mode: live ? 'live' : 'mock', model, conversationModel: xai ? xaiModel : model,
     async cue(input, signal) {
-      const begin = performance.now(), surroundings = input.analysisMode === 'surroundings', grok = xai && !surroundings;
+      const begin = performance.now(), surroundings = input.analysisMode === 'surroundings';
       if (surroundings) input = { ...input, transcript: recentConversation(input.transcript) };
       else {
         // Conversation checks are text only: a named moment and the last few turns, never an image.
@@ -194,33 +196,46 @@ export function createProvider(env = process.env, fetcher = fetch) {
         audioContext: input.audioContext ?? null,
       }) }];
       if (input.frame) content.push({ type: 'image_url', image_url: { url: input.frame.dataUrl } });
-      const response = await request('chat/completions', {
-        // Each provider only ever receives its own key.
-        method: 'POST', headers: { Authorization: grok ? `Bearer ${env.XAI_API_KEY}` : headers.Authorization, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: grok ? xaiModel : model, messages: [{ role: 'system', content: surroundings ? SURROUNDINGS_PROMPT : SYSTEM_PROMPT }, { role: 'user', content }],
-          ...(grok ? { max_completion_tokens: XAI_MAX_TOKENS } : {
-            // This budget includes hidden reasoning. A 1024-token limit can be
-            // exhausted before Muse emits any JSON, even for a one-line cue.
-            max_completion_tokens: 4096,
-            // Frequent always-on checks need fast answers; deeper reasoning made cues arrive ~10 s late.
-            reasoning_effort: 'minimal',
-          }), stream: false,
-          response_format: { type: 'json_schema', json_schema: { name: 'conversation_cue', strict: true, schema: surroundings ? cueSchema : conversationCueSchema } },
-        }),
-      }, signal, timeout, grok ? XAI_URL : MUSE_URL);
-      const choice = response.choices?.[0];
-      if (choice?.finish_reason !== 'stop' || typeof choice.message?.content !== 'string') throw new Error('Incomplete model result');
-      const result = validateCue(JSON.parse(choice.message.content));
-      const inputTokens = response.usage?.prompt_tokens ?? null, outputTokens = response.usage?.completion_tokens ?? null;
-      const cachedTokens = Math.min(inputTokens ?? 0, Math.max(0, response.usage?.prompt_tokens_details?.cached_tokens ?? 0));
-      const price = grok
-        ? [env.XAI_INPUT_PRICE_PER_MILLION ?? 1.25, env.XAI_CACHED_INPUT_PRICE_PER_MILLION ?? 0.2, env.XAI_OUTPUT_PRICE_PER_MILLION ?? 2.5]
-        : [env.INPUT_PRICE_PER_MILLION ?? 1.25, env.CACHED_INPUT_PRICE_PER_MILLION ?? 0.15, env.OUTPUT_PRICE_PER_MILLION ?? 4.25];
-      return { result, metrics: { apiMs: performance.now() - begin, inputTokens, outputTokens, cachedTokens,
-        estimatedCostUsd: inputTokens === null || outputTokens === null ? null :
-          ((inputTokens - cachedTokens) * Number(price[0]) + cachedTokens * Number(price[1]) + outputTokens * Number(price[2])) / 1_000_000,
-        simulated: false, provider: grok ? 'xai' : 'muse', model: grok ? xaiModel : model,
-      } };
+      const ask = async grok => {
+        const response = await request('chat/completions', {
+          // Each provider only ever receives its own key.
+          method: 'POST', headers: { Authorization: grok ? `Bearer ${env.XAI_API_KEY}` : headers.Authorization, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: grok ? xaiModel : model, messages: [{ role: 'system', content: surroundings ? SURROUNDINGS_PROMPT : SYSTEM_PROMPT }, { role: 'user', content }],
+            ...(grok ? { max_completion_tokens: XAI_MAX_TOKENS } : {
+              // This budget includes hidden reasoning. A 1024-token limit can be
+              // exhausted before Muse emits any JSON, even for a one-line cue.
+              max_completion_tokens: 4096,
+              // Frequent always-on checks need fast answers; deeper reasoning made cues arrive ~10 s late.
+              reasoning_effort: 'minimal',
+            }), stream: false,
+            response_format: { type: 'json_schema', json_schema: { name: 'conversation_cue', strict: true, schema: surroundings ? cueSchema : conversationCueSchema } },
+          }),
+        }, signal, grok ? Math.min(XAI_TIMEOUT_MS, timeout) : timeout, grok ? XAI_URL : MUSE_URL);
+        const choice = response.choices?.[0];
+        if (choice?.finish_reason !== 'stop' || typeof choice.message?.content !== 'string') throw new Error('Incomplete model result');
+        const result = validateCue(JSON.parse(choice.message.content));
+        const inputTokens = response.usage?.prompt_tokens ?? null, outputTokens = response.usage?.completion_tokens ?? null;
+        const cachedTokens = Math.min(inputTokens ?? 0, Math.max(0, response.usage?.prompt_tokens_details?.cached_tokens ?? 0));
+        const price = grok
+          ? [env.XAI_INPUT_PRICE_PER_MILLION ?? 1.25, env.XAI_CACHED_INPUT_PRICE_PER_MILLION ?? 0.2, env.XAI_OUTPUT_PRICE_PER_MILLION ?? 2.5]
+          : [env.INPUT_PRICE_PER_MILLION ?? 1.25, env.CACHED_INPUT_PRICE_PER_MILLION ?? 0.15, env.OUTPUT_PRICE_PER_MILLION ?? 4.25];
+        return { result, metrics: { apiMs: performance.now() - begin, inputTokens, outputTokens, cachedTokens,
+          estimatedCostUsd: inputTokens === null || outputTokens === null ? null :
+            ((inputTokens - cachedTokens) * Number(price[0]) + cachedTokens * Number(price[1]) + outputTokens * Number(price[2])) / 1_000_000,
+          simulated: false, provider: grok ? 'xai' : 'muse', model: grok ? xaiModel : model,
+        } };
+      };
+      if (!xai || surroundings) return ask(false);
+      try { return await ask(true); } catch (error) {
+        // The caller gave up, so nobody is waiting for a second attempt.
+        if (signal?.aborted) throw error;
+        const fallbackAfterMs = performance.now() - begin;
+        const fallbackReason = error.name === 'TimeoutError' ? 'timeout' : error.status === 429 ? 'rate_limited' : error.status ? 'unavailable' : 'error';
+        // One retry, on Muse. apiMs is what the wearer waited: the failed Grok attempt plus the Muse answer.
+        // The cost is Muse's alone; an abandoned Grok request may still be billed by xAI.
+        const answer = await ask(false);
+        return { ...answer, metrics: { ...answer.metrics, fallbackFrom: 'xai', fallbackReason, fallbackAfterMs } };
+      }
     },
     async learn(input, signal) {
       if (!live) return { result: mockLearn(input), metrics: { apiMs: 0, estimatedCostUsd: 0, simulated: true } };

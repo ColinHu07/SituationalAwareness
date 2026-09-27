@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from '../server/index.mjs';
-import { createProvider, SYSTEM_PROMPT, SURROUNDINGS_PROMPT, XAI_MAX_TOKENS } from '../server/model.mjs';
+import { createProvider, SYSTEM_PROMPT, SURROUNDINGS_PROMPT, XAI_MAX_TOKENS, XAI_TIMEOUT_MS } from '../server/model.mjs';
 import { validateInput } from '../server/validation.mjs';
 import { cueSchema, conversationCueSchema } from '../shared/protocol.mjs';
 import { CUE, NOW, input, surroundingsInput, wav, completion } from './fixtures.mjs';
@@ -38,6 +38,7 @@ test('a conversation check goes to a non-reasoning Grok model with the same prom
   assert.equal(body.response_format.json_schema.strict, true);
   assert.deepEqual(body.response_format.json_schema.schema, conversationCueSchema);
   assert.deepEqual(response.result, { ...CUE, scene: '' });
+  assert.equal('fallbackFrom' in response.metrics, false, 'An answer from Grok is not a fallback');
 });
 
 test('every live cue reports apiMs with the provider and model that answered', async () => {
@@ -109,32 +110,91 @@ test('a live key is still required for Muse, and mock mode never uses the networ
   assert.match(response.result.reason, /SIMULATED/);
 });
 
-test('Grok failures are sanitized and never retried on Muse', async () => {
-  for (const [upstream, expected] of [[429, 429], [401, 502], [500, 502]]) {
+const MUSE_CUE = { cue: 'Say you study CS at Tech.', reason: 'They asked "Where do you study now?".', confidence: 0.9, type: 'respond', should_display: true };
+const XAI = 'https://api.x.ai/v1/chat/completions', MUSE = 'https://api.meta.ai/v1/chat/completions';
+// Grok does whatever the test says; Muse answers normally.
+function failing(grok, museAnswer = async () => ({ ok: true, json: async () => completion(MUSE_CUE) })) {
+  const calls = [];
+  const provider = createProvider(env, async (url, options) => {
+    calls.push({ url, auth: options.headers.Authorization, body: JSON.parse(options.body), signal: options.signal });
+    return url === XAI ? grok(options) : museAnswer(options);
+  });
+  return { provider, calls };
+}
+
+for (const [label, reason, grok] of [
+  ['a rate limit', 'rate_limited', async () => ({ ok: false, status: 429, json: async () => ({}) })],
+  ['a rejected key', 'unavailable', async () => ({ ok: false, status: 401, json: async () => ({}) })],
+  ['a server error', 'unavailable', async () => ({ ok: false, status: 500, json: async () => ({}) })],
+  ['a network failure', 'error', async () => { throw new TypeError('fetch failed'); }],
+  ['a truncated answer', 'error', async () => ({ ok: true, json: async () => completion(CUE, { choices: [{ finish_reason: 'length', message: { content: '{"cue":"Ask' } }] }) })],
+  ['an answer outside the schema', 'error', async () => ({ ok: true, json: async () => completion({ ...CUE, identity: 'Person A' }) })],
+]) {
+  test(`after ${label} from Grok the same request is retried once on Muse`, async () => {
+    const { provider, calls } = failing(grok);
+    const response = await provider.cue(chat());
+    assert.deepEqual(calls.map(call => call.url), [XAI, MUSE], 'Grok first, then exactly one Muse attempt');
+    const [first, second] = calls;
+    assert.deepEqual([first.auth, second.auth], [`Bearer ${XAI_KEY}`, `Bearer ${MUSE_KEY}`], 'Each provider only receives its own key');
+    assert.deepEqual(second.body.messages, first.body.messages, 'Same prompt and same turns');
+    assert.deepEqual(second.body.response_format, first.body.response_format, 'Same strict schema');
+    assert.equal(second.body.messages[0].content, SYSTEM_PROMPT);
+    assert.deepEqual([second.body.model, second.body.reasoning_effort, second.body.max_completion_tokens], ['muse-spark-1.3', 'minimal', 4096]);
+    assert.deepEqual(response.result, { ...MUSE_CUE, scene: '' }, 'The cue shown is the one Muse gave');
+    const { metrics } = response;
+    assert.deepEqual([metrics.provider, metrics.model, metrics.fallbackFrom, metrics.fallbackReason], ['muse', 'muse-spark-1.3', 'xai', reason]);
+    assert.ok(metrics.fallbackAfterMs >= 0 && metrics.apiMs >= metrics.fallbackAfterMs, 'apiMs covers both attempts');
+    assert.equal(metrics.estimatedCostUsd, (200 * 1.25 + 800 * 0.15 + 100 * 4.25) / 1e6, 'Costed at Muse prices');
+  });
+}
+
+test('a Grok check that has not answered after 3 seconds is abandoned for Muse', async t => {
+  assert.equal(XAI_TIMEOUT_MS, 3000);
+  // The real limit is recorded, then shortened so the test does not wait three seconds.
+  const limits = [], timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', ms => { limits.push(ms); return timeout(ms === XAI_TIMEOUT_MS ? 20 : ms); });
+  const { provider, calls } = failing(options => new Promise((_resolve, reject) =>
+    options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })));
+  const response = await provider.cue(chat());
+  assert.deepEqual(limits, [3000, 20_000], 'Grok gets three seconds; Muse keeps the usual limit');
+  assert.deepEqual(calls.map(call => call.url), [XAI, MUSE]);
+  assert.equal(calls[0].signal.aborted, true, 'The slow Grok request is cancelled, not left running');
+  assert.equal(calls[1].signal.aborted, false);
+  assert.deepEqual(response.result, { ...MUSE_CUE, scene: '' });
+  assert.deepEqual([response.metrics.provider, response.metrics.fallbackFrom, response.metrics.fallbackReason], ['muse', 'xai', 'timeout']);
+  assert.ok(response.metrics.fallbackAfterMs >= 15 && response.metrics.apiMs >= response.metrics.fallbackAfterMs);
+});
+
+test('a shorter API_TIMEOUT_MS also limits the Grok attempt', async t => {
+  const limits = [], timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', ms => { limits.push(ms); return timeout(ms); });
+  await recording({ ...env, API_TIMEOUT_MS: '1000' }).provider.cue(chat());
+  assert.deepEqual(limits, [1000]);
+});
+
+test('when Muse fails as well there is no cue, after exactly two attempts', async () => {
+  const { provider, calls } = failing(async () => ({ ok: false, status: 500, json: async () => ({ secret: 'participant content' }) }),
+    async () => ({ ok: false, status: 429, json: async () => ({ secret: 'participant content' }) }));
+  await assert.rejects(provider.cue(chat()), error => error.status === 429 && !error.message.includes('participant content'));
+  assert.deepEqual(calls.map(call => call.url), [XAI, MUSE]);
+});
+
+test('scene checks and Muse-only setups are never retried', async () => {
+  for (const [environment, request] of [[env, surroundingsInput()], [muse, chat()]]) {
     const calls = [];
-    const provider = createProvider(env, async url => { calls.push(url); return { ok: false, status: upstream, json: async () => ({ secret: 'participant content' }) }; });
-    await assert.rejects(provider.cue(chat()), error => error.status === expected && !error.message.includes('participant content'));
-    assert.deepEqual(calls, ['https://api.x.ai/v1/chat/completions']);
-  }
-  for (const body of [
-    completion(CUE, { choices: [{ finish_reason: 'length', message: { content: JSON.stringify(CUE).slice(0, 40) } }] }),
-    completion({ ...CUE, identity: 'Person A' }), completion({ ...CUE, confidence: 2 }),
-  ]) {
-    const { provider, calls } = recording(env, body);
-    await assert.rejects(provider.cue(chat()));
-    assert.equal(calls.length, 1, 'One billable attempt, no silent second provider');
+    const provider = createProvider(environment, async url => { calls.push(url); return { ok: false, status: 500, json: async () => ({}) }; });
+    await assert.rejects(provider.cue(request), error => error.status === 502);
+    assert.deepEqual(calls, [MUSE]);
   }
 });
 
-test('caller cancellation reaches the xAI request', async () => {
-  const controller = new AbortController(); let captured;
-  const provider = createProvider(env, async (url, options) => {
-    captured = { url, signal: options.signal };
-    return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
-  });
+test('caller cancellation reaches the xAI request and does not start a Muse one', async () => {
+  const controller = new AbortController();
+  const { provider, calls } = failing(options => new Promise((_resolve, reject) =>
+    options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })));
   const work = provider.cue(chat(), controller.signal);
   controller.abort(); await assert.rejects(work, { name: 'AbortError' });
-  assert.equal(captured.url, 'https://api.x.ai/v1/chat/completions'); assert.equal(captured.signal.aborted, true);
+  assert.deepEqual(calls.map(call => call.url), [XAI]); assert.equal(calls[0].signal.aborted, true);
 });
 
 test('the server logs apiMs and provider for every cue request, without content', async t => {
@@ -156,6 +216,25 @@ test('the server logs apiMs and provider for every cue request, without content'
   assert.match(cues[1], /provider=muse model=muse-spark-1\.3 apiMs=\d+$/);
   assert.match(cues[2], /provider=none model=none apiMs=0$/, 'A check that never reached a model is still logged');
   assert.equal(lines.some(line => line.includes('Friday') || line.includes(XAI_KEY) || line.includes(MUSE_KEY)), false);
+  assert.equal(cues.some(line => line.includes('fallback=')), false);
   const health = await (await fetch(`${base}/api/health`)).json();
   assert.deepEqual([health.model, health.conversationModel], ['muse-spark-1.3', 'grok-4.20-non-reasoning']);
+});
+
+test('the server log names the provider that answered and the one that failed first', async t => {
+  const lines = []; t.mock.method(console, 'log', line => lines.push(String(line)));
+  const { provider } = failing(async () => ({ ok: false, status: 500, json: async () => ({}) }));
+  const token = 'synthetic-proxy-token-for-tests-only-123456789';
+  const server = createServer({ env: { HOST: '127.0.0.1', COPILOT_PROXY_TOKEN: token }, provider });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(async () => { const closed = new Promise(resolve => server.close(resolve)); server.closeAllConnections(); await closed; });
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/cue`, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ ...input(Date.now()), frame: null, trigger: 'question' }) });
+  const body = await response.json();
+  assert.equal(response.status, 200); assert.equal(body.result.cue, MUSE_CUE.cue);
+  assert.deepEqual([body.metrics.provider, body.metrics.fallbackFrom, body.metrics.fallbackReason], ['muse', 'xai', 'unavailable']);
+  const cues = lines.filter(line => line.includes('/api/cue'));
+  assert.equal(cues.length, 1);
+  assert.match(cues[0], /POST \/api\/cue 200 .* provider=muse model=muse-spark-1\.3 apiMs=\d+ fallback=xai:unavailable:\d+ms$/);
+  assert.equal(lines.some(line => line.includes('Tech') || line.includes(XAI_KEY) || line.includes(MUSE_KEY)), false);
 });

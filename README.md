@@ -201,8 +201,10 @@ These settings supersede older timing descriptions elsewhere in this repository.
 
 ### Optional Grok provider for conversation checks
 
-Set `XAI_API_KEY` in the ignored `.env` to send conversation checks to xAI's `grok-4.20-non-reasoning` (override with `XAI_MODEL`). The prompt, the five-field strict schema and the text-only request are the same; the output limit is 256 tokens. Scene checks, tone, learning and transcription stay on Muse, and `MUSE_API_KEY` is still required in live mode. With no `XAI_API_KEY`, conversation checks use Muse as before. A failed Grok request shows no cue; it is not retried on Muse.
+Set `XAI_API_KEY` in the ignored `.env` to send conversation checks to xAI's `grok-4.20-non-reasoning` (override with `XAI_MODEL`). The prompt, the five-field strict schema and the text-only request are the same; the output limit is 256 tokens. Scene checks, tone, learning and transcription stay on Muse, and `MUSE_API_KEY` is still required in live mode. With no `XAI_API_KEY`, conversation checks use Muse as before.
+
+If the Grok request fails, returns an unusable answer, or has not answered after 3 seconds, the same request is sent once to Muse. If Muse fails too, no cue is shown. A check the client cancelled is not retried. Scene checks are never retried.
 
 With the key set, the last three turns and the optional `aboutMe` text are sent to xAI instead of Meta. Review xAI's data terms before using it with real conversations.
 
-Every `/api/cue` response carries `metrics.provider`, `metrics.model` and `metrics.apiMs`, and the server log line for each cue request ends with `provider=… model=… apiMs=…`. `GET /api/health` reports `conversationModel`.
+Every `/api/cue` response carries `metrics.provider`, `metrics.model` and `metrics.apiMs`, and the server log line for each cue request ends with `provider=… model=… apiMs=…`. `provider` is the one that answered. After a fallback the metrics also carry `fallbackFrom`, `fallbackReason` (`timeout`, `rate_limited`, `unavailable` or `error`) and `fallbackAfterMs`, the log line ends with `fallback=xai:timeout:3001ms`, and `apiMs` covers both attempts. `GET /api/health` reports `conversationModel`.

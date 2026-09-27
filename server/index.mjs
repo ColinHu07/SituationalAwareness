@@ -26,7 +26,9 @@ export function createServer({ env = process.env, provider = createProvider(env)
     res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     const json = (status, data) => {
       // Timing and provider only, never content: enough to compare Grok and Muse latency from the log.
-      const timing = path === '/api/cue' && data.metrics ? ` provider=${data.metrics.provider ?? 'none'} model=${data.metrics.model ?? 'none'} apiMs=${Math.round(data.metrics.apiMs)}` : '';
+      // provider is the one that answered; fallback names the one that failed first, why, and after how long.
+      const timing = path === '/api/cue' && data.metrics ? ` provider=${data.metrics.provider ?? 'none'} model=${data.metrics.model ?? 'none'} apiMs=${Math.round(data.metrics.apiMs)}` +
+        (data.metrics.fallbackFrom ? ` fallback=${data.metrics.fallbackFrom}:${data.metrics.fallbackReason}:${Math.round(data.metrics.fallbackAfterMs)}ms` : '') : '';
       if (path.startsWith('/api/')) console.log(`${new Date().toISOString()} ${req.method} ${path} ${status} from ${req.socket.remoteAddress}${timing}`);
       if (!res.destroyed) { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); } };
     const path = (req.url || '/').split('?')[0];
