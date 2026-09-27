@@ -209,7 +209,7 @@ With live captions, a question is checked before its turn is finalized. A partia
 
 **Caption timing** on the phone now shows five steps for the last cue, each measured from the end of speech: final received, request sent, response received and cue shown. A minus sign means the step happened before the speech ended, which an early check can do. The shared timing log has one line per step and a `Cue timing` line per cue. It records times only, never words.
 
-The conversation prompt also tells the model to abstain when the cue it would suggest does not fit the topic of the last two turns.
+The conversation prompt also tells the model to abstain when the cue it would suggest does not fit the topic of the last two turns. It must not state places, names, facts or recommendations that are not in the turns or in `aboutMe`; when a cue would need one it suggests a general reply or a question instead. For an indirect phrase it explains the exact phrase that was said, with several example phrases and meanings in the prompt rather than one.
 
 ### Optional Grok provider for conversation checks
 

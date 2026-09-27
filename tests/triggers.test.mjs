@@ -43,6 +43,21 @@ test('conversation prompt names each moment and the scene prompt is left as it w
   assert.match(SURROUNDINGS_PROMPT, /confidence>=0\.6/);
 });
 
+test('the prompt forbids made-up specifics and gives each indirect phrase its own meaning', () => {
+  assert.match(SYSTEM_PROMPT, /- Never state specific places, names, facts, or recommendations that are not in recent or aboutMe\. If a cue would need one, suggest a general reply or asking them instead, like "Ask which trails they like\."/);
+  assert.match(SYSTEM_PROMPT, /If aboutMe and recent do not cover it, suggest a general reply or a question back\. Never make up the answer\./);
+  assert.match(SYSTEM_PROMPT, /- indirect: explain the meaning of the exact phrase that was said in the newest turn, starting with "Often means:"/);
+  assert.match(SYSTEM_PROMPT, /"I should let you get back to it" often means they want to wrap up\./);
+  assert.match(SYSTEM_PROMPT, /"We should hang out sometime" is often friendly politeness, not a firm plan\./);
+  assert.match(SYSTEM_PROMPT, /Never reuse the meaning of one phrase for a different phrase\./);
+  const examples = SYSTEM_PROMPT.split('\n').find(line => line.startsWith('- indirect:')).match(/"[^"]+" (?:often means|is often) [^.]+\./g);
+  assert.ok(examples.length >= 5, 'A short list, not one example');
+  assert.equal(new Set(examples.map(example => example.replace(/^"[^"]+" (?:often means|is often) /, ''))).size, examples.length, 'Every example has its own meaning');
+  assert.equal(SYSTEM_PROMPT.includes('Example: "Often means: they may want to wrap up."'), false, 'The single example is gone');
+  assert.match(SYSTEM_PROMPT, /Only explain words\. Never read faces, tone, or emotions\./);
+  assert.equal(SURROUNDINGS_PROMPT.includes('Ask which trails they like'), false, 'The scene prompt is unchanged');
+});
+
 test('a conversation check sends the moment and the last turns as text only', async () => {
   const { body, content, observation } = await sent({ ...chat(), frame: input().frame, trigger: 'question', aboutMe: '  I study CS at Tech.  ',
     context: ['Mention my internship'], recentMoments: [{ atMs: NOW - 5000, summary: 'Earlier talk.' }], previousCue: 'An older cue.', currentScene: 'library' });
