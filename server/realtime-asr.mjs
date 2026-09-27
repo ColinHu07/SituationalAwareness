@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
+import { ElevenLabsShadowASR } from './elevenlabs-realtime.mjs';
 
 const META_REALTIME_URL = 'wss://api.meta.ai/v1/asr/realtime';
 const MAX_CLIENT_FRAME_BYTES = 64 * 1024;
@@ -160,8 +161,10 @@ export async function runRealtimeSession(client, {
   WebSocketClass = WebSocket,
   sessionId = randomUUID(),
   startTimeoutMs = 10_000,
+  shadowFactory = null,
 } = {}) {
-  let upstream = null, started = false, ready = false, ending = false;
+  let upstream = null, shadow = null, started = false, ready = false, ending = false;
+  let pendingShadowEvents = [];
   let diagnostics = false, receivedBytes = 0, forwardedBytes = 0, lastAudioReport = -Infinity, lastProgressReport = -Infinity;
   const began = performance.now();
   const assembler = new DiarizedTurnAssembler();
@@ -179,6 +182,25 @@ export async function runRealtimeSession(client, {
     if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING)
       client.close(code, 'Realtime transcription unavailable.');
   };
+  const stopShadow = (commit = false) => {
+    try { shadow?.stop({ commit }); } catch { /* Shadow provider must never affect Muse cleanup. */ }
+    shadow = null;
+  };
+  const emitShadow = event => {
+    if (!diagnostics) return;
+    if (!ready) { pendingShadowEvents.push(event); return; }
+    sendClient(event);
+  };
+  const flushShadowEvents = () => {
+    if (!diagnostics || !ready || pendingShadowEvents.length === 0) return;
+    const queued = pendingShadowEvents;
+    pendingShadowEvents = [];
+    for (const event of queued) sendClient(event);
+  };
+  const noteShadowFailure = () => {
+    emitShadow({ type: 'shadow.failure', source: 'elevenlabs', shadow: true });
+    stopShadow(false);
+  };
 
   const startTimer = setTimeout(() => {
     if (!started) failClient(1008);
@@ -190,6 +212,17 @@ export async function runRealtimeSession(client, {
     if (started) throw new Error('ASR session already started.');
     started = true;
     clearTimeout(startTimer);
+
+    if (shadowFactory) {
+      try {
+        shadow = shadowFactory({
+          onEvent: emitShadow,
+          onFailure: noteShadowFailure,
+        });
+        Promise.resolve(shadow.start({ languageBias: config.languageBias })).catch(noteShadowFailure);
+      } catch { noteShadowFailure(); }
+    }
+
     const url = `${upstreamURL}?sessionId=${encodeURIComponent(sessionId)}`;
     upstream = new WebSocketClass(url);
     await waitForOpen(upstream);
@@ -197,29 +230,33 @@ export async function runRealtimeSession(client, {
     const metaSessionId = await waitForHandshake(upstream);
     ready = true;
     sendClient({ type: 'ready', sessionId: metaSessionId });
+    flushShadowEvents();
 
     upstream.on('message', (data, isBinary) => {
       if (isBinary) return;
       let event;
       try { event = JSON.parse(String(data)); } catch { return; }
       if (event.type === 'error') { failClient(1011); return; }
-      for (const normalized of assembler.consume(event)) sendClient(normalized);
+      for (const normalized of assembler.consume(event))
+        sendClient({ ...normalized, source: 'muse', shadow: false });
       if (diagnostics && ['audioProgress', 'speechStart', 'speechEnd'].includes(event.type)) {
         if (event.type === 'audioProgress') {
           if (performance.now() - lastProgressReport < 1000) return;
           lastProgressReport = performance.now();
         }
         sendClient({ type: event.type === 'audioProgress' ? 'audio.progress' : event.type === 'speechStart' ? 'speech.start' : 'speech.end',
+          source: 'muse', shadow: false,
           ...(Number.isInteger(event.turnId) ? { turnId: event.turnId } : {}),
           audioProcessedMs: Number.isFinite(event.audioProcessedMs) ? event.audioProcessedMs : null });
       }
     });
     upstream.on('close', code => {
+      stopShadow(false);
       if (client.readyState === WebSocket.OPEN)
         client.close(code === 1000 ? 1000 : code === 1008 || code === 1013 ? code : 1011,
           code === 1000 ? 'Complete.' : 'Realtime transcription unavailable.');
     });
-    upstream.on('error', () => failClient(1011));
+    upstream.on('error', () => { stopShadow(false); failClient(1011); });
   };
 
   client.on('message', async (data, isBinary) => {
@@ -231,19 +268,23 @@ export async function runRealtimeSession(client, {
         receivedBytes += data.length;
         upstream.send(data, { binary: true });
         forwardedBytes += data.length;
+        try { shadow?.sendPCM(data); } catch { noteShadowFailure(); }
         if (diagnostics && performance.now() - lastAudioReport >= 1000) {
           lastAudioReport = performance.now();
-          sendClient({ type: 'audio.forwarded' });
+          sendClient({ type: 'audio.forwarded', source: 'muse', shadow: false });
         }
         return;
       }
       const value = JSON.parse(String(data));
       if (!started) { await start(value); return; }
       if (diagnostics && ready && value?.type === 'timing.ping' && Number.isFinite(value.clientSentMs)) {
-        sendClient({ type: 'timing.pong', clientSentMs: value.clientSentMs }); return;
+        sendClient({ type: 'timing.pong', source: 'muse', shadow: false, clientSentMs: value.clientSentMs }); return;
       }
       if (value?.type === 'endStream' && ready && !ending) {
-        ending = true; upstream.send(JSON.stringify({ type: 'endStream' })); return;
+        ending = true;
+        try { shadow?.stop({ commit: true }); } catch { /* Muse remains authoritative. */ }
+        shadow = null;
+        upstream.send(JSON.stringify({ type: 'endStream' })); return;
       }
       failClient(1008);
     } catch { failClient(1008); }
@@ -251,6 +292,8 @@ export async function runRealtimeSession(client, {
 
   client.on('close', () => {
     clearTimeout(startTimer);
+    stopShadow(false);
+    pendingShadowEvents = [];
     if (!upstream) return;
     if (upstream.readyState === WebSocket.OPEN) {
       upstream.close(1000, 'Client ended session.');
@@ -271,6 +314,10 @@ export function attachRealtimeASR(server, {
 } = {}) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_CLIENT_FRAME_BYTES });
   let active = 0;
+  const elevenLabsEnabled = env.ELEVENLABS_REALTIME_ENABLED === 'true' && !!env.ELEVENLABS_API_KEY;
+  const shadowFactory = elevenLabsEnabled
+    ? callbacks => new ElevenLabsShadowASR({ apiKey: env.ELEVENLABS_API_KEY, ...callbacks })
+    : null;
 
   server.on('upgrade', (request, socket, head) => {
     let pathname;
@@ -284,7 +331,12 @@ export function attachRealtimeASR(server, {
     wss.handleUpgrade(request, socket, head, client => {
       active++;
       client.once('close', () => { active = Math.max(0, active - 1); });
-      runRealtimeSession(client, { apiKey: env.MUSE_API_KEY, upstreamURL, WebSocketClass }).catch(() => {
+      runRealtimeSession(client, {
+        apiKey: env.MUSE_API_KEY,
+        upstreamURL,
+        WebSocketClass,
+        shadowFactory,
+      }).catch(() => {
         if (client.readyState === WebSocket.OPEN) client.close(1011, 'Realtime transcription unavailable.');
       });
     });

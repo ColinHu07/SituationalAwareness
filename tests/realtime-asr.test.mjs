@@ -35,6 +35,19 @@ class FakeUpstream extends FakeSocket {
   }
 }
 
+class FakeShadow {
+  static latest = null;
+  constructor({ onEvent, onFailure }) {
+    this.onEvent = onEvent; this.onFailure = onFailure; this.received = []; this.stops = [];
+    FakeShadow.latest = this;
+  }
+  async start() { this.onEvent({ type:'shadow.ready', source:'elevenlabs', shadow:true, sessionId:'el-session' }); }
+  sendPCM(data) { this.received.push(Buffer.from(data)); }
+  stop(options = {}) { this.stops.push(options); }
+  transcript(text) { this.onEvent({ type:'shadow.transcript.partial', source:'elevenlabs', shadow:true, text }); }
+  fail() { this.onFailure('shadow failed'); }
+}
+
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
 test('realtime start defaults to English/Hindi while remaining language-generic', () => {
@@ -64,7 +77,6 @@ test('turn assembler replaces cumulative partials and keeps stable session speak
     [{ type: 'transcript.partial', turnId: 1, speaker: 'P1', text: 'hello there', audioProcessedMs: 250 }]);
   a.consume({ type: 'speechEnd', turnId: 1, audioProcessedMs: 300 });
 
-  // A later turn can begin before turn 1 finishes post-processing.
   a.consume({ type: 'speechStart', turnId: 2, audioProcessedMs: 320 });
   a.consume({ type: 'speaker', label: 'B', audioProcessedMs: 340 });
   assert.deepEqual(a.consume({ type: 'speechComplete', turnId: 1, transcript: 'Hello there.', audioProcessedMs: 300 }), [{
@@ -109,10 +121,54 @@ test('relay waits for Meta acknowledgement, forwards raw PCM, and never sends th
     { type: 'transcript.partial', turnId: 2, speaker: 'P2', text: 'Hi there' },
     { type: 'transcript.final', turnId: 1, speaker: 'P1', text: 'Hello.' },
   ]);
+  assert.ok(captions.every(x => x.source === 'muse' && x.shadow === false));
   client.emit('message', JSON.stringify({ type: 'endStream' }), false);
   assert.deepEqual(JSON.parse(upstream.sent.at(-1).value), { type: 'endStream' });
   client.close(1000, 'Stopped');
   assert.equal(upstream.closed?.code, 1000);
+});
+
+test('ElevenLabs shadow receives the same PCM but cannot interrupt Muse', async () => {
+  const client = new FakeSocket();
+  await runRealtimeSession(client, {
+    apiKey:'server-secret', WebSocketClass:FakeUpstream,
+    shadowFactory: callbacks => new FakeShadow(callbacks),
+  });
+  client.emit('message', JSON.stringify({type:'start', diagnostics:true}), false);
+  await flush(); await flush();
+  assert.equal(JSON.parse(client.sent[0].value).type, 'ready');
+  const pcm = Buffer.alloc(3200, 7);
+  client.emit('message', pcm, true);
+  assert.deepEqual(FakeShadow.latest.received, [pcm]);
+
+  FakeShadow.latest.transcript('shadow words');
+  let messages = client.sent.map(x => JSON.parse(x.value));
+  assert.ok(messages.some(x => x.type === 'shadow.transcript.partial' && x.source === 'elevenlabs' && x.shadow === true));
+
+  FakeShadow.latest.fail();
+  messages = client.sent.map(x => JSON.parse(x.value));
+  assert.ok(messages.some(x => x.type === 'shadow.failure'));
+  assert.equal(client.closed, null);
+
+  FakeUpstream.latest.emit('message', JSON.stringify({type:'speechStart',turnId:1}), false);
+  FakeUpstream.latest.emit('message', JSON.stringify({type:'speaker',label:'A'}), false);
+  FakeUpstream.latest.emit('message', JSON.stringify({type:'transcript',transcript:'Muse still works'}), false);
+  messages = client.sent.map(x => JSON.parse(x.value));
+  assert.ok(messages.some(x => x.type === 'transcript.partial' && x.text === 'Muse still works' && x.source === 'muse'));
+  client.close(1000, 'Done');
+});
+
+test('shadow transcript content is not forwarded unless diagnostics are explicitly enabled', async () => {
+  const client = new FakeSocket();
+  await runRealtimeSession(client, {
+    apiKey:'server-secret', WebSocketClass:FakeUpstream,
+    shadowFactory: callbacks => new FakeShadow(callbacks),
+  });
+  client.emit('message', JSON.stringify({type:'start'}), false);
+  await flush(); await flush();
+  FakeShadow.latest.transcript('private shadow transcript');
+  assert.equal(JSON.stringify(client.sent).includes('private shadow transcript'), false);
+  client.close(1000, 'Done');
 });
 
 test('idle authenticated realtime clients cannot occupy a relay slot indefinitely', async () => {

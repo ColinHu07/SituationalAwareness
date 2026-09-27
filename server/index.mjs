@@ -7,10 +7,15 @@ import { spawn } from 'node:child_process';
 import { networkInterfaces } from 'node:os';
 import { createProvider, recentConversation } from './model.mjs';
 import { attachRealtimeASR } from './realtime-asr.mjs';
+import { checkElevenLabsHealth, elevenLabsConfiguredHealth } from './elevenlabs-health.mjs';
 import { validateInput, validateAudio, validateLearnInput, validateToneInput } from './validation.mjs';
 import { abstain, LIMITS } from '../shared/protocol.mjs';
 
-export function createServer({ env = process.env, provider = createProvider(env) } = {}) {
+export function createServer({
+  env = process.env,
+  provider = createProvider(env),
+  elevenLabsHealthCheck = checkElevenLabsHealth,
+} = {}) {
   const token = env.COPILOT_PROXY_TOKEN || '';
   const host = env.HOST || '127.0.0.1';
   if ((provider.mode === 'live' || !['127.0.0.1', 'localhost', '::1'].includes(host)) && token.length < 32)
@@ -19,6 +24,33 @@ export function createServer({ env = process.env, provider = createProvider(env)
   // Four slots: the phone transcribes and asks for a cue at the same time, with headroom for cancelled work.
   const recent = [], MAX_PER_MINUTE = 120, MAX_ACTIVE = 4;
   const files = { '/': '../web/index.html', '/app.mjs': '../web/app.mjs', '/style.css': '../web/style.css', '/shared/protocol.mjs': '../shared/protocol.mjs' };
+  const elevenLabsEnabled = env.ELEVENLABS_REALTIME_ENABLED === 'true';
+  const elevenLabsApiKey = env.ELEVENLABS_API_KEY || '';
+  let elevenLabsHealthCache = elevenLabsConfiguredHealth({ enabled: elevenLabsEnabled, apiKey: elevenLabsApiKey });
+  let elevenLabsHealthAt = 0;
+  let elevenLabsHealthPending = null;
+  const refreshElevenLabsHealth = async ({ force = false } = {}) => {
+    const now = Date.now();
+    if (!force && elevenLabsHealthAt && now - elevenLabsHealthAt < 30_000) return elevenLabsHealthCache;
+    if (elevenLabsHealthPending) return elevenLabsHealthPending;
+    elevenLabsHealthPending = Promise.resolve(elevenLabsHealthCheck({
+      enabled: elevenLabsEnabled,
+      apiKey: elevenLabsApiKey,
+    })).catch(() => ({
+      enabled: elevenLabsEnabled,
+      configured: !!elevenLabsApiKey,
+      reachable: false,
+      authenticated: null,
+      authorized: null,
+      status: 'unavailable',
+    })).then(result => {
+      elevenLabsHealthCache = result;
+      elevenLabsHealthAt = Date.now();
+      return result;
+    }).finally(() => { elevenLabsHealthPending = null; });
+    return elevenLabsHealthPending;
+  };
+
   const server = http.createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -36,7 +68,25 @@ export function createServer({ env = process.env, provider = createProvider(env)
     try {
       // A local page cannot be used as a cross-origin proxy; native requests omit Origin.
       if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}` && req.headers.origin !== `https://${req.headers.host}`) return json(403, { error: 'Cross-origin requests are disabled.' });
-      if (req.method === 'GET' && path === '/api/health') return json(200, { ok: true, modelMode: provider.mode, model: provider.model, requiresToken: !!token, hardware: 'unverified', defaults: LIMITS, ...(req.headers.authorization ? { tokenValid } : {}) });
+      if (req.method === 'GET' && path === '/api/health') {
+        // Never make the existing Muse startup checkpoint wait on ElevenLabs.
+        // Refresh the independent shadow-provider health result in the background.
+        void refreshElevenLabsHealth();
+        return json(200, {
+          ok: true,
+          modelMode: provider.mode,
+          model: provider.model,
+          requiresToken: !!token,
+          hardware: 'unverified',
+          defaults: LIMITS,
+          elevenlabs: elevenLabsHealthCache,
+          ...(req.headers.authorization ? { tokenValid } : {}),
+        });
+      }
+      if (req.method === 'GET' && path === '/api/health/elevenlabs') {
+        const elevenlabs = await refreshElevenLabsHealth({ force: true });
+        return json(200, { ok: elevenlabs.status === 'ready', elevenlabs });
+      }
       if (req.method === 'GET' && files[path]) {
         const data = await readFile(new URL(files[path], import.meta.url));
         res.writeHead(200, { 'Content-Type': path.endsWith('.mjs') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html' }); return res.end(data);
