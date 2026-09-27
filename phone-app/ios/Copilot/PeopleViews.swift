@@ -328,12 +328,18 @@ struct ThatWasMeButton: View {
   @Bindable var model: SessionModel
   @State private var confirmed = false
   var body: some View {
-    if model.captionText != nil,
-       model.transcript.last?.levelDbFS != nil || model.transcript.last?.speaker.map(SpeakerIdentityResolver.validLabel) == true {
-      Button { model.markLastLineAsMine(); confirmed = true } label: {
-        Image(systemName:confirmed ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
-      }.accessibilityLabel("That was me")
-        .onChange(of:model.captionText) { _, _ in confirmed = false }
+    if model.canMarkLastLineAsMine {
+      Button { confirmed = model.markLastLineAsMine() } label: {
+        if let label = model.realtimeWearerCandidateLabel {
+          Label("I was \(label)", systemImage:confirmed ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
+        } else {
+          Image(systemName:confirmed ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
+        }
+      }.accessibilityLabel(model.realtimeWearerCandidateLabel.map { "That was me: \($0)" } ?? "That was me")
+        .onChange(of:model.realtimeWearerCandidateLabel) { _, _ in confirmed = false }
+        .onChange(of:model.captionText) { _, _ in
+          if model.realtimeWearerCandidateLabel == nil { confirmed = false }
+        }
     }
   }
 }

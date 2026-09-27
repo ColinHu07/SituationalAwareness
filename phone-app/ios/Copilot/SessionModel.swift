@@ -56,8 +56,10 @@ final class SessionModel {
   @ObservationIgnored private var realtimeClock = RealtimeSpeechClock()
   @ObservationIgnored private var finalizedTurns: Set<Int> = []
   @ObservationIgnored private var realtimeSpeakers: [Int:String] = [:]
+  @ObservationIgnored private var realtimePartialTurns: [Int:Double] = [:]
   @ObservationIgnored private var speakerIdentityResolver = SpeakerIdentityResolver()
   @ObservationIgnored private let makeRealtimeRelay: @MainActor (String, String) -> any PhoneCaptionRelay
+  private(set) var realtimeWearerCandidateLabel: String?
   var captionText: String?
   var captionAtMs: Double = 0
   var phonePreview: UIImage?
@@ -718,18 +720,41 @@ final class SessionModel {
     guard let calibrated = wearerVoiceDbFS, let level, level > -120 else { return nil }
     return level >= calibrated - Self.wearerLevelMarginDb ? "wearer" : "other"
   }
-  /// "That was me": learn the wearer's voice level from the most recent caption, then relabel speech.
-  func markLastLineAsMine() {
-    if let label = transcript.last?.speaker, SpeakerIdentityResolver.validLabel(label),
-       speakerIdentityResolver.markWearer(label:label, people:people.people, presentPersonIDs:presentIDs) {
-      refreshRealtimeCaptionPresentation()
+  var canMarkLastLineAsMine: Bool {
+    guard captionText != nil else { return false }
+    if let label = realtimeWearerCandidateLabel {
+      guard speakerIdentityResolver.personID(for:label) == nil else { return false }
+      return speakerIdentityResolver.wearerLabel == nil || speakerIdentityResolver.wearerLabel == label
     }
-    if let level = transcript.last(where: { $0.levelDbFS.map { $0 > -120 } ?? false })?.levelDbFS {
+    guard realtimeRelay == nil, realtimePartialTurns.isEmpty else { return false }
+    return transcript.last?.levelDbFS != nil
+  }
+
+  /// "That was me": bind only the explicitly exposed finalized realtime label, or
+  /// preserve the existing chunked-audio voice-level calibration path.
+  @discardableResult
+  func markLastLineAsMine() -> Bool {
+    var confirmed = false
+    if let label = realtimeWearerCandidateLabel {
+      guard captionText != nil,
+            speakerIdentityResolver.personID(for:label) == nil,
+            speakerIdentityResolver.wearerLabel == nil || speakerIdentityResolver.wearerLabel == label else { return false }
+      _ = speakerIdentityResolver.markWearer(label:label, people:people.people, presentPersonIDs:presentIDs)
+      if speakerIdentityResolver.isWearer(label) {
+        refreshRealtimeCaptionPresentation()
+        confirmed = true
+      }
+    }
+    let handlingRealtime = realtimeRelay != nil || realtimeWearerCandidateLabel != nil || !realtimePartialTurns.isEmpty
+    if !handlingRealtime,
+       let level = transcript.last(where: { $0.levelDbFS.map { $0 > -120 } ?? false })?.levelDbFS {
       let updated = wearerVoiceDbFS.map { ($0 + level) / 2 } ?? level
       wearerVoiceDbFS = updated
       UserDefaults.standard.set(updated, forKey:"copilot.wearerVoiceDbFS")
       transcript = transcript.map { entry in var entry = entry; entry.speaker = speaker(forLevel:entry.levelDbFS); return entry }
+      confirmed = true
     }
+    return confirmed
   }
   func resetWearerVoice() {
     wearerVoiceDbFS = nil
@@ -859,7 +884,8 @@ final class SessionModel {
     realtimeRelay?.stop(); realtimeRelay = nil
     realtimeRoster = PhoneCaptionRoster(); realtimeClock.reset()
     conversationWindow = ConversationWindow()
-    finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []; captionText = nil; captionAtMs = 0
+    finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); realtimePartialTurns.removeAll()
+    realtimeWearerCandidateLabel = nil; captionRows = []; captionText = nil; captionAtMs = 0
     speakerIdentityResolver.resetLabelMappings()
     speechMode = "Not started"
   }
@@ -887,6 +913,15 @@ final class SessionModel {
     guard phase == .active, let id = event.turnId,
           ["transcript.partial", "speaker.updated", "transcript.final"].contains(event.type) else { return }
     let time = nowMs()
+    realtimePartialTurns = realtimePartialTurns.filter { time - $0.value < 15_000 }
+    if event.type == "transcript.partial",
+       event.text?.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty == false {
+      realtimePartialTurns[id] = time
+      realtimeWearerCandidateLabel = nil
+    } else if event.type == "speaker.updated" {
+      // Attribution is still changing, so no visible row is safe to mark yet.
+      realtimeWearerCandidateLabel = nil
+    }
     if let speaker = event.speaker, SpeakerIdentityResolver.validLabel(speaker) { realtimeSpeakers[id] = speaker }
     let range = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:time)
     conversationWindow.consume(event, at:min(time, realtimeClock.captureTime(audioProcessedMs:event.audioProcessedMs) ?? range.endMs))
@@ -895,11 +930,15 @@ final class SessionModel {
     captionAtMs = time
     guard event.type == "transcript.final", !finalizedTurns.contains(id) else { return }
     finalizedTurns.insert(id)
+    realtimePartialTurns[id] = nil
     // Bound deduplication bookkeeping during long sessions.
     if finalizedTurns.count > 256, let oldest = finalizedTurns.min() {
       finalizedTurns.remove(oldest); realtimeSpeakers[oldest] = nil
     }
-    guard let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty else { return }
+    guard let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty else {
+      realtimeWearerCandidateLabel = nil
+      return
+    }
     let knownPeople = people.people
     let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:range.startMs, endMs:range.endMs,
                                 confidence:nil, speaker:realtimeSpeakers[id])
@@ -914,6 +953,8 @@ final class SessionModel {
                                                 presentPersonIDs:presentIDs) {
       refreshRealtimeCaptionPresentation()
     }
+    // A finalized label is markable only when no newer/overlapping partial turn is visible.
+    realtimeWearerCandidateLabel = realtimePartialTurns.isEmpty ? entry.speaker : nil
     trimTranscript()
   }
 
@@ -990,6 +1031,7 @@ final class SessionModel {
     captionText = String(text.suffix(240)); captionAtMs = capturedAtMs
   }
   func expireCaption(at timestamp: Double = nowMs()) {
+    realtimePartialTurns = realtimePartialTurns.filter { timestamp - $0.value < 15_000 }
     if realtimeRelay != nil {
       realtimeRoster.expire(at:timestamp)
       let updated = realtimeRoster.rows

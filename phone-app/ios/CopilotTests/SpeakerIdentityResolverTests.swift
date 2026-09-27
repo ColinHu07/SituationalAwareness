@@ -124,9 +124,58 @@ final class SpeakerIdentitySessionTests: XCTestCase {
     model.phase = .active
     model.applyRealtimeCaption(.init(type:"transcript.final", turnId:1, speaker:"P1", text:"The project went well."))
     XCTAssertEqual(model.captionText, "P1: The project went well.")
-    model.markLastLineAsMine()
+    XCTAssertEqual(model.realtimeWearerCandidateLabel, "P1")
+    XCTAssertTrue(model.canMarkLastLineAsMine)
+    XCTAssertTrue(model.markLastLineAsMine())
     XCTAssertEqual(model.captionText, "You: The project went well.")
     XCTAssertEqual(model.transcript.last?.speaker, "P1")
+    model.stop()
+  }
+
+  func testNewPartialCannotMarkPreviousFinalizedSpeakerAsWearer() {
+    let model = SessionModel(people:PeopleStore(fileURL:nil))
+    model.phase = .active
+    model.applyRealtimeCaption(.init(type:"transcript.final", turnId:1, speaker:"P1", text:"Partner line."))
+    model.applyRealtimeCaption(.init(type:"transcript.partial", turnId:2, speaker:"P2", text:"My current line"))
+    XCTAssertEqual(model.transcript.last?.speaker, "P1", "P2 is not finalized yet")
+    XCTAssertNil(model.realtimeWearerCandidateLabel)
+    XCTAssertFalse(model.canMarkLastLineAsMine)
+    XCTAssertFalse(model.markLastLineAsMine())
+    XCTAssertEqual(model.displaySpeakerName(for:"P1"), "P1")
+
+    model.applyRealtimeCaption(.init(type:"transcript.final", turnId:2, speaker:"P2", text:"My current line."))
+    XCTAssertEqual(model.realtimeWearerCandidateLabel, "P2")
+    XCTAssertTrue(model.markLastLineAsMine())
+    XCTAssertEqual(model.captionText, "P1: Partner line.\nYou: My current line.")
+    XCTAssertEqual(model.transcript.last?.speaker, "P2")
+    model.stop()
+  }
+
+  func testResolvedPersonLabelCannotBeConfirmedAsWearer() {
+    let store = PeopleStore(fileURL:nil)
+    let sam = store.addPerson("Sam")!
+    let model = SessionModel(people:store)
+    model.phase = .active
+    model.applyFaceMatches([sam], at:1_000)
+    model.applyFaceMatches([sam], at:1_001)
+    model.applyRealtimeCaption(.init(type:"transcript.final", turnId:1, speaker:"P1", text:"I'm Sam."))
+    XCTAssertEqual(model.realtimeWearerCandidateLabel, "P1")
+    XCTAssertFalse(model.canMarkLastLineAsMine)
+    XCTAssertFalse(model.markLastLineAsMine())
+    XCTAssertEqual(model.captionText, "Sam: I'm Sam.")
+    model.stop()
+  }
+
+  func testAbandonedPartialDoesNotBlockLaterFinalForever() {
+    let model = SessionModel(people:PeopleStore(fileURL:nil))
+    model.phase = .active
+    model.applyRealtimeCaption(.init(type:"transcript.partial", turnId:1, speaker:"P1", text:"Abandoned"))
+    XCTAssertFalse(model.canMarkLastLineAsMine)
+
+    model.expireCaption(at:Date().timeIntervalSince1970 * 1000 + 15_001)
+    model.applyRealtimeCaption(.init(type:"transcript.final", turnId:2, speaker:"P2", text:"This one is complete."))
+    XCTAssertEqual(model.realtimeWearerCandidateLabel, "P2")
+    XCTAssertTrue(model.canMarkLastLineAsMine)
     model.stop()
   }
 
