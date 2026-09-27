@@ -13,7 +13,8 @@ test('documented Chat Completions request sends actual supplied image and strict
     captured = { url, options, body: JSON.parse(options.body) };
     return { ok: true, json: async () => completion() };
   });
-  const response = await provider.cue(input());
+  // Only scene checks carry an image; conversation checks are text only (see triggers.test.mjs).
+  const response = await provider.cue(surroundingsInput());
   assert.equal(captured.url, 'https://api.meta.ai/v1/chat/completions');
   assert.equal(captured.options.headers.Authorization, `Bearer ${env.MUSE_API_KEY}`);
   assert.equal(captured.body.model, 'muse-spark-1.3');
@@ -26,10 +27,10 @@ test('documented Chat Completions request sends actual supplied image and strict
   assert.equal(schema.strict, true); assert.equal(schema.schema.additionalProperties, false);
   assert.deepEqual([...schema.schema.required].sort(), Object.keys(schema.schema.properties).sort());
   const parts = captured.body.messages.at(-1).content;
-  assert.equal(captured.body.messages[0].content, SYSTEM_PROMPT);
-  assert.equal(JSON.parse(parts.find(x => x.type === 'text').text).analysisMode, 'conversation');
-  assert.equal(parts.find(x => x.type === 'image_url').image_url.url, input().frame.dataUrl);
-  assert.equal(JSON.parse(parts.find(x => x.type === 'text').text).frameCapturedAtMs, input().frame.capturedAtMs);
+  assert.equal(captured.body.messages[0].content, SURROUNDINGS_PROMPT);
+  assert.equal(JSON.parse(parts.find(x => x.type === 'text').text).analysisMode, 'surroundings');
+  assert.equal(parts.find(x => x.type === 'image_url').image_url.url, surroundingsInput().frame.dataUrl);
+  assert.equal(JSON.parse(parts.find(x => x.type === 'text').text).frameCapturedAtMs, surroundingsInput().frame.capturedAtMs);
   assert.deepEqual(response.result, { ...CUE, scene: '' }); assert.equal(response.metrics.simulated, false);
   assert.equal(response.metrics.inputTokens, 1000); assert.equal(response.metrics.cachedTokens, 800);
   assert.equal(response.metrics.outputTokens, 100);
@@ -207,13 +208,14 @@ test('ASR never substitutes canned transcript for a malformed response or mock m
   await assert.rejects(createProvider({ MODEL_MODE: 'mock' }).transcribe(wav()), error => error.status === 503);
 });
 
-test('mock fixture remains explicitly simulated and falls back to a generic cue when the subject changes', async () => {
+test('mock fixture remains explicitly simulated and abstains, without generic advice, when the subject changes', async () => {
   const provider = createProvider({ MODEL_MODE: 'mock' }, () => { throw new Error('Mock must not use network'); });
   const response = await provider.cue(input());
   assert.equal(response.metrics.simulated, true); assert.match(response.result.reason, /SIMULATED/);
   const newer = input(); newer.transcript.push({ text: 'Let us talk about lunch instead.', startMs: 1, endMs: 2 });
-  const fallback = mockCue(newer);
-  assert.equal(fallback.cue, 'Keep listening, then ask a follow-up question.'); assert.match(fallback.reason, /SIMULATED/);
+  const ordinary = mockCue(newer);
+  assert.equal(ordinary.should_display, false, 'Ordinary speech gets no "keep listening" filler'); assert.equal(ordinary.cue, '');
+  assert.match(ordinary.reason, /SIMULATED/);
   assert.equal(mockCue({ ...newer, transcript: [] }).should_display, false, 'No speech at all still abstains');
 });
 
@@ -225,7 +227,8 @@ test('cue requests carry session memory and the cue on screen; summaries survive
   assert.equal('summary' in validateCue(base), false);
   let body;
   const provider = createProvider(env, async (_url, options) => { body = JSON.parse(options.body); return { ok: true, json: async () => completion() }; });
-  await provider.cue({ ...input(), recentMoments: [{ atMs: Date.now() - 20_000, summary: 'Talking about robotics.' }], previousCue: 'Ask about the robot.' });
+  // Session memory belongs to scene checks; a conversation check sees only the moment and the last few turns.
+  await provider.cue({ ...surroundingsInput(), recentMoments: [{ atMs: Date.now() - 20_000, summary: 'Talking about robotics.' }], previousCue: 'Ask about the robot.' });
   const sent = JSON.parse(body.messages[1].content[0].text);
   assert.equal(sent.previousCue, 'Ask about the robot.');
   assert.equal(sent.recentMoments[0].summary, 'Talking about robotics.'); assert.ok(sent.recentMoments[0].ageSeconds >= 19);

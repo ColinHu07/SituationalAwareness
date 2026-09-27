@@ -77,6 +77,7 @@ final class RealtimeASRClient {
   private var sending = false
   private var stopped = true
   private(set) var ready = false
+  var acceptsPCM: Bool { ready && !stopped }
 
   var onEvent: ((RealtimeASREvent) -> Void)?
   var onFailure: ((String) -> Void)?

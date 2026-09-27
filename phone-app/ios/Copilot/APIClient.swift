@@ -35,6 +35,10 @@ struct CueRequest: Encodable {
   var recentMoments: [Moment] = []
   /// The cue on screen now, so the model can keep it when it's still the best advice.
   var previousCue = ""
+  /// The moment that prompted a conversation check; scene checks send none.
+  var trigger: String? = nil
+  /// What the wearer chose to share about themselves, so a suggested answer can be specific.
+  var aboutMe: String? = nil
 }
 struct Moment: Codable, Equatable { let atMs: Double; let summary: String }
 struct CueResult: Decodable {

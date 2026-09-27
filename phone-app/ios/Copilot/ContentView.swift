@@ -48,7 +48,7 @@ struct ContentView: View {
           VStack(alignment:.leading,spacing:16) {
             if model.phase != .stopped {
             HStack {
-              Text(model.phase == .active && model.analyzesSurroundings ? "Analyzing" : model.phase.rawValue).font(.title2.weight(.semibold))
+              Text(model.phase == .active && model.sceneChecks ? "Analyzing" : model.phase.rawValue).font(.title2.weight(.semibold))
               Spacer()
               if model.isThinking || model.isTranscribing { ProgressView() }
             }
@@ -88,11 +88,7 @@ struct ContentView: View {
           if model.cue != nil { Button("Not helpful",systemImage:"hand.thumbsdown") { model.markDistracting() }.font(.caption).tint(.secondary) }
           if let feedback = model.toneFeedback { RecoveryCard(feedback:feedback) { model.dismissTone() } }
           if !model.sceneOnly { VStack(alignment:.leading,spacing:12) {
-            HStack {
-              Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
-              Spacer()
-              ThatWasMeButton(model:model)
-            }
+            Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
             Text(model.speechMode).font(.caption).foregroundStyle(.secondary)
             Text(model.captionText ?? "—")
               .font(.system(size:25,weight:.medium,design:.rounded))
@@ -231,14 +227,30 @@ struct ContentView: View {
       }
     }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
   }
+  private var voiceStatus: String {
+    let voice = model.wearerDetector
+    if voice.claimed { return "Set by you with That was me. It stays until captions restart or you reset it." }
+    if voice.wearerLabel != nil { return "Found automatically: yours is the loudest voice at the microphone. No tap is needed." }
+    if voice.knowsWearer { return "Remembered from earlier in this session. It is matched again when you next speak." }
+    let saved = model.wearerVoiceDbFS == nil ? "" : " A saved voice level is used when live captions are unavailable."
+    return "Not found yet. It takes two of your turns and one from someone else. Until then only indirect phrases and Analyze prompt a cue." + saved
+  }
   private var settings: some View {
     NavigationStack {
       Form {
+        Section("About me") {
+          TextField("For example: I study CS at Tech",text:$model.aboutMe,axis:.vertical).lineLimit(2...4)
+          Text("Optional. Sent with conversation checks so a suggested answer can use your own facts. Up to 500 characters; kept on this phone until you clear it.").font(.caption)
+        }
+        Section("My voice") {
+          Text(voiceStatus).font(.caption)
+          ThatWasMeButton(model:model)
+          if model.wearerDetector.knowsWearer || model.wearerVoiceDbFS != nil {
+            Button("Reset my voice",role:.destructive) { model.resetWearerVoice() }
+          }
+        }
         Section("Tone check") {
           Toggle("Coach my wording",isOn:$model.toneCheckEnabled)
-          if model.wearerVoiceDbFS != nil {
-            Button("Reset my voice level",role:.destructive) { model.resetWearerVoice() }
-          }
         }
         Section("Development mode") {
           Toggle("Capture test only (no uploads)",isOn:$model.connectionTestOnly).disabled(model.phase != .stopped)
@@ -277,9 +289,10 @@ struct ContentView: View {
             Text("Off keeps automatic scene cues. On adds phone captions, conversation summaries, name detection and conversation learning.").font(.caption)
           }
           TextField("Things you chose to remember (one per line)",text:$model.contextText,axis:.vertical).lineLimit(3...5).onChange(of:model.contextText) { _, _ in model.contextChanged() }
-          if model.analyzesSurroundings {
-            Text("Muse summarizes roughly the last 10 seconds and suggests one short cue. With no clear recent speech, it uses the camera scene and ambient audio levels. Checks run about every 10 seconds (15 in reduced-power mode), one at a time. Captions stay on the phone; the glasses show only the cue.").font(.caption)
-          } else {
+          Text(model.sceneChecks
+               ? "Scene cues: Muse checks the camera scene and ambient audio levels about every 30 seconds, one check at a time. A cue stays until the next check replaces it."
+               : "Conversation cues appear at a moment, not on a timer: when someone asks a question, uses an indirect phrase, or finishes speaking and 3 seconds pass in silence. Only the last 3 turns are sent, as text. Your own lines never prompt a cue: your voice is found automatically as the loudest at the microphone. Captions stay on the phone; the glasses show only the cue.").font(.caption)
+          if !model.analyzesSurroundings {
             Stepper("Image sample every \(Int(model.sampleInterval)) seconds",value:$model.sampleInterval,in:3...30,step:1)
           }
           Text("Keeps ≤60 seconds / 12 transcript entries and one sampled image. Stop erases session memory. Face stills saved to People remain until removed; raw audio/video is not saved.").font(.caption)
@@ -295,7 +308,7 @@ struct ContentView: View {
           Text("Matching runs on this iPhone. Confident, new-looking stills of friends who are here are saved to their photos automatically (up to 3 per conversation). Saying a new name to someone (\"Hey Marcus\") while one unknown face is in view adds them as a new friend. Lower the distance if strangers match; raise it if friends are missed.").font(.caption)
         }
         Section("Provisional cue rules") {
-          Text("Muse uses recent speech and camera images up to 10 seconds old. Earlier summaries provide background only. A cue stays readable for at least 10 seconds; unchanged cues are not redrawn. Dismiss pauses automatic checks for 10 seconds. Pause and Stop clear captured context.").font(.caption)
+          Text("A conversation cue needs a confidence of at least 0.8 and clears after 8 seconds. A reply is dropped if anyone speaks before it arrives. Scene cues use camera images up to 10 seconds old and stay until replaced. Dismiss pauses automatic checks for 10 seconds. Pause and Stop clear captured context.").font(.caption)
           Text("iPhone mode pauses when the app leaves the foreground. Glasses pocket operation and routing need hardware validation; a simulator cannot verify them.").font(.caption)
         }
       }.navigationTitle("Settings").toolbar { Button("Done") { showSettings = false } }

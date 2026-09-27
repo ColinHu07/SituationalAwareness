@@ -10,14 +10,14 @@ enum CaptureMode: String, CaseIterable, Identifiable {
   var hasGlassesDisplay: Bool { self == .displayGlasses }
 }
 
-// Inference cadence is independent of camera transport and cue display cooldown.
+// Scene checks run on a backup timer. Conversation checks fire at a moment instead: see ConversationPolicy.
 enum SurroundingsPolicy {
-  /// Seconds between automatic checks. Only one check runs at a time, so model latency also limits the rate.
+  /// Seconds between automatic scene checks. Only one check runs at a time, so model latency also limits the rate.
   static func analysisInterval(recentSpeech: Bool, reducedPower: Bool) -> Double {
-    reducedPower ? 15 : 10
+    30
   }
-  /// A cue stays on screen at least this long before a different one replaces it, so it can be read.
-  static let minimumDwellMs = 10_000.0
+  /// Scene cues keep the scene prompt's own confidence bar.
+  static let displayConfidence = 0.6
   /// After the wearer dismisses a cue, automatic checks wait this long.
   static let dismissQuietMs = 10_000.0
   static let contextWindowMs = 10_000.0

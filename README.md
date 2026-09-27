@@ -2,7 +2,7 @@
 
 **Live test:** the same installed iOS app offers **iPhone / Glasses** source selection and a shared camera-and-cue screen. Choose **Glasses → With display** for social cues on both screens and live captions on the phone. The iPhone source card also offers **Multi-speaker captions**, a separate Start/Stop test with up to three speaker rows. [Phone caption test setup](phone-app/ios/README.md#quick-multi-speaker-caption-test). [Step-by-step live glasses setup and test](docs/LIVE_GLASSES_TEST.md).
 
-**Current context display:** live multi-speaker captions stay on the phone. Glasses show one readable cue. Muse summarizes roughly the last 10 seconds of streaming speech and bases a social cue on that summary; without clear conversation, it uses the fresh scene and averaged ambient audio energy. The phone shows the summary under **Recent context**. Automatic checks run about every 10 seconds (15 in reduced-power mode), with one request at a time and at least 10 seconds to read each cue. See [Display behavior](display-glasses/README.md). Dated sections below describe earlier versions.
+**Current context display:** live multi-speaker captions stay on the phone. Glasses show one readable cue. With conversation on, Muse is asked for a cue at a moment, not on a timer: someone else asks a question, uses a common indirect phrase, or finishes speaking and three seconds pass in silence, or the wearer selects **Analyze**. Each check sends the last three turns as text, labeled wearer or other, and its cue clears after 8 seconds. Scene-only Display mode keeps automatic camera cues on a 30-second timer. See [Display behavior](display-glasses/README.md) and [cues at the right moment](#september-26-cues-at-the-right-moment). Dated sections below describe earlier versions.
 
 **Live face enrollment:** William's `0e1e120` changes are integrated with the context display above. Phone and glasses video share on-device face recognition. Confident new views of recognized friends can be saved automatically (up to three per conversation); a new addressed name plus one repeatedly observed unknown face can create a profile. **Settings → Save stills from video** controls automatic saving. Saved face crops persist in People and can be removed there.
 
@@ -177,3 +177,24 @@ William's `daba7fe` update is integrated with the existing phone and glasses flo
 The integration preserves realtime multi-speaker phone captions and timing diagnostics, the camera preview frame-rate fix, glasses scene/conversation switching, wristband controls, no-upload capture testing, and conversation learning when glasses streaming stops. Physical hardware and live-provider behavior still require validation.
 
 Merge validation: all 124 Node tests passed. Native simulator testing was attempted twice but blocked by local disk exhaustion while Xcode wrote module/index caches (`No space left on device`); native test results are not confirmed for this merge.
+
+## September 26: cues at the right moment
+
+Conversation cues no longer run on a 10-second timer. A check is sent with a `trigger` naming the moment:
+
+| Trigger | When it fires |
+|---|---|
+| `question` | Someone else finishes a turn that ends in a question mark |
+| `indirect` | Someone else uses a phrase listed in `phone-app/ios/Copilot/IndirectPhrases.swift` |
+| `stuck` | Someone else finishes a turn, then 3 seconds pass with no speech |
+| `manual` | The wearer selects **Analyze** |
+
+- **The wearer's own turns never prompt a check, and no tap is needed.** The glasses microphone sits next to the wearer's mouth, so their voice is the loudest. The app measures the speech level of each live-caption turn and averages it per speaker label. The loudest label becomes the wearer once it has two turns and averages at least 6 dB above every other voice heard. It is re-evaluated only when another label, with two turns, averages 6 dB above it.
+- **The wearer is kept for the whole session.** Caption labels are numbered afresh when captions restart after a pause, so the app keeps the wearer's level and matches the voice again on its first turn. Stop ends the session and forgets it.
+- **Until the wearer is found, no `question` or `stuck` check is sent.** Indirect phrases and **Analyze** still work. **Settings → My voice → That was me** is an optional override that marks the most recent caption as the wearer's. The six-second chunk fallback uses the level found in the session, or the saved voice level.
+- **Checks are small.** Only the last three turns are sent, as text, labeled `wearer` or `other`. No image is sent. Optional **Settings → About me** text is sent as `aboutMe` so a suggested answer can be specific.
+- **Stale replies are dropped.** If anyone speaks while a reply is in flight, it is never shown. A cue needs a confidence of at least 0.8, has no minimum dwell, and clears after 8 seconds. **Analyze** always answers, with "Nothing to add" when nothing fits.
+- **Scene-only Display mode** keeps its camera cues and its prompt. Its timer is now 30 seconds. Modes with conversation on no longer send camera images to Muse.
+- **Backend.** `POST /api/cue` accepts `trigger` and an optional `aboutMe` of up to 500 characters. Conversation checks use the new `SYSTEM_PROMPT` and a five-field schema. `meaning` is a valid cue type. Clients that send no trigger get `manual`, `question` or `stuck` from the request. The mock provider abstains on ordinary speech instead of offering generic listening advice.
+
+These settings supersede older timing descriptions elsewhere in this repository. Live Muse latency and cue quality with the new prompt have not been measured.
