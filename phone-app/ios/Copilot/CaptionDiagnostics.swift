@@ -51,6 +51,7 @@ final class CaptionDiagnostics {
   }
 
   func record(_ message: String) {
+    if began == 0 { began = uptimeMs }
     let line = "\(Self.formatter.string(from:Date()))  +\(String(format:"%.3f", max(0, uptimeMs - began) / 1000))s  \(message)"
     entries.append(Entry(line:line))
     if entries.count > 200 { entries.removeFirst(entries.count - 200) }

@@ -658,6 +658,55 @@ final class SessionTests: XCTestCase {
     model.stop()
   }
 
+  func testDelayedGlassesDataCanRecoverWithoutPausingOrAnalyzingStaleContent() {
+    let model = SessionModel()
+    defer { model.stop() }
+    model.captureMode = .displayGlasses; model.phase = .active
+    let time = nowMs()
+    model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:time-12000)
+    model.latestAudioContext = AudioContext(capturedAtMs:time-12000,windowMs:1000,activityRatio:0,rmsDbFS:-80,source:"glasses_pcm")
+    model.captureActivity = CaptureActivity(videoReceivedAtMs:time-100,audioReceivedAtMs:time-100)
+    model.cue = "An old cue"
+    model.checkCaptureHealth(at:time)
+    XCTAssertEqual(model.phase,.active,"Delayed content is not proof of a disconnected stream")
+    XCTAssertNil(model.cue,"Do not keep obsolete advice visible while transport catches up")
+    XCTAssertTrue(model.notice.contains("delayed"))
+    model.requestCue(manual:false)
+    XCTAssertEqual(model.requests,0,"Arrival time must not turn stale content into fresh evidence")
+    XCTAssertEqual(model.latestFrame?.capturedAtMs,time-12000)
+    model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:time)
+    model.latestAudioContext = AudioContext(capturedAtMs:time,windowMs:1000,activityRatio:0,rmsDbFS:-80,source:"glasses_pcm")
+    model.checkCaptureHealth(at:time)
+    XCTAssertEqual(model.phase,.active)
+    XCTAssertEqual(model.notice,"")
+  }
+
+  func testGlassesStillPauseIfEitherRequiredTransportActuallyStops() {
+    for lostVideo in [true,false] {
+      let model = SessionModel()
+      model.captureMode = .displayGlasses; model.phase = .active
+      let time = nowMs()
+      model.latestFrame = SampledFrame(dataUrl:"test",capturedAtMs:time-12000)
+      model.latestAudioContext = AudioContext(capturedAtMs:time-12000,windowMs:1000,activityRatio:0,rmsDbFS:-80,source:"glasses_pcm")
+      model.captureActivity = CaptureActivity(videoReceivedAtMs:time-(lostVideo ? 12000 : 100),audioReceivedAtMs:time-(lostVideo ? 100 : 12000))
+      model.checkCaptureHealth(at:time)
+      XCTAssertEqual(model.phase,.paused)
+      XCTAssertTrue(model.captionDiagnostics.entries.contains { $0.line.contains("Capture paused:") })
+      model.stop()
+    }
+  }
+
+  func testVoiceStreamKeepsAmbientPCMAndReducesVideoBandwidth() {
+    let spoken = GlassesController.cameraConfiguration(withDisplay:true,voiceAudioEnabled:true)
+    XCTAssertEqual(spoken.frameRate,2)
+    if case .pcm(let sampleRate,let channels) = spoken.audioCodec {
+      XCTAssertEqual(sampleRate,.rate16000)
+      XCTAssertEqual(channels,1)
+    } else { XCTFail("Voice mode must retain the ambient multi-speaker input") }
+    XCTAssertEqual(GlassesController.cameraConfiguration(withDisplay:true,voiceAudioEnabled:false).frameRate,15)
+    XCTAssertNil(GlassesController.cameraConfiguration(withDisplay:false,voiceAudioEnabled:true).audioCodec,"Regular glasses already receive their mic through HFP")
+  }
+
   func testSceneIsRecognizedShownAndRemindedOnce() async throws {
     let model = try await activeModel()
     try await Task.sleep(for:.milliseconds(1600)) // checks start 1.5 s into a session

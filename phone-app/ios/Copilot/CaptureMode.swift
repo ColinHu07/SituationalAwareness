@@ -10,6 +10,18 @@ enum CaptureMode: String, CaseIterable, Identifiable {
   var hasGlassesDisplay: Bool { self == .displayGlasses }
 }
 
+/// Arrival time proves transport activity, not freshness of the captured content.
+struct CaptureActivity {
+  var videoReceivedAtMs = 0.0
+  var audioReceivedAtMs = 0.0
+  func isReceiving(requiresVideo: Bool, requiresAudio: Bool, at timestamp: Double) -> Bool {
+    func recent(_ received: Double) -> Bool {
+      received > 0 && received <= timestamp + 1000 && timestamp - received <= 10000
+    }
+    return (!requiresVideo || recent(videoReceivedAtMs)) && (!requiresAudio || recent(audioReceivedAtMs))
+  }
+}
+
 // Scene checks run on a backup timer. Conversation checks fire at a moment instead: see ConversationPolicy.
 enum SurroundingsPolicy {
   /// Seconds between automatic scene checks. Only one check runs at a time, so model latency also limits the rate.

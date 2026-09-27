@@ -49,6 +49,8 @@ final class SessionModel {
   var analysisFeedback: String?
   var pendingManualAnalysisAt: Double?
   var latestAudioContext: AudioContext?
+  @ObservationIgnored private var lastAudioCaptureAtMs = 0.0
+  @ObservationIgnored var captureActivity = CaptureActivity()
   @ObservationIgnored private var ambientWindow = AmbientWindow()
   @ObservationIgnored private var conversationWindow = ConversationWindow()
   var reducedPower = false
@@ -68,6 +70,14 @@ final class SessionModel {
   var phonePreview: UIImage?
   var phoneFramesReceived = 0
   var cue: String?
+  var spokenCuesEnabled = true {
+    didSet {
+      if !spokenCuesEnabled { cueSpeaker.stop(); cueAudioStatus = nil }
+      else if !oldValue, phase == .active, let cue { cueSpeaker.speak(cue, mode:captureMode) }
+    }
+  }
+  var cueAudioStatus: String?
+  @ObservationIgnored private let cueSpeaker: any CueSpeaking
   var lastSceneSummary: String?
   var lastAnalysisOutcome: String?
   var lastAnalysisAtMs: Double = 0
@@ -155,7 +165,8 @@ final class SessionModel {
   /// The setting Muse last recognized, shown as a chip and sent back as background.
   var currentScene: String?
 
-  init(people: PeopleStore? = nil, makeRealtimeRelay: @escaping @MainActor (String, String) -> any PhoneCaptionRelay = { RealtimeASRClient(endpoint:$0, token:$1) }) {
+  init(people: PeopleStore? = nil, cueSpeaker: (any CueSpeaking)? = nil, makeRealtimeRelay: @escaping @MainActor (String, String) -> any PhoneCaptionRelay = { RealtimeASRClient(endpoint:$0, token:$1) }) {
+    self.cueSpeaker = cueSpeaker ?? CueSpeaker()
     self.makeRealtimeRelay = makeRealtimeRelay
     self.people = people ?? PeopleStore()
     #if DEBUG
@@ -170,6 +181,9 @@ final class SessionModel {
     }
     if launchEnvironment["ASIDE_CAPTURE_MODE"] == "display_glasses" { captureMode = .displayGlasses }
     #endif
+    self.cueSpeaker.onPlaybackChanged = { [weak self] active in self?.microphone.setCuePlaybackActive(active) }
+    self.cueSpeaker.onStatus = { [weak self] status in self?.cueAudioStatus = status }
+    self.cueSpeaker.onDiagnostic = { [weak self] message in self?.captionDiagnostics.record(message) }
     phoneCamera.onFrame = { [weak self] image, time in
       guard let self, self.phase == .active, self.captureMode == .phone else { return }
       self.phonePreview = image; self.phoneFramesReceived += 1; self.sample(image, at:time); self.checkFaces(image, at:time)
@@ -178,7 +192,9 @@ final class SessionModel {
     // Raw voice energy (fans, music, crowds, ongoing talk) never cancels cues; only recognized speech updates timing.
     microphone.onVoice = nil
     microphone.onPCM = { [weak self] data, time in Task { @MainActor in
-      guard let self, time >= self.captureStartedAt else { return }
+      guard let self, self.phase == .starting || self.phase == .active, time >= self.captureStartedAt else { return }
+      self.lastAudioCaptureAtMs = time
+      self.captureActivity.audioReceivedAtMs = nowMs()
       self.sendRealtimePCM(data, endedAtMs:time)
     } }
     microphone.onChunk = { [weak self] chunk in Task { @MainActor in self?.transcribe(chunk) } }
@@ -192,6 +208,7 @@ final class SessionModel {
   private func configureGlassesCallbacks() {
     glasses.onFrame = { [weak self] image, time in self?.sample(image, at:time); self?.checkFaces(image, at:time) }
     glasses.onFailure = { [weak self] message in self?.captureFailed(message) }
+    glasses.onDiagnostic = { [weak self] message in self?.captionDiagnostics.record(message) }
     glasses.onHelp = { [weak self] in
       guard let self else { return }
       if self.connectionTestOnly { self.manualDisplayTest() }
@@ -221,15 +238,36 @@ final class SessionModel {
     }
     if sceneOnly { return nil } // A fresh image is sufficient; missing audio is reported separately.
     let expectedSource = captureMode == .displayGlasses ? "glasses_pcm" : captureMode == .regularGlasses ? "glasses_hfp" : "phone"
-    guard let audio = latestAudioContext, timestamp - audio.capturedAtMs <= 10000,
+    guard let audio = latestAudioContext, timestamp - max(audio.capturedAtMs,lastAudioCaptureAtMs) <= 10000,
           audio.capturedAtMs <= timestamp + 1000, audio.source == expectedSource else {
       return "Waiting for live \(captureMode.hasGlassesDisplay ? "glasses ambient" : "microphone") audio."
     }
     return nil
   }
   func checkCaptureHealth(at timestamp: Double = nowMs()) {
-    guard phase == .active, !simulate, timestamp - captureActiveAtMs >= 12000,
-          let issue = liveInputIssue(at:timestamp) else { return }
+    guard phase == .active, !simulate, timestamp - captureActiveAtMs >= 12000 else { return }
+    let delayed = "Glasses stream is delayed. Waiting for fresh camera and audio."
+    guard let issue = liveInputIssue(at:timestamp) else {
+      if notice == delayed {
+        notice = ""
+        captionDiagnostics.record("Capture current again")
+      }
+      return
+    }
+    if captureMode == .displayGlasses,
+       captureActivity.isReceiving(requiresVideo:requiresCamera,requiresAudio:!sceneOnly,at:timestamp) {
+      // HFP can briefly delay the shared DAT link. Keep receiving so it can
+      // catch up; requestCue still rejects stale capture timestamps. Never
+      // relabel old frames/audio as fresh or bypass a real SDK disconnect.
+      if notice != delayed { captionDiagnostics.record("Capture delayed: \(issue)") }
+      if cue != nil {
+        cueSpeaker.stop(); cue = nil; lastSceneSummary = nil
+        lastAnalysisOutcome = "Waiting for fresh input."
+        feedback("Stream delayed · waiting for fresh input")
+      }
+      notice = delayed
+      return
+    }
     pause("Capture stopped receiving data. \(issue) Resume after checking the connection.")
   }
   var analysisStatus: String {
@@ -328,6 +366,7 @@ final class SessionModel {
     let thisEpoch = epoch
     phase = .starting
     captureStartedAt = nowMs()
+    captureActivity = CaptureActivity()
     lastAnalysisAt = 0; nextAnalysisAt = 0
     invalidateCue()
     notice = displayOnly ? "Opening controls on glasses. Camera and microphone stay off." : simulate ? "SIMULATED INPUT. No camera or microphone recording." : captureMode == .phone ? "Starting the selected iPhone inputs…" : captureMode.hasGlassesDisplay ? "Opening glasses camera and ambient microphone permissions…" : "Opening glasses permissions, then selecting HFP microphone…"
@@ -360,13 +399,23 @@ final class SessionModel {
             glasses.show(nil, paused:true, ready:true)
             return
           }
-          if captureMode.hasGlassesDisplay { glasses.show(nil, starting:true) }
+          if captureMode.hasGlassesDisplay {
+            glasses.show(nil, starting:true)
+          }
           if captureMode == .phone {
             try await microphone.startPhone()
             guard epoch == thisEpoch, !Task.isCancelled else { microphone.stop(); return }
             if phoneCameraEnabled { try await phoneCamera.start() }
           } else {
-            try await glasses.start(microphone:microphone, audioUID:selectedAudioUID, withDisplay:captureMode.hasGlassesDisplay)
+            try await glasses.start(microphone:microphone, audioUID:selectedAudioUID, withDisplay:captureMode.hasGlassesDisplay, voiceAudioEnabled:spokenCuesEnabled) { [weak self] in
+              guard let self, self.spokenCuesEnabled else { return }
+              do { try await self.cueSpeaker.prepare(for:self.captureMode) }
+              catch is CancellationError { throw CancellationError() }
+              catch {
+                self.cueAudioStatus = "Cue audio: \(error.localizedDescription)"
+                self.captionDiagnostics.record("Cue audio setup failed: \(error.localizedDescription)")
+              }
+            }
           }
           // Muse closes idle streams before slow glasses permission/startup can
           // finish. Connect only after the capture sources are running.
@@ -422,14 +471,17 @@ final class SessionModel {
   }
   func pause(_ reason: String = "Paused. Camera, microphone and uploads stopped.") {
     guard phase == .active || phase == .starting else { return }
+    captionDiagnostics.record("Capture paused: \(reason)")
     epoch += 1
     phase = .paused
     openingGlassesControls = false; glassesControlsReady = false
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeCaptions()
-    ambientWindow = AmbientWindow()
+    ambientWindow = AmbientWindow(); lastAudioCaptureAtMs = 0
+    captureActivity = CaptureActivity()
     loopTask?.cancel(); invalidateCue()
+    cueSpeaker.endSession()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     latestFrame = nil; latestAudioContext = nil; latestSampleAt = 0; transcript.removeAll(); lastVoiceAt = 0; captionText = nil; captionAtMs = 0
     clearTone()
@@ -454,8 +506,10 @@ final class SessionModel {
     analysisFeedback = nil; pendingManualAnalysisAt = nil
     startTask?.cancel(); asrTask?.cancel(); asrTask = nil; isTranscribing = false
     stopRealtimeCaptions()
-    ambientWindow = AmbientWindow()
+    ambientWindow = AmbientWindow(); lastAudioCaptureAtMs = 0
+    captureActivity = CaptureActivity()
     loopTask?.cancel(); invalidateCue()
+    cueSpeaker.endSession()
     microphone.stop(); phoneCamera.stop(); phonePreview = nil
     transcript.removeAll(); latestFrame = nil; latestAudioContext = nil; contextText = ""; latestSampleAt = 0
     nextAnalysisAt = 0; simulatedScene = ""; currentScene = nil
@@ -761,6 +815,7 @@ final class SessionModel {
   }
   func markDistracting() { distracting += 1; dismiss() }
   private func invalidateCue() {
+    cueSpeaker.stop()
     if isThinking && phase == .active {
       analysisFeedback = "New speech. Analyze after a pause."
     } else if cue != nil { analysisFeedback = "Streaming" }
@@ -808,9 +863,11 @@ final class SessionModel {
     }
   }
   private func sample(_ image: UIImage, at time: Double) {
+    guard phase == .active, time >= captureStartedAt else { return }
+    captureActivity.videoReceivedAtMs = nowMs()
     // Keep a fresh image locally even when inference backs off to 20–30 seconds.
     let interval = analyzesSurroundings ? 2.0 : sampleInterval
-    guard phase == .active, time >= captureStartedAt, time - latestSampleAt >= interval * 1000 else { return }
+    guard time - latestSampleAt >= interval * 1000 else { return }
     let scale = min(1, 640 / max(image.size.width, image.size.height))
     let target = CGSize(width:image.size.width * scale, height:image.size.height * scale)
     let format = UIGraphicsImageRendererFormat(); format.scale = 1
@@ -1100,7 +1157,7 @@ final class SessionModel {
         let evidenceStillFresh = surroundings ? (speechStillFresh || frameStillFresh) : (manual || speechStillFresh)
         guard epoch == thisEpoch, generation == revision, phase == .active, !Task.isCancelled,
               completedAt - timestamp <= SurroundingsPolicy.responseMaxAgeMs,
-              evidenceStillFresh else {
+              evidenceStillFresh, liveInputIssue(at:completedAt) == nil else {
           staleDrops += 1
           // The current cue stays up; the next check replaces it.
           if epoch == thisEpoch && generation == revision { feedback(cue == nil && surroundings ? "Checking again shortly…" : "Streaming") }
@@ -1116,6 +1173,7 @@ final class SessionModel {
         lastAnalysisAtMs = completedAt
         if surroundings, !result.should_display && result.type == "abstain" {
           // No supported current context: do not leave an earlier conversation's advice on the lens.
+          cueSpeaker.stop()
           cue = nil
           lastAnalysisOutcome = "Waiting for clearer context."
           feedback("Listening for context…")
@@ -1135,6 +1193,9 @@ final class SessionModel {
         // The same advice, or nothing better than what is already showing, keeps the cue on screen.
         if normalized == current || (cue != nil && ConversationPolicy.isNothingToAdd(text)) {
           lastAnalysisOutcome = "Current cue still fits."
+          // A failed/route-blocked utterance may now be playable. CueSpeaker
+          // suppresses cues that are pending, playing, or already completed.
+          if spokenCuesEnabled { cueSpeaker.speak(text, mode:captureMode) }
           return
         }
         pendingManualAnalysisAt = nil // A cue answers a request that was waiting behind this check.
@@ -1142,6 +1203,7 @@ final class SessionModel {
         lastAnalysisOutcome = "Social cue ready."
         analysisFeedback = "Social cue"
         publishDisplay()
+        if spokenCuesEnabled { cueSpeaker.speak(text, mode:captureMode) }
         notice = ""
       } catch {
         if epoch == thisEpoch, generation == revision, !Task.isCancelled {
