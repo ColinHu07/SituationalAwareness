@@ -31,6 +31,7 @@ final class CaptionDiagnostics {
   @ObservationIgnored private var finals = 0
   @ObservationIgnored private var speakers = 0
   @ObservationIgnored private var cues = CueTimingLog()
+  @ObservationIgnored private var lastTrigger: String?
   private static let logger = Logger(subsystem:"com.colinhu07.situationalawareness", category:"CaptionTiming")
   private static let formatter: DateFormatter = {
     let value = DateFormatter(); value.dateFormat = "HH:mm:ss.SSS"; return value
@@ -46,7 +47,7 @@ final class CaptionDiagnostics {
     captureDispatchMs = 0; sendMs = 0; networkRTT = nil; progressMs = nil; progressAgeMs = nil; server = nil
     lastCaptureLog = -.infinity; lastSendLog = -.infinity
     firstPartial = false; firstSpeaker = false; firstFinal = false
-    partials = 0; finals = 0; speakers = 0; entries = []; cues = CueTimingLog()
+    partials = 0; finals = 0; speakers = 0; entries = []; cues = CueTimingLog(); lastTrigger = nil
     record("Start tapped")
     updateSummary()
   }
@@ -114,6 +115,13 @@ final class CaptionDiagnostics {
     record("Caption state \(changed ? "updated" : "unchanged") turn=\(event.turnId ?? -1); receive → state \(ms(durationMs))")
   }
 
+  /// What a finished turn or a silence prompted, and why a check was skipped. Reasons only, never words.
+  func trigger(_ note: String, turn: Int?) {
+    lastTrigger = "\(note)\(turn.map { " (turn=\($0))" } ?? "")"
+    record("Trigger\(turn.map { " turn=\($0)" } ?? ""): \(note)")
+    updateSummary()
+  }
+
   // Cue timing: the five steps from the end of speech to the cue on screen. Times only, never words.
   func turnFinal(turn: Int?, speechEndMs: Double, at time: Double = nowMs()) {
     let done = cues.turnFinal(turn:turn, speechEndMs:speechEndMs, at:time)
@@ -165,6 +173,7 @@ final class CaptionDiagnostics {
     Muse processed offset: \(ms(progressMs)) audio
     Latest event age (estimate): \(ms(progressAgeMs))
     Partials / speaker events / finals: \(partials) / \(speakers) / \(finals)
+    Last trigger: \(lastTrigger ?? "—")
     Last cue: \(cue.map { "\($0.label), speech end \(clock($0.speechEndMs))" } ?? "—")
       Final received: \(cue?.offset(cue?.finalReceivedMs) ?? "—")
       Request sent: \(cue?.offset(cue?.requestSentMs) ?? "—")

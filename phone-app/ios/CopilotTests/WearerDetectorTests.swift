@@ -199,11 +199,14 @@ final class WearerDetectorTests: XCTestCase {
 
 @MainActor
 final class WearerSessionTests: XCTestCase {
-  override func setUp() { UserDefaults.standard.removeObject(forKey:"copilot.wearerVoiceDbFS") }
+  override func setUp() { for key in ["copilot.wearerVoiceDbFS", "copilot.skipWearerWait"] { UserDefaults.standard.removeObject(forKey:key) } }
+  override func tearDown() { UserDefaults.standard.removeObject(forKey:"copilot.skipWearerWait") }
 
   /// Live captions from a scripted relay. Requests fail at the invalid endpoint, so nothing leaves the test.
+  /// These sessions wait for the wearer to be detected, which is what the detector is for.
   private func captioningModel(_ relay: LevelRelay) async -> SessionModel {
     let model = SessionModel(people:PeopleStore(fileURL:nil), makeRealtimeRelay:{ _,_ in relay })
+    model.skipWearerWait = false
     model.phoneCameraEnabled = false
     model.endpoint = "invalid-endpoint"
     await resume(model)

@@ -77,6 +77,10 @@ struct WearerDetector: Equatable {
 
   /// Whether turns can be told apart: a label is chosen, or the wearer's level is remembered.
   var knowsWearer: Bool { wearerLabel != nil || wearerLevelDbFS != nil }
+  /// Every labeled voice heard, in label order, with its recent turns and their average level.
+  var voiceLevels: [(label: String, turns: Int, levelDbFS: Double)] {
+    levels.keys.sorted().compactMap { label in average(label).map { (label, levels[label]?.count ?? 0, $0) } }
+  }
   /// Whether "That was me" has a turn to learn from.
   var canClaim: Bool { lastLabel != nil || lastLevelDbFS != nil }
 

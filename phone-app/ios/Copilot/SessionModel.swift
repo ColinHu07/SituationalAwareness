@@ -10,6 +10,10 @@ final class SessionModel {
   var consent = false
   /// Coach the wearer when something they said may come across too blunt.
   var toneCheckEnabled = true
+  /// "Don't wait for wearer detection": until the wearer's voice is found, a turn not matched to them counts as someone else's.
+  var skipWearerWait = UserDefaults.standard.object(forKey:"copilot.skipWearerWait") as? Bool ?? true {
+    didSet { UserDefaults.standard.set(skipWearerWait, forKey:"copilot.skipWearerWait") }
+  }
   /// The wearer's calibrated voice level at the mic (dBFS); nil until they tap "That was me".
   var wearerVoiceDbFS: Double? = UserDefaults.standard.object(forKey:"copilot.wearerVoiceDbFS") as? Double
   /// Finds the wearer's voice among live-caption labels by loudness, for the whole session. "That was me" overrides it.
@@ -842,7 +846,7 @@ final class SessionModel {
     speculationTask = Task { [weak self] in
       try? await Task.sleep(for:.milliseconds(Int(wait.rounded(.up))))
       guard let self, !Task.isCancelled, phase == .active, !sceneChecks,
-            let early = speculation.consider(turn:turn, speaker:realtimeSpeakers[turn], wearerLabel:wearerLabel, at:nowMs()) else { return }
+            let early = speculation.consider(turn:turn, speaker:realtimeSpeakers[turn], wearerLabel:wearerLabel, waitForWearer:!skipWearerWait, at:nowMs()) else { return }
       let sent = requests
       requestCue(manual:false, trigger:.question, partial:TranscriptEntry(text:String(early.text.prefix(500)), startMs:early.heardAt - 1000, endMs:early.heardAt, confidence:nil, speaker:realtimeSpeakers[turn]))
       guard requests > sent else { return }
@@ -858,17 +862,28 @@ final class SessionModel {
     // unless the turn was the wearer's own or no question after all.
     if early == .rerun || early == .withdraw { dropConversationCheck() }
     if early == .withdraw { cueSpeaker.stop(); clearCue() }
-    guard !sceneChecks, phase == .active, transcript.last?.id == entry.id, role == "other" else { return }
-    // Until the wearer's voice is found, this turn could be their own: no question or stuck check.
-    let known = wearerKnown
-    if early != .keep, let trigger = early == .rerun ? .question : ConversationPolicy.trigger(for:entry.text, wearerKnown:known) { requestCue(manual:false, trigger:trigger) }
-    guard known else { return }
+    // Until the wearer's voice is found, this turn could be their own: no question or stuck check, unless told not to wait.
+    let decision = TriggerDecision.forTurn(text:entry.text, role:role, wearerKnown:wearerKnown || skipWearerWait, sceneChecks:sceneChecks,
+                                           active:phase == .active, newest:transcript.last?.id == entry.id, early:early)
+    let voices = wearerKnown ? "" : "; voices: \(wearerDetector.levelsNote)"
+    if let trigger = decision.trigger { send(trigger, turn:turn) } else { captionDiagnostics.trigger(decision.note + voices, turn:turn) }
+    guard decision.stuck else { return }
     stuckTask = Task { [weak self] in
       try? await Task.sleep(for:.milliseconds(Int(ConversationPolicy.stuckDelayMs)))
       // Any speech cancels this wait. A cue on screen or a check in flight already covers the moment.
-      guard let self, !Task.isCancelled, cue == nil, cueTask == nil else { return }
-      requestCue(manual:false, trigger:.stuck)
+      guard let self else { return }
+      guard !Task.isCancelled else { captionDiagnostics.trigger("stuck skipped: cancelled by new speech, a dismissal or That was me", turn:turn); return }
+      send(.stuck, turn:turn)
     }
+  }
+  /// Sends an automatic conversation check, and logs that it went or why it did not. See CueGate.
+  private func send(_ trigger: CueTrigger, turn: Int?) {
+    let time = nowMs(), sent = requests
+    let skip = CueGate(uploadsDisabled:uploadsDisabled, active:phase == .active, checkInFlight:cueTask != nil, inputIssue:liveInputIssue(at:time),
+                       hasSpeech:!ConversationPolicy.turns(from:transcript, wearerLabel:wearerLabel).isEmpty,
+                       sinceStartMs:time - captureStartedAt, sinceDismissMs:time - dismissedAt, cueShowing:cue != nil).skip(for:trigger)
+    if trigger != .stuck || skip == nil { requestCue(manual:false, trigger:trigger) }
+    captionDiagnostics.trigger(requests > sent ? "\(trigger.rawValue) sent" : "\(trigger.rawValue) skipped: \(skip ?? "not sent, reason not recorded")", turn:turn)
   }
   /// Expiry is not a dismissal: no quiet interval follows.
   private func clearCue() {

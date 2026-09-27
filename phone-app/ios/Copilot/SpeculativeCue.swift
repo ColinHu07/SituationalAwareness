@@ -84,10 +84,11 @@ struct SpeculativeCue {
   }
 
   /// The words to check now and when they were last heard, or nil. They must have settled and look like a
-  /// question. The speaker must be labeled and must not be the wearer, whose own label has to be known first.
-  func consider(turn id: Int, speaker: String?, wearerLabel: String?, at time: Double) -> (text: String, heardAt: Double)? {
+  /// question. The speaker must be labeled and must not be the wearer. The wearer's own label has to be
+  /// known first, unless checks do not wait for the wearer to be detected.
+  func consider(turn id: Int, speaker: String?, wearerLabel: String?, waitForWearer: Bool = true, at time: Double) -> (text: String, heardAt: Double)? {
     guard !used.contains(id), let latest, latest.turn == id, time - latest.changedAt >= Self.settleMs - 5,
-          let speaker, let wearerLabel, speaker != "wearer", speaker != wearerLabel,
+          let speaker, wearerLabel != nil || !waitForWearer, speaker != "wearer", speaker != wearerLabel,
           Self.looksLikeQuestion(latest.text) else { return nil }
     return (latest.text, latest.changedAt)
   }

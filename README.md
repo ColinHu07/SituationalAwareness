@@ -199,6 +199,14 @@ Conversation cues no longer run on a 10-second timer. A check is sent with a `tr
 
 These settings supersede older timing descriptions elsewhere in this repository. Live Muse latency and cue quality with the new prompt have not been measured.
 
+### Trigger decisions and not waiting for the wearer
+
+**Settings → My voice → Don't wait for wearer detection** is on by default for now. While it is on, a turn that is not matched to the wearer counts as someone else's, so questions, pauses and indirect phrases prompt checks before the wearer's voice is found. The wearer's own questions can prompt a cue until then. A turn that is matched to the wearer never prompts a check. With the setting off, only indirect phrases and **Analyze** prompt a check until the wearer is found, as described above.
+
+The capture screens show **Your voice: learned** or **Your voice: learning**.
+
+**Caption timing** logs a `Trigger` line for every finished turn and every silence: which check was considered, whether it was sent, and if not, why. Reasons include the turn being the wearer's, the wearer not being detected yet, no question or phrase, a cue already showing, a check in flight, the dismiss quiet period, uploads being off, and camera or microphone input not being live. Until the wearer is found, the line also lists each voice label with its turn count and average level. The summary shows the last decision. Words are never logged.
+
 ### Early question checks and cue timing
 
 With live captions, a question is checked before its turn is finalized. A partial caption of someone else's turn sends the `question` check once its words have not changed for 300 ms and it looks like a question, and its cue is shown as soon as it returns. A partial looks like a question when it ends in a question mark (two words or more), or has at least four words and opens with a question word such as what, how, where, when, why, who, "are you", "do you", "did you", "have you", "can you" or "would you". The rules are in `phone-app/ios/Copilot/SpeculativeCue.swift`.

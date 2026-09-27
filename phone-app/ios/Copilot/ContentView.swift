@@ -91,6 +91,7 @@ struct ContentView: View {
           if !model.sceneOnly { VStack(alignment:.leading,spacing:12) {
             Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
             Text(model.speechMode).font(.caption).foregroundStyle(.secondary)
+            Text(model.voiceLine).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("main.voice")
             Text(model.captionText ?? "—")
               .font(.system(size:25,weight:.medium,design:.rounded))
               .foregroundStyle(model.captionText == nil ? .secondary : .primary)
@@ -234,7 +235,9 @@ struct ContentView: View {
     if voice.wearerLabel != nil { return "Found automatically: yours is the loudest voice at the microphone. No tap is needed." }
     if voice.knowsWearer { return "Remembered from earlier in this session. It is matched again when you next speak." }
     let saved = model.wearerVoiceDbFS == nil ? "" : " A saved voice level is used when live captions are unavailable."
-    return "Not found yet. It takes two of your turns and one from someone else. Until then only indirect phrases and Analyze prompt a cue." + saved
+    let waiting = model.skipWearerWait ? "Until then every voice counts as someone else's, so your own questions can prompt a cue."
+      : "Until then only indirect phrases and Analyze prompt a cue."
+    return "Not found yet. It takes two of your turns and one from someone else. " + waiting + saved
   }
   private var settings: some View {
     NavigationStack {
@@ -246,6 +249,8 @@ struct ContentView: View {
         Section("My voice") {
           Text(voiceStatus).font(.caption)
           ThatWasMeButton(model:model)
+          Toggle("Don't wait for wearer detection",isOn:$model.skipWearerWait)
+          Text("On: questions, pauses and indirect phrases prompt cues before your voice is found. Off: only indirect phrases and Analyze do until then.").font(.caption)
           if model.wearerDetector.knowsWearer || model.wearerVoiceDbFS != nil {
             Button("Reset my voice",role:.destructive) { model.resetWearerVoice() }
           }
