@@ -2,7 +2,7 @@
 
 **Live test:** the same installed iOS app offers **iPhone / Glasses** source selection and a shared camera-and-cue screen. Choose **Glasses → With display** for social cues on both screens and live captions on the phone. The iPhone source card also offers **Multi-speaker captions**, a separate Start/Stop test with up to three speaker rows. [Phone caption test setup](phone-app/ios/README.md#quick-multi-speaker-caption-test). [Step-by-step live glasses setup and test](docs/LIVE_GLASSES_TEST.md).
 
-**Current context display:** live multi-speaker captions stay on the phone. Glasses show one readable cue. Muse summarizes roughly the last 10 seconds of streaming speech and bases a social cue on that summary; without clear conversation, it uses the fresh scene and averaged ambient audio energy. The phone shows the summary under **Recent context**. Automatic checks run about every 10 seconds (15 in reduced-power mode), with one request at a time and at least 10 seconds to read each cue. See [Display behavior](display-glasses/README.md). Dated sections below describe earlier versions.
+**Current context display:** live multi-speaker captions stay on the phone. Glasses show one readable cue. With conversation on, Muse is asked for a cue at a moment, not on a timer: someone else asks a question, uses a common indirect phrase, or finishes speaking and three seconds pass in silence, or the wearer selects **Analyze**. Each check sends the last three turns as text, labeled wearer or other, and its cue clears after 8 seconds. Scene-only Display mode keeps automatic camera cues on a 30-second timer. See [Display behavior](display-glasses/README.md) and [cues at the right moment](#september-26-cues-at-the-right-moment). Dated sections below describe earlier versions.
 
 **Live face enrollment:** William's `0e1e120` changes are integrated with the context display above. Phone and glasses video share on-device face recognition. Confident new views of recognized friends can be saved automatically (up to three per conversation); a new addressed name plus one repeatedly observed unknown face can create a profile. **Settings → Save stills from video** controls automatic saving. Saved face crops persist in People and can be removed there.
 
@@ -177,3 +177,54 @@ William's `daba7fe` update is integrated with the existing phone and glasses flo
 The integration preserves realtime multi-speaker phone captions and timing diagnostics, the camera preview frame-rate fix, glasses scene/conversation switching, wristband controls, no-upload capture testing, and conversation learning when glasses streaming stops. Physical hardware and live-provider behavior still require validation.
 
 Merge validation: all 124 Node tests passed. Native simulator testing was attempted twice but blocked by local disk exhaustion while Xcode wrote module/index caches (`No space left on device`); native test results are not confirmed for this merge.
+
+## September 26: cues at the right moment
+
+Conversation cues no longer run on a 10-second timer. A check is sent with a `trigger` naming the moment:
+
+| Trigger | When it fires |
+|---|---|
+| `question` | Someone else finishes a turn that ends in a question mark |
+| `indirect` | Someone else uses a phrase listed in `phone-app/ios/Copilot/IndirectPhrases.swift` |
+| `stuck` | Someone else finishes a turn, then 3 seconds pass with no speech |
+| `manual` | The wearer selects **Analyze** |
+
+- **The wearer's own turns never prompt a check, and no tap is needed.** The glasses microphone sits next to the wearer's mouth, so their voice is the loudest. The app measures the speech level of each live-caption turn and averages it per speaker label. The loudest label becomes the wearer once it has two turns and averages at least 6 dB above every other voice heard. It is re-evaluated only when another label, with two turns, averages 6 dB above it.
+- **The wearer is kept for the whole session.** Caption labels are numbered afresh when captions restart after a pause, so the app keeps the wearer's level and matches the voice again on its first turn. Stop ends the session and forgets it.
+- **Until the wearer is found, no `question` or `stuck` check is sent.** Indirect phrases and **Analyze** still work. **Settings → My voice → That was me** is an optional override that marks the most recent caption as the wearer's. The six-second chunk fallback uses the level found in the session, or the saved voice level.
+- **Checks are small.** Only the last eight turns are sent, as text, labeled `wearer` or `other`. The newest turn is the one to respond to; the earlier ones show the topic. The most recent summary from a scene check in the same session is sent too, if it is under five minutes old. No image is sent. Optional **Settings → About me** text is sent as `aboutMe` so a suggested answer can be specific.
+- **Stale replies are dropped.** If anyone speaks while a reply is in flight, it is never shown. A cue needs a confidence of at least 0.8, has no minimum dwell, and clears after 8 seconds. **Analyze** always answers, with "Nothing to add" when nothing fits.
+- **Scene-only Display mode** keeps its camera cues and its prompt. Its timer is now 30 seconds. Modes with conversation on no longer send camera images to Muse.
+- **Backend.** `POST /api/cue` accepts `trigger` and an optional `aboutMe` of up to 500 characters. Conversation checks use the new `SYSTEM_PROMPT` and a five-field schema. `meaning` is a valid cue type. Clients that send no trigger get `manual`, `question` or `stuck` from the request. The mock provider abstains on ordinary speech instead of offering generic listening advice.
+
+These settings supersede older timing descriptions elsewhere in this repository. Live Muse latency and cue quality with the new prompt have not been measured.
+
+### Trigger decisions and not waiting for the wearer
+
+**Settings → My voice → Don't wait for wearer detection** is on by default for now. While it is on, a turn that is not matched to the wearer counts as someone else's, so questions, pauses and indirect phrases prompt checks before the wearer's voice is found. The wearer's own questions can prompt a cue until then. A turn that is matched to the wearer never prompts a check. With the setting off, only indirect phrases and **Analyze** prompt a check until the wearer is found, as described above.
+
+The capture screens show **Your voice: learned** or **Your voice: learning**.
+
+**Caption timing** logs a `Trigger` line for every finished turn and every silence: which check was considered, whether it was sent, and if not, why. Reasons include the turn being the wearer's, the wearer not being detected yet, no question or phrase, a cue already showing, a check in flight, the dismiss quiet period, uploads being off, and camera or microphone input not being live. Until the wearer is found, the line also lists each voice label with its turn count and average level. The summary shows the last decision. Words are never logged.
+
+### Early question checks and cue timing
+
+With live captions, a question is checked before its turn is finalized. A partial caption of someone else's turn sends the `question` check once its words have not changed for 300 ms and it looks like a question, and its cue is shown as soon as it returns. A partial looks like a question when it ends in a question mark (two words or more), or has at least four words and opens with a question word such as what, how, where, when, why, who, "are you", "do you", "did you", "have you", "can you" or "would you". The rules are in `phone-app/ios/Copilot/SpeculativeCue.swift`.
+
+- **One early check per turn, never on the wearer's turns.** The voice must carry a caption label, the wearer's own label must be known, and the two must differ. An unlabeled partial waits for its label.
+- **When the turn is finalized, the words are compared.** Punctuation, case and filler words are not a change, and nothing more is sent. If the words changed and are still a question, the check runs again and its cue replaces the early one. If the turn was the wearer's own, or was not a question, the early cue is cleared.
+- **Chunked transcription has no partial captions**, so it keeps the finished-turn checks only.
+
+**Caption timing** on the phone now shows five steps for the last cue, each measured from the end of speech: final received, request sent, response received and cue shown. A minus sign means the step happened before the speech ended, which an early check can do. The shared timing log has one line per step and a `Cue timing` line per cue. It records times only, never words.
+
+The conversation prompt also tells the model to abstain when the cue it would suggest does not fit the topic of the last two turns. It must not state places, names, facts or recommendations that are not in the turns or in `aboutMe`; when a cue would need one it suggests a general reply or a question instead. For an indirect phrase it explains the exact phrase that was said, with several example phrases and meanings in the prompt rather than one.
+
+### Optional Grok provider for conversation checks
+
+Set `XAI_API_KEY` in the ignored `.env` to send conversation checks to xAI's `grok-4.20-non-reasoning` (override with `XAI_MODEL`). The prompt, the five-field strict schema and the text-only request are the same; the output limit is 256 tokens. Scene checks, tone, learning and transcription stay on Muse, and `MUSE_API_KEY` is still required in live mode. With no `XAI_API_KEY`, conversation checks use Muse as before.
+
+If the Grok request fails, returns an unusable answer, or has not answered after 3 seconds, the same request is sent once to Muse. If Muse fails too, no cue is shown. A check the client cancelled is not retried. Scene checks are never retried.
+
+With the key set, the last eight turns, the most recent summary and the optional `aboutMe` text are sent to xAI instead of Meta. Review xAI's data terms before using it with real conversations.
+
+Every `/api/cue` response carries `metrics.provider`, `metrics.model` and `metrics.apiMs`, and the server log line for each cue request ends with `provider=… model=… apiMs=…`. `provider` is the one that answered. After a fallback the metrics also carry `fallbackFrom`, `fallbackReason` (`timeout`, `rate_limited`, `unavailable` or `error`) and `fallbackAfterMs`, the log line ends with `fallback=xai:timeout:3001ms`, and `apiMs` covers both attempts. `GET /api/health` reports `conversationModel`.

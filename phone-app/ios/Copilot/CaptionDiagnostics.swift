@@ -30,6 +30,8 @@ final class CaptionDiagnostics {
   @ObservationIgnored private var partials = 0
   @ObservationIgnored private var finals = 0
   @ObservationIgnored private var speakers = 0
+  @ObservationIgnored private var cues = CueTimingLog()
+  @ObservationIgnored private var lastTrigger: String?
   private static let logger = Logger(subsystem:"com.colinhu07.situationalawareness", category:"CaptionTiming")
   private static let formatter: DateFormatter = {
     let value = DateFormatter(); value.dateFormat = "HH:mm:ss.SSS"; return value
@@ -37,7 +39,7 @@ final class CaptionDiagnostics {
   private var uptimeMs: Double { ProcessInfo.processInfo.systemUptime * 1000 }
 
   var exportText: String {
-    "Caption timing — audio/text content excluded\nTime: phone local HH:mm:ss.SSS; +seconds since Start.\nServer timestamps use a separate session-relative clock.\n\n\(summary)\n\n" + entries.map(\.line).joined(separator:"\n")
+    "Caption timing — audio/text content excluded\nTime: phone local HH:mm:ss.SSS; +seconds since Start.\nServer timestamps use a separate session-relative clock.\nCue steps are measured from the end of speech; a minus sign means before it.\n\n\(summary)\n\n" + entries.map(\.line).joined(separator:"\n")
   }
 
   func reset() {
@@ -45,7 +47,7 @@ final class CaptionDiagnostics {
     captureDispatchMs = 0; sendMs = 0; networkRTT = nil; progressMs = nil; progressAgeMs = nil; server = nil
     lastCaptureLog = -.infinity; lastSendLog = -.infinity
     firstPartial = false; firstSpeaker = false; firstFinal = false
-    partials = 0; finals = 0; speakers = 0; entries = []
+    partials = 0; finals = 0; speakers = 0; entries = []; cues = CueTimingLog(); lastTrigger = nil
     record("Start tapped")
     updateSummary()
   }
@@ -113,7 +115,53 @@ final class CaptionDiagnostics {
     record("Caption state \(changed ? "updated" : "unchanged") turn=\(event.turnId ?? -1); receive → state \(ms(durationMs))")
   }
 
+  /// What a finished turn or a silence prompted, and why a check was skipped. Reasons only, never words.
+  func trigger(_ note: String, turn: Int?) {
+    lastTrigger = "\(note)\(turn.map { " (turn=\($0))" } ?? "")"
+    record("Trigger\(turn.map { " turn=\($0)" } ?? ""): \(note)")
+    updateSummary()
+  }
+
+  // Cue timing: the five steps from the end of speech to the cue on screen. Times only, never words.
+  func turnFinal(turn: Int?, speechEndMs: Double, at time: Double = nowMs()) {
+    let done = cues.turnFinal(turn:turn, speechEndMs:speechEndMs, at:time)
+    record("Turn final\(turn.map { " turn=\($0)" } ?? ""): speech end \(clock(speechEndMs)); final received +\(ms(max(0, time - speechEndMs)))")
+    finished(done)
+  }
+
+  func cueRequested(trigger: String, early: Bool, speechEndMs: Double?, at time: Double = nowMs()) {
+    cues.requested(trigger:trigger, early:early, speechEndMs:speechEndMs, at:time)
+    record("Cue request sent (\(cues.current?.label ?? trigger))\(cues.current?.turn.map { " turn=\($0)" } ?? "")")
+  }
+
+  func cueSentEarly(for turn: Int) { cues.sentEarly(for:turn) }
+
+  func cueAnswered(at time: Double = nowMs()) {
+    guard let sent = cues.current?.requestSentMs, cues.current?.responseReceivedMs == nil else { return }
+    cues.answered(at:time)
+    record("Cue response received: request → response \(ms(max(0, time - sent)))")
+  }
+
+  func cueShown(at time: Double = nowMs()) {
+    guard let answered = cues.current?.responseReceivedMs, cues.current?.cueShownMs == nil else { return }
+    let done = cues.shown(at:time)
+    record("Cue shown: response → screen \(ms(max(0, time - answered)))")
+    finished(done)
+  }
+
+  private func finished(_ timing: CueTiming?) {
+    guard let timing else { return }
+    record("Cue timing (\(timing.label))\(timing.turn.map { " turn=\($0)" } ?? ""): speech end \(clock(timing.speechEndMs)); \(timing.steps)")
+    updateSummary()
+  }
+
+  private func clock(_ value: Double?) -> String {
+    guard let value, value.isFinite else { return "—" }
+    return Self.formatter.string(from:Date(timeIntervalSince1970:value / 1000))
+  }
+
   private func updateSummary() {
+    let cue = cues.lastShown
     summary = """
     Captured / socket-sent: \(ms(Double(capturedBytes)/32)) / \(ms(Double(sentBytes)/32)) audio
     Phone send backlog: \(ms(Double(max(0,capturedBytes-sentBytes))/32)) audio
@@ -125,6 +173,12 @@ final class CaptionDiagnostics {
     Muse processed offset: \(ms(progressMs)) audio
     Latest event age (estimate): \(ms(progressAgeMs))
     Partials / speaker events / finals: \(partials) / \(speakers) / \(finals)
+    Last trigger: \(lastTrigger ?? "—")
+    Last cue: \(cue.map { "\($0.label), speech end \(clock($0.speechEndMs))" } ?? "—")
+      Final received: \(cue?.offset(cue?.finalReceivedMs) ?? "—")
+      Request sent: \(cue?.offset(cue?.requestSentMs) ?? "—")
+      Response received: \(cue?.offset(cue?.responseReceivedMs) ?? "—")
+      Cue shown: \(cue?.offset(cue?.cueShownMs) ?? "—")
     """
   }
 

@@ -170,12 +170,9 @@ struct PhoneCaptureView: View {
 
   private var captions: some View {
     VStack(alignment:.leading,spacing:10) {
-      HStack {
-        Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
-        Spacer()
-        ThatWasMeButton(model:model)
-      }
+      Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
       Text(model.speechMode).font(.caption).foregroundStyle(.secondary)
+      if !model.sceneOnly { Text(model.voiceLine).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("capture.voice") }
       Text(model.captionText ?? "—")
         .font(.title3).foregroundStyle(model.captionText == nil ? .secondary : .primary)
         .frame(maxWidth:.infinity,minHeight:45,alignment:.leading)

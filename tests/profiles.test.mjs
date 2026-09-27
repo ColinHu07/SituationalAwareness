@@ -61,7 +61,8 @@ test('live learn sends strict profile schema and prompts use profiles as backgro
   assert.equal(body.messages[0].content, LEARN_PROMPT);
   assert.equal(body.response_format.json_schema.strict, true);
   assert.deepEqual(result.people[0].facts, ['Made the team']);
-  for (const prompt of [SYSTEM_PROMPT, SURROUNDINGS_PROMPT]) assert.match(prompt, /background memory, not current evidence/);
+  assert.match(SURROUNDINGS_PROMPT, /background memory, not current evidence/);
+  assert.match(SYSTEM_PROMPT, /people and groups are background\. Use them to fit a follow-up, never as the reason to speak\./);
 });
 
 test('cues carry a normalized scene label, even when abstaining', async () => {
@@ -72,7 +73,8 @@ test('cues carry a normalized scene label, even when abstaining', async () => {
   assert.equal(validateCue(base).scene, '', 'scene is optional for fixtures');
   assert.throws(() => validateCue({ ...base, scene: 5 }));
   assert.equal(mockCue({ transcript: [{ text: "We're at the funeral now" }], analysisMode: 'surroundings', manual: false }).scene, 'funeral');
-  for (const prompt of [SYSTEM_PROMPT, SURROUNDINGS_PROMPT]) assert.match(prompt, /Set scene to a short lowercase label only when fresh visual evidence or explicit recent words support the setting/);
+  assert.match(SURROUNDINGS_PROMPT, /Set scene to a short lowercase label only when fresh visual evidence or explicit recent words support the setting/);
+  assert.doesNotMatch(SYSTEM_PROMPT, /scene/, 'Conversation checks are about words, not the setting');
   assert.equal(validateInput({ ...input(), currentScene: 'library' }, NOW).currentScene, 'library');
   assert.throws(() => validateInput({ ...input(), currentScene: 'x'.repeat(41) }, NOW), InputError);
 });

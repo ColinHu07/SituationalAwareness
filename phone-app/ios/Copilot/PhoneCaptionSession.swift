@@ -121,12 +121,15 @@ protocol PhoneCaptionRelay: AnyObject {
   var onEvent: ((RealtimeASREvent) -> Void)? { get set }
   var onFailure: ((String) -> Void)? { get set }
   var onSend: ((Int, Double) -> Void)? { get set }
+  var acceptsPCM: Bool { get }
   func start(languageBias: [String]) async throws
   func sendPCM(_ data: Data)
   func stop()
 }
 extension PhoneCaptionRelay {
   var onSend: ((Int, Double) -> Void)? { get { nil } set {} }
+  /// Whether audio passed to `sendPCM` right now joins the caption stream. Audio offered earlier is dropped.
+  var acceptsPCM: Bool { true }
 }
 extension RealtimeASRClient: PhoneCaptionRelay {}
 

@@ -1,4 +1,4 @@
-import { boundedTranscript, LIMITS } from '../shared/protocol.mjs';
+import { boundedTranscript, LIMITS, TRIGGERS } from '../shared/protocol.mjs';
 export class InputError extends Error { constructor(message) { super(message); this.status = 400; } }
 const require = (condition, message) => { if (!condition) throw new InputError(message); };
 export function validateInput(body, now = Date.now()) {
@@ -21,6 +21,9 @@ export function validateInput(body, now = Date.now()) {
   require(Array.isArray(recentMoments) && recentMoments.length <= 8 && recentMoments.every(m => m && isText(m.summary, 200) &&
     Number.isFinite(m.atMs) && m.atMs <= now + 1000 && m.atMs >= now - 30 * 60_000), 'Invalid recentMoments');
   require(body.previousCue === undefined || isText(body.previousCue, LIMITS.cueChars), 'Invalid previousCue');
+  // The moment that prompted a conversation check, and what the wearer chose to share about themselves.
+  require(body.trigger == null || TRIGGERS.includes(body.trigger), 'Invalid trigger');
+  require(body.aboutMe == null || isText(body.aboutMe, 500), 'Invalid aboutMe');
   const { people, groups } = validateProfiles(body);
   let frame = null;
   if (body.frame != null) {
@@ -48,7 +51,8 @@ export function validateInput(body, now = Date.now()) {
   }
   return { transcript: boundedTranscript(body.transcript.map(x => ({ ...x, confidence: x.confidence ?? null })), now),
     frame, context: body.context, manual: body.manual, analysisMode, audioContext, people, groups, currentScene: body.currentScene ?? '',
-    recentMoments: recentMoments.map(({ atMs, summary }) => ({ atMs, summary })), previousCue: body.previousCue ?? '' };
+    recentMoments: recentMoments.map(({ atMs, summary }) => ({ atMs, summary })), previousCue: body.previousCue ?? '',
+    trigger: body.trigger ?? null, aboutMe: (body.aboutMe ?? '').trim() };
 }
 
 const isText = (s, max) => typeof s === 'string' && s.length <= max;

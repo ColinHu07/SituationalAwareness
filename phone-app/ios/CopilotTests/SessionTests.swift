@@ -22,8 +22,8 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(model.isThinking)
     model.requestCue(manual:false)
     XCTAssertEqual(model.requests,1,"Only one analysis may run at a time")
-    XCTAssertEqual(model.analysisInterval(reducedPower:false),10)
-    XCTAssertEqual(model.analysisInterval(reducedPower:true),15)
+    XCTAssertEqual(model.analysisInterval(reducedPower:false),30,"Scene-only mode keeps a 30 second backup timer")
+    XCTAssertEqual(model.analysisInterval(reducedPower:true),30)
     model.stop()
   }
 
@@ -108,37 +108,39 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(screen.labels,["Pause","Analyze","Stop"])
   }
 
-  func testOrdinarySpeechStillGetsAFallbackCue() async throws {
+  func testOrdinarySpeechGetsNoFillerAdviceButAnExplicitRequestIsAnswered() async throws {
     let model = try await activeModel()
     defer { model.stop() }
+    try await Task.sleep(for:.milliseconds(1600)) // checks start 1.5 s into a session
     model.addSimulationLine("The sky is blue.")
-    try await Task.sleep(for:.milliseconds(1600))
+    try await Task.sleep(for:.milliseconds(3700))
+    XCTAssertEqual(model.requests,1,"Silence after someone's turn is the only automatic check")
+    XCTAssertNil(model.cue,"Ordinary speech gets no generic listening advice")
+    XCTAssertTrue(model.moments.isEmpty,"Conversation checks keep no summaries")
     model.requestCue(manual:true)
     XCTAssertEqual(model.analysisFeedback,"Analyzing…")
     try await Task.sleep(for:.milliseconds(600))
-    XCTAssertEqual(model.cue,"Keep listening, then ask a follow-up question.")
+    XCTAssertEqual(model.cue,"Nothing to add","An explicit request always gets an answer")
     XCTAssertEqual(model.analysisFeedback,"Social cue")
-    XCTAssertEqual(model.moments.last?.summary,"SIMULATED: conversation mentioning \"The sky is blue.\".")
   }
-  func testNewCueWaitsForDwellAndSameCueDoesNotRedraw() async throws {
+  func testNewCueReplacesAtOnceSameCueDoesNotRedrawAndCuesExpire() async throws {
     let model = try await activeModel()
     defer { model.stop() }
-    model.addSimulationLine("Can you have it ready by Friday?")
     try await Task.sleep(for:.milliseconds(1600))
-    model.requestCue(manual:true)
+    model.addSimulationLine("Can you have it ready by Friday?")
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertEqual(model.cue,"Ask what they meant by Friday.")
     model.requestCue(manual:true)
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertEqual(model.shown,1,"An unchanged cue is kept, not re-shown")
     model.addSimulationLine("How is the robotics project?")
-    model.requestCue(manual:true)
-    try await Task.sleep(for:.milliseconds(1000))
-    XCTAssertEqual(model.cue,"Ask what they meant by Friday.","A different cue waits until the current one has been up 10 seconds")
-    try await Task.sleep(for:.milliseconds(8500))
-    XCTAssertEqual(model.cue,"Ask how their robotics project is going.")
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.cue,"Ask how their robotics project is going.","A different cue replaces the current one with no minimum dwell")
     model.contextChanged()
     XCTAssertEqual(model.cue,"Ask how their robotics project is going.","Editing notes or people keeps the cue on screen")
+    try await Task.sleep(for:.milliseconds(8500))
+    XCTAssertNil(model.cue,"A conversation cue clears itself after 8 seconds")
+    XCTAssertEqual(model.analysisFeedback,"Streaming")
   }
   func testSessionMemorySkipsRepeatsAndKeepsTheLatestEight() {
     let model = SessionModel(people:PeopleStore(fileURL:nil))
@@ -393,21 +395,24 @@ final class SessionTests: XCTestCase {
     model.sceneBecameInactive()
     XCTAssertEqual(model.phase,.stopped)
   }
-  func testOngoingSpeechKeepsInFlightAndDisplayedCue() async throws {
+  func testNewSpeechDropsTheAnswerInFlightButKeepsTheCueOnScreen() async throws {
     let model = try await activeModel()
     defer { model.stop() }
-    model.addSimulationLine("Can you have it ready by Friday?")
     try await Task.sleep(for:.milliseconds(1600))
-    model.requestCue(manual:true)
+    model.addSimulationLine("Can you have it ready by Friday?")
     XCTAssertTrue(model.isThinking)
-    // Conversation keeps going while the cue is being prepared.
+    // Conversation keeps going while the cue is being prepared: that answer is already out of date.
     model.addSimulationLine("Let's talk about lunch instead.")
-    try await Task.sleep(for:.milliseconds(600))
-    XCTAssertEqual(model.cue, "Ask what they meant by Friday.")
     XCTAssertFalse(model.isThinking)
+    XCTAssertEqual(model.staleDrops,1)
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertNil(model.cue,"A reply to superseded speech is never shown")
+    model.addSimulationLine("Would you like that hot or iced?")
+    try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.cue, "They asked whether you want it hot or iced.")
     // More speech does not clear a cue that is already showing; Dismiss does.
-    model.addSimulationLine("Anyway, how was your weekend?")
-    XCTAssertEqual(model.cue, "Ask what they meant by Friday.")
+    model.addSimulationLine("Anyway, the weather is nice.")
+    XCTAssertEqual(model.cue, "They asked whether you want it hot or iced.")
     model.dismiss()
     XCTAssertNil(model.cue)
   }
@@ -427,15 +432,14 @@ final class SessionTests: XCTestCase {
   func testMockCueDismissAndDedup() async throws {
     let model = try await activeModel()
     defer { model.stop() }
-    model.addSimulationLine("Can you have it ready by Friday?")
     try await Task.sleep(for:.milliseconds(1600))
-    model.requestCue(manual:true)
+    model.addSimulationLine("Can you have it ready by Friday?")
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertEqual(model.cue,"Ask what they meant by Friday.")
     XCTAssertEqual(model.shown,1)
     model.dismiss()
     XCTAssertNil(model.cue)
-    model.requestCue(manual:false)
+    model.addSimulationLine("Is Friday still fine?")
     XCTAssertEqual(model.requests,1,"Automatic checks stay quiet for 10 seconds after a dismissal")
     model.requestCue(manual:true)
     try await Task.sleep(for:.milliseconds(600))
@@ -518,11 +522,11 @@ final class SessionTests: XCTestCase {
     let model = try await activeModel()
     model.simulateSurroundings = true
     let timestamp = nowMs()
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),10)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),30)
     model.lastVoiceAt = timestamp
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),10)
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:true),15)
-    XCTAssertEqual(model.analysisInterval(at:timestamp+30001,reducedPower:false),10)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),30,"Speech does not speed up the scene timer")
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:true),30)
+    XCTAssertEqual(model.analysisInterval(at:timestamp+30001,reducedPower:false),30)
     model.latestAudioContext = AudioContext(capturedAtMs:timestamp,windowMs:1000,activityRatio:0.5,rmsDbFS:-30,source:"glasses_pcm")
     model.pause()
     XCTAssertNil(model.latestAudioContext)

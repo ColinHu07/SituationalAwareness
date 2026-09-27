@@ -323,16 +323,16 @@ struct RecoveryCard: View {
   }
 }
 
-// Teaches the app how loud the wearer's voice is, so only their own lines get a tone check.
+// An optional override, kept in Settings. The wearer's voice is normally found automatically.
+// It says the most recent caption was the wearer's, so cues never answer their own lines.
 struct ThatWasMeButton: View {
   @Bindable var model: SessionModel
   @State private var confirmed = false
   var body: some View {
-    if model.captionText != nil, model.transcript.last?.levelDbFS != nil {
-      Button { model.markLastLineAsMine(); confirmed = true } label: {
-        Image(systemName:confirmed ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
-      }.accessibilityLabel("That was me")
-        .onChange(of:model.captionText) { _, _ in confirmed = false }
-    }
+    Button { model.markLastLineAsMine(); confirmed = true } label: {
+      Label("That was me",systemImage:confirmed ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
+    }.disabled(!model.canClaimLastLine)
+      .accessibilityHint("Marks the most recent caption as yours")
+      .onChange(of:model.captionText) { _, _ in confirmed = false }
   }
 }

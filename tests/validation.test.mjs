@@ -4,11 +4,11 @@ import { validateInput, validateAudio, InputError } from '../server/validation.m
 import { NOW, input, surroundingsInput, audioInput, wav } from './fixtures.mjs';
 
 test('recent coherent transcript and matching image bytes pass without alteration', () => {
-  assert.deepEqual(validateInput(input(), NOW), { ...input(), analysisMode: 'conversation', audioContext: null, people: [], groups: [], currentScene: '', recentMoments: [], previousCue: '' });
+  assert.deepEqual(validateInput(input(), NOW), { ...input(), analysisMode: 'conversation', audioContext: null, people: [], groups: [], currentScene: '', recentMoments: [], previousCue: '', trigger: null, aboutMe: '' });
 });
 
 test('surroundings accepts silent scenes and fresh bounded audio observations', () => {
-  assert.deepEqual(validateInput(surroundingsInput(), NOW), { ...surroundingsInput(), people: [], groups: [], currentScene: '', recentMoments: [], previousCue: '' });
+  assert.deepEqual(validateInput(surroundingsInput(), NOW), { ...surroundingsInput(), people: [], groups: [], currentScene: '', recentMoments: [], previousCue: '', trigger: null, aboutMe: '' });
   for (const source of ['phone', 'glasses_pcm']) {
     const direct = surroundingsInput(); direct.audioContext.source = source;
     assert.equal(validateInput(direct, NOW).audioContext.source, source);

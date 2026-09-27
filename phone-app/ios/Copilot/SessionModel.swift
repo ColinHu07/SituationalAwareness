@@ -10,8 +10,20 @@ final class SessionModel {
   var consent = false
   /// Coach the wearer when something they said may come across too blunt.
   var toneCheckEnabled = true
+  /// "Don't wait for wearer detection": until the wearer's voice is found, a turn not matched to them counts as someone else's.
+  var skipWearerWait = UserDefaults.standard.object(forKey:"copilot.skipWearerWait") as? Bool ?? true {
+    didSet { UserDefaults.standard.set(skipWearerWait, forKey:"copilot.skipWearerWait") }
+  }
   /// The wearer's calibrated voice level at the mic (dBFS); nil until they tap "That was me".
   var wearerVoiceDbFS: Double? = UserDefaults.standard.object(forKey:"copilot.wearerVoiceDbFS") as? Double
+  /// Finds the wearer's voice among live-caption labels by loudness, for the whole session. "That was me" overrides it.
+  private(set) var wearerDetector = WearerDetector()
+  @ObservationIgnored private var levelTrack = SpeechLevelTrack()
+  var wearerLabel: String? { wearerDetector.wearerLabel }
+  /// A few facts the wearer chose to share, sent with conversation checks so a suggested answer can be specific.
+  var aboutMe = UserDefaults.standard.string(forKey:"copilot.aboutMe") ?? "" {
+    didSet { UserDefaults.standard.set(aboutMe, forKey:"copilot.aboutMe") }
+  }
   var toneFeedback: ToneFeedback?
   @ObservationIgnored private var toneTask: Task<Void, Never>?
   @ObservationIgnored private var pendingToneEntry: TranscriptEntry?
@@ -142,6 +154,11 @@ final class SessionModel {
   @ObservationIgnored private var dismissedAt: Double = 0
   @ObservationIgnored private var ttlTask: Task<Void, Never>?
   @ObservationIgnored private var cueTask: Task<Void, Never>?
+  @ObservationIgnored private var stuckTask: Task<Void, Never>?
+  /// The moment behind the check in flight; nil for a scene check.
+  @ObservationIgnored private var activeTrigger: CueTrigger?
+  @ObservationIgnored private var speculation = SpeculativeCue()
+  @ObservationIgnored private var speculationTask: Task<Void, Never>?
   @ObservationIgnored private var asrTask: Task<Void, Never>?
   @ObservationIgnored private var startTask: Task<Void, Never>?
   @ObservationIgnored private var loopTask: Task<Void, Never>?
@@ -215,6 +232,9 @@ final class SessionModel {
   var analyzesSurroundings: Bool {
     captureMode.needsGlasses || (captureMode == .phone && phoneCameraEnabled) || (simulate && simulateSurroundings)
   }
+  /// Timer-driven checks that read the camera image: scene-only glasses and the simulated scene fixtures.
+  /// Every other mode runs conversation checks, which fire at a moment and send text only.
+  var sceneChecks: Bool { sceneOnly || (simulate && simulateSurroundings) }
   var requiresCamera: Bool { captureMode.needsGlasses || (captureMode == .phone && phoneCameraEnabled) }
   func liveInputIssue(at timestamp: Double = nowMs()) -> String? {
     guard !simulate else { return nil }
@@ -258,9 +278,9 @@ final class SessionModel {
   }
   var analysisStatus: String {
     if offline { return "Server offline" }
-    if isThinking { return "Analyzing surroundings…" }
+    if isThinking { return sceneChecks ? "Analyzing surroundings…" : "Analyzing…" }
     if isTranscribing { return "Listening to conversation…" }
-    return analyzesSurroundings ? "Watching surroundings" : "Listening for context"
+    return sceneChecks ? "Watching surroundings" : "Listening for context"
   }
   func analysisInterval(at timestamp: Double = nowMs(), reducedPower: Bool) -> Double {
     return SurroundingsPolicy.analysisInterval(recentSpeech:lastVoiceAt > 0 && timestamp - lastVoiceAt < 30000, reducedPower:reducedPower)
@@ -510,6 +530,7 @@ final class SessionModel {
     let log = sessionLog; sessionLog = []
     learn(from:log)
     // Who's here is per conversation; the next session starts from scratch.
+    wearerDetector.reset()
     faceTask?.cancel(); faceTask = nil; faceReadout = nil; faceCandidates = [:]
     lastStillAt = [:]; stillsThisSession = [:]; stillsSaved = 0; unknownFaces = []; pendingNames = []
     presence.reset(); presentIDs = []
@@ -712,11 +733,23 @@ final class SessionModel {
   /// Speech this loud relative to the wearer's calibrated level counts as the wearer (6 dB ≈ half as loud).
   static let wearerLevelMarginDb = 6.0
   func speaker(forLevel level: Double?) -> String? {
-    guard let calibrated = wearerVoiceDbFS, let level, level > -120 else { return nil }
-    return level >= calibrated - Self.wearerLevelMarginDb ? "wearer" : "other"
+    // The level found in this session comes first; the saved level is from an earlier "That was me".
+    guard let level, level > -120,
+          let bar = wearerDetector.wearerBarDbFS ?? wearerVoiceDbFS.map({ $0 - Self.wearerLevelMarginDb }) else { return nil }
+    return level >= bar ? "wearer" : "other"
   }
-  /// "That was me": learn the wearer's voice level from the most recent caption, then relabel speech.
+  /// Whether the wearer's turns can be told from everyone else's. Simulated lines are scripted.
+  var wearerKnown: Bool { simulate || wearerDetector.knowsWearer || (realtimeRelay == nil && wearerVoiceDbFS != nil) }
+  /// Whether "That was me" has something to learn from: a caption turn, or a measured voice level.
+  var canClaimLastLine: Bool { wearerDetector.canClaim || transcript.last?.levelDbFS != nil }
+  /// "That was me", an optional override: the most recent caption turn was the wearer's.
+  /// Without live captions it learns the wearer's voice level from the most recent caption, then relabels speech.
   func markLastLineAsMine() {
+    if realtimeRelay != nil || transcript.isEmpty, wearerDetector.claimLastTurn() {
+      // Help that was being prepared for the wearer's own line no longer applies.
+      if ConversationPolicy.role(transcript.last?.speaker, wearerLabel:wearerLabel) == "wearer" { dropConversationCheck(); clearCue() }
+      return
+    }
     guard let level = transcript.last(where: { $0.levelDbFS.map { $0 > -120 } ?? false })?.levelDbFS else { return }
     let updated = wearerVoiceDbFS.map { ($0 + level) / 2 } ?? level
     wearerVoiceDbFS = updated
@@ -724,6 +757,7 @@ final class SessionModel {
     transcript = transcript.map { entry in var entry = entry; entry.speaker = speaker(forLevel:entry.levelDbFS); return entry }
   }
   func resetWearerVoice() {
+    wearerDetector.reset()
     wearerVoiceDbFS = nil
     UserDefaults.standard.removeObject(forKey:"copilot.wearerVoiceDbFS")
   }
@@ -793,9 +827,77 @@ final class SessionModel {
     } else if cue != nil { analysisFeedback = "Streaming" }
     generation += 1
     cueTask?.cancel(); cueTask = nil; isThinking = false
-    ttlTask?.cancel()
+    ttlTask?.cancel(); stuckTask?.cancel()
     lastSceneSummary = nil; lastAnalysisOutcome = nil; lastAnalysisAtMs = 0
     if cue != nil { cue = nil; publishDisplay() }
+  }
+  /// New words make a conversation answer in flight out of date, and mean nobody is stuck. The cue on screen stays.
+  private func dropConversationCheck() {
+    stuckTask?.cancel()
+    guard cueTask != nil, let trigger = activeTrigger else { return }
+    generation += 1
+    cueTask?.cancel(); cueTask = nil; isThinking = false; staleDrops += 1
+    if trigger == .manual { feedback("New speech. Analyze after a pause.") }
+  }
+  /// A question gets its check before its turn is finalized, once its words have settled. See SpeculativeCue.
+  private func speculate(turn: Int, text: String?) {
+    guard !sceneChecks, let wait = speculation.heard(turn:turn, text:text, at:nowMs()) else { return }
+    speculationTask?.cancel()
+    speculationTask = Task { [weak self] in
+      try? await Task.sleep(for:.milliseconds(Int(wait.rounded(.up))))
+      guard let self, !Task.isCancelled, phase == .active, !sceneChecks,
+            let early = speculation.consider(turn:turn, speaker:realtimeSpeakers[turn], wearerLabel:wearerLabel, waitForWearer:!skipWearerWait, at:nowMs()) else { return }
+      let sent = requests
+      requestCue(manual:false, trigger:.question, partial:TranscriptEntry(text:String(early.text.prefix(500)), startMs:early.heardAt - 1000, endMs:early.heardAt, confidence:nil, speaker:realtimeSpeakers[turn]))
+      guard requests > sent else { return }
+      speculation.sent(turn:turn, text:early.text, generation:generation); captionDiagnostics.cueSentEarly(for:turn)
+    }
+  }
+  /// A finished turn from someone else is a moment to help. The wearer's own turns never are.
+  private func turnFinalized(_ entry: TranscriptEntry, turn: Int? = nil) {
+    captionDiagnostics.turnFinal(turn:turn, speechEndMs:entry.endMs)
+    let role = ConversationPolicy.role(entry.speaker, wearerLabel:wearerLabel)
+    let early = speculation.finalize(turn:turn, text:entry.text, role:role, generation:generation)
+    // Different words make the early answer out of date. Its cue stays until the new answer replaces it,
+    // unless the turn was the wearer's own or no question after all.
+    if early == .rerun || early == .withdraw { dropConversationCheck() }
+    if early == .withdraw { cueSpeaker.stop(); clearCue() }
+    // Until the wearer's voice is found, this turn could be their own: no question or stuck check, unless told not to wait.
+    let decision = TriggerDecision.forTurn(text:entry.text, role:role, wearerKnown:wearerKnown || skipWearerWait, sceneChecks:sceneChecks,
+                                           active:phase == .active, newest:transcript.last?.id == entry.id, early:early)
+    let voices = wearerKnown ? "" : "; voices: \(wearerDetector.levelsNote)"
+    if let trigger = decision.trigger { send(trigger, turn:turn) } else { captionDiagnostics.trigger(decision.note + voices, turn:turn) }
+    guard decision.stuck else { return }
+    stuckTask = Task { [weak self] in
+      try? await Task.sleep(for:.milliseconds(Int(ConversationPolicy.stuckDelayMs)))
+      // Any speech cancels this wait. A cue on screen or a check in flight already covers the moment.
+      guard let self else { return }
+      guard !Task.isCancelled else { captionDiagnostics.trigger("stuck skipped: cancelled by new speech, a dismissal or That was me", turn:turn); return }
+      send(.stuck, turn:turn)
+    }
+  }
+  /// Sends an automatic conversation check, and logs that it went or why it did not. See CueGate.
+  private func send(_ trigger: CueTrigger, turn: Int?) {
+    let time = nowMs(), sent = requests
+    let skip = CueGate(uploadsDisabled:uploadsDisabled, active:phase == .active, checkInFlight:cueTask != nil, inputIssue:liveInputIssue(at:time),
+                       hasSpeech:!ConversationPolicy.turns(from:transcript, wearerLabel:wearerLabel).isEmpty,
+                       sinceStartMs:time - captureStartedAt, sinceDismissMs:time - dismissedAt, cueShowing:cue != nil).skip(for:trigger)
+    if trigger != .stuck || skip == nil { requestCue(manual:false, trigger:trigger) }
+    captionDiagnostics.trigger(requests > sent ? "\(trigger.rawValue) sent" : "\(trigger.rawValue) skipped: \(skip ?? "not sent, reason not recorded")", turn:turn)
+  }
+  /// Expiry is not a dismissal: no quiet interval follows.
+  private func clearCue() {
+    ttlTask?.cancel()
+    if cue != nil { analysisFeedback = "Streaming"; cue = nil; publishDisplay() }
+  }
+  /// Conversation cues clear themselves. Scene cues stay until the next check replaces them.
+  private func expireCue() {
+    ttlTask?.cancel()
+    ttlTask = Task { [weak self] in
+      try? await Task.sleep(for:.milliseconds(Int(ConversationPolicy.cueLifetimeMs)))
+      guard let self, !Task.isCancelled else { return }
+      clearCue()
+    }
   }
   private func sample(_ image: UIImage, at time: Double) {
     guard phase == .active, time >= captureStartedAt else { return }
@@ -851,7 +953,8 @@ final class SessionModel {
     realtimeRelay?.stop(); realtimeRelay = nil
     realtimeRoster = PhoneCaptionRoster(); realtimeClock.reset()
     conversationWindow = ConversationWindow()
-    finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []
+    finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []; speculation = SpeculativeCue()
+    wearerDetector.captionsRestarted(); levelTrack = SpeechLevelTrack()
     speechMode = "Not started"
   }
 
@@ -860,6 +963,7 @@ final class SessionModel {
           let relay = realtimeRelay else { return }
     captionDiagnostics.captured(bytes:data.count, endedAtMs:endedAtMs)
     realtimeClock.notePCM(byteCount:data.count, endedAtMs:endedAtMs)
+    if relay.acceptsPCM { levelTrack.append(data) }
     relay.sendPCM(data)
   }
 
@@ -874,6 +978,9 @@ final class SessionModel {
     captionRows = realtimeRoster.rows
     captionText = captionRows.isEmpty ? nil : captionRows.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
     captionAtMs = time
+    if event.type != "speaker.updated", !finalizedTurns.contains(id),
+       event.text?.contains(where: { $0.isLetter || $0.isNumber }) == true, speculation.turn != id { dropConversationCheck() }
+    if event.type != "transcript.final", !finalizedTurns.contains(id) { speculate(turn:id, text:event.text) }
     guard event.type == "transcript.final", !finalizedTurns.contains(id) else { return }
     finalizedTurns.insert(id)
     // Bound deduplication bookkeeping during long sessions.
@@ -881,11 +988,15 @@ final class SessionModel {
       finalizedTurns.remove(oldest); realtimeSpeakers[oldest] = nil
     }
     guard let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty else { return }
+    // The turn's own loudness, read back from the audio that was sent for it.
+    let level = levelTrack.level(fromMs:event.startAudioMs, toMs:event.endAudioMs)
+    wearerDetector.record(label:realtimeSpeakers[id], levelDbFS:level)
     let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:range.startMs, endMs:range.endMs,
-                                confidence:nil, speaker:realtimeSpeakers[id])
+                                confidence:nil, speaker:realtimeSpeakers[id] ?? speaker(forLevel:level), levelDbFS:level)
     transcript.append(entry); transcript.sort { $0.endMs < $1.endMs }
     lastVoiceAt = max(lastVoiceAt, range.endMs)
     logSpeech(entry); noteNames(in:entry); trimTranscript()
+    turnFinalized(entry, turn:id)
   }
 
   func transcribe(_ chunk: AudioChunk) {
@@ -908,10 +1019,10 @@ final class SessionModel {
         let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:chunk.startedAtMs, endMs:chunk.endedAtMs, confidence:result.confidence,
                                     speaker:speaker(forLevel:chunk.speechDbFS), levelDbFS:chunk.speechDbFS)
         transcript.append(entry); logSpeech(entry); noteNames(in:entry); checkTone(entry)
-        // New speech updates captions but leaves a pending or displayed cue alone:
-        // cues take longer than the gap between sentences in a real conversation.
+        // New speech updates captions and leaves a displayed cue alone until it expires.
         setCaption(text, capturedAtMs:chunk.endedAtMs)
         trimTranscript()
+        dropConversationCheck(); turnFinalized(entry)
       } catch {
         guard epoch == thisEpoch, !Task.isCancelled else { return }
         // Fail closed: missing transcription cannot be quietly replaced by a fixture.
@@ -919,13 +1030,13 @@ final class SessionModel {
       }
     }
   }
-  func addSimulationLine(_ line: String? = nil) {
+  func addSimulationLine(_ line: String? = nil, speaker: String? = nil) {
     guard simulate, phase == .active else { return }
     let value = (line ?? simulationText).trimmingCharacters(in:.whitespacesAndNewlines)
     guard !value.isEmpty else { return }
     let timestamp = nowMs()
     lastVoiceAt = timestamp
-    let entry = TranscriptEntry(text:String(value.prefix(500)), startMs:timestamp-2500, endMs:timestamp, confidence:nil)
+    let entry = TranscriptEntry(text:String(value.prefix(500)), startMs:timestamp-2500, endMs:timestamp, confidence:nil, speaker:speaker)
     transcript.append(entry); logSpeech(entry); noteNames(in:entry); checkTone(entry)
     setCaption(value, capturedAtMs:timestamp)
     trimTranscript()
@@ -937,6 +1048,7 @@ final class SessionModel {
       label.draw(in:CGRect(x:32,y:95,width:416,height:90), withAttributes:[.font:UIFont.systemFont(ofSize:24),.foregroundColor:UIColor.white])
     }
     latestSampleAt = 0; sample(image, at:timestamp)
+    dropConversationCheck(); turnFinalized(entry)
   }
   func addSimulationScene(_ scene: String) {
     guard simulate, phase == .active, ["library", "group", "funeral"].contains(scene) else { return }
@@ -981,23 +1093,30 @@ final class SessionModel {
     if realtimeRelay != nil { return conversationWindow.entries(at:timestamp) }
     return transcript.filter { timestamp - $0.endMs <= SurroundingsPolicy.contextWindowMs && $0.endMs <= timestamp + 1000 && ($0.confidence ?? 1) >= 0.65 }
   }
-  func requestCue(manual: Bool) {
+  func requestCue(manual: Bool, trigger: CueTrigger? = nil, partial: TranscriptEntry? = nil) {
     guard !uploadsDisabled else { if manual { notice = "Connection test makes no API requests. Use Manual display test." }; return }
     guard phase == .active else { return }
-    guard cueTask == nil else { if manual { feedback("Analyzing…") }; return }
     let timestamp = nowMs()
-    let surroundings = analyzesSurroundings
-    // Camera analysis can use the latest completed transcript while the next
-    // audio chunk is transcribed. Continuous speech must not starve the scene.
-    guard surroundings || !isTranscribing else {
-      if manual { queueManualAnalysis("Finishing speech, then analyzing…", at:timestamp) }
+    let surroundings = sceneChecks
+    guard cueTask == nil else {
+      // An explicit request waits for an automatic check instead of being lost with it.
+      if manual { if surroundings || activeTrigger == .manual { feedback("Analyzing…") } else { queueManualAnalysis("Analyzing…", at:timestamp) } }
+      return
+    }
+    // A conversation check answers a moment: someone's finished turn, or the wearer asking. It never runs on a timer.
+    let trigger = surroundings ? nil : trigger ?? (manual ? .manual : nil)
+    guard surroundings || trigger != nil else { return }
+    // An explicit request waits for speech still being transcribed. A finished turn is already complete.
+    guard surroundings || !manual || !isTranscribing else {
+      queueManualAnalysis("Finishing speech, then analyzing…", at:timestamp)
       return
     }
     if let issue = liveInputIssue(at:timestamp) { if manual { queueManualAnalysis(issue, at:timestamp) }; return }
-    let entries = recentCueTranscript(at:timestamp)
+    // Conversation checks send text only: the last few turns, labeled wearer or other.
+    let entries = surroundings ? recentCueTranscript(at:timestamp) : ConversationPolicy.turns(from:transcript + [partial].compactMap { $0 }, wearerLabel:wearerLabel)
     let last = entries.last
     let freshSpeech = last
-    let frame = latestFrame.flatMap { timestamp - $0.capturedAtMs <= SurroundingsPolicy.frameFreshnessMs && $0.capturedAtMs <= timestamp ? $0 : nil }
+    let frame = !surroundings ? nil : latestFrame.flatMap { timestamp - $0.capturedAtMs <= SurroundingsPolicy.frameFreshnessMs && $0.capturedAtMs <= timestamp ? $0 : nil }
     // Silence does not imply missing context: a fresh library image can support a cue.
     guard timestamp - captureStartedAt >= 1500,
           surroundings ? (frame != nil || freshSpeech != nil) : freshSpeech != nil else {
@@ -1009,10 +1128,8 @@ final class SessionModel {
                            dismissedAt + SurroundingsPolicy.dismissQuietMs)
       guard manual || timestamp >= nextAnalysisAt else { return }
     } else {
-      // Without a camera, only new speech can change the answer; the current cue stays up meanwhile.
-      guard manual || (timestamp - dismissedAt >= SurroundingsPolicy.dismissQuietMs
-                       && timestamp - lastAnalysisAt >= analysisInterval(at:timestamp, reducedPower:reducedPower) * 1000
-                       && (last?.endMs ?? 0) > lastRequestedSpeechAt) else { return }
+      // Moments are not rate limited, but a dismissal still buys a quiet interval.
+      guard manual || timestamp - dismissedAt >= SurroundingsPolicy.dismissQuietMs else { return }
     }
     let revision = generation, thisEpoch = epoch
     let context = (sceneOnly ? "" : contextText).split(separator:"\n").prefix(5).map { String($0.prefix(160)) }
@@ -1022,14 +1139,20 @@ final class SessionModel {
                              analysisMode:surroundings ? "surroundings" : "conversation", audioContext:audio,
                              people:present.prefix(8).map { people.context(for:$0) },
                              groups:people.groups(of:present).prefix(8).map(people.context(for:)),
-                             currentScene:currentScene ?? "", recentMoments:moments, previousCue:cue ?? "")
+                             currentScene:surroundings ? currentScene ?? "" : "", recentMoments:surroundings ? moments : ConversationPolicy.summary(from:moments, at:timestamp),
+                             previousCue:surroundings ? cue ?? "" : "",
+                             trigger:trigger?.rawValue, aboutMe:ConversationPolicy.aboutMe(aboutMe, for:trigger))
     let connection = client
     let fixtureScene = simulatedScene
     let evidenceAt = freshSpeech?.endMs ?? frame?.capturedAtMs ?? timestamp
     lastRequestedGeneration = revision; lastAnalysisAt = timestamp; lastRequestedSpeechAt = last?.endMs ?? 0
     nextAnalysisAt = timestamp + analysisInterval(at:timestamp, reducedPower:reducedPower) * 1000
     pendingManualAnalysisAt = nil
-    isThinking = true; requests += 1; feedback(sceneOnly ? "Muse is checking the scene…" : "Analyzing…")
+    activeTrigger = trigger
+    isThinking = true; requests += 1
+    captionDiagnostics.cueRequested(trigger:trigger?.rawValue ?? "scene", early:partial != nil, speechEndMs:last?.endMs, at:timestamp)
+    // An automatic conversation check stays quiet on the lens unless it has something to show.
+    if surroundings || manual { feedback(sceneOnly ? "Muse is checking the scene…" : "Analyzing…") }
     cueTask = Task { [weak self] in
       guard let self else { return }
       defer {
@@ -1041,6 +1164,7 @@ final class SessionModel {
           try await Task.sleep(for:.milliseconds(400))
           let lower = freshSpeech?.text.lowercased() ?? ""
           var message: String
+          var type = surroundings ? "reminder" : "clarify"
           if surroundings && (lower.contains("rough day") || lower.contains("overwhelmed")) {
             message = "They mentioned a hard day. Listen and give them space."
           } else if surroundings && fixtureScene == "library" {
@@ -1056,26 +1180,27 @@ final class SessionModel {
             let suggestion = "Ask \(person.name) about \(topic)."
             if suggestion.count <= 90 && suggestion.split(separator:" ").count <= 14 { message = suggestion }
           }
-          // Always-on display: ongoing speech with no specific fixture gets a steady listening cue.
-          if message.isEmpty, freshSpeech != nil { message = "Keep listening, then ask a follow-up question." }
-          response = CueResponse(result:CueResult(cue:message, reason:"Local scripted demo fixture", confidence:message.isEmpty ? 0 : 0.95, type:message.isEmpty ? "abstain" : surroundings ? "reminder" : "clarify", should_display:!message.isEmpty,
+          if message.isEmpty, !surroundings, let meaning = ConversationPolicy.demoMeaning(for:lower) { message = meaning; type = "meaning" }
+          // Ordinary speech gets no filler advice: the fixture abstains, as the live prompt does.
+          response = CueResponse(result:CueResult(cue:message, reason:"Local scripted demo fixture", confidence:message.isEmpty ? 0 : 0.95, type:message.isEmpty ? "abstain" : type, should_display:!message.isEmpty,
                                                   scene:["library", "funeral"].contains(fixtureScene) ? fixtureScene : "",
-                                                  summary:freshSpeech.map { "SIMULATED: conversation mentioning \"\($0.text.prefix(60))\"." }), metrics:nil)
+                                                  summary:!surroundings ? nil : freshSpeech.map { "SIMULATED: conversation mentioning \"\($0.text.prefix(60))\"." }), metrics:nil)
           modelMode = "LOCAL SCRIPTED MOCK"
         } else {
           let result: (CueResponse, Int) = try await connection.post("api/cue", request)
           response = result.0; uploadedBytes += result.1
         }
         let completedAt = nowMs()
+        captionDiagnostics.cueAnswered(at:completedAt)
         let speechStillFresh = freshSpeech.map { completedAt - $0.endMs <= SurroundingsPolicy.deliveryFreshnessMs } ?? false
         let frameStillFresh = frame.map { completedAt - $0.capturedAtMs <= SurroundingsPolicy.deliveryFreshnessMs } ?? false
-        let evidenceStillFresh = surroundings ? (speechStillFresh || frameStillFresh) : speechStillFresh
+        let evidenceStillFresh = surroundings ? (speechStillFresh || frameStillFresh) : (manual || speechStillFresh)
         guard epoch == thisEpoch, generation == revision, phase == .active, !Task.isCancelled,
               completedAt - timestamp <= SurroundingsPolicy.responseMaxAgeMs,
               evidenceStillFresh, liveInputIssue(at:completedAt) == nil else {
           staleDrops += 1
           // The current cue stays up; the next check replaces it.
-          if epoch == thisEpoch && generation == revision { feedback(cue == nil ? "Checking again shortly…" : "Streaming") }
+          if epoch == thisEpoch && generation == revision { feedback(cue == nil && surroundings ? "Checking again shortly…" : "Streaming") }
           return
         }
         apiMs = response.metrics?.apiMs ?? 0; recordCost(response.metrics?.estimatedCostUsd ?? (simulate && localMock ? 0 : nil))
@@ -1086,11 +1211,8 @@ final class SessionModel {
         remember(result.summary, at:evidenceAt)
         lastAnalysisOutcome = "No new social cue needed."
         lastAnalysisAtMs = completedAt
-        if !result.should_display && result.type == "abstain" {
+        if surroundings, !result.should_display && result.type == "abstain" {
           // No supported current context: do not leave an earlier conversation's advice on the lens.
-          let wait = lastCueAt + SurroundingsPolicy.minimumDwellMs - nowMs()
-          if cue != nil, wait > 0 { try await Task.sleep(for:.milliseconds(Int(wait))) }
-          guard epoch == thisEpoch, generation == revision, phase == .active else { return }
           cueSpeaker.stop()
           cue = nil
           lastAnalysisOutcome = "Waiting for clearer context."
@@ -1098,40 +1220,36 @@ final class SessionModel {
           notice = ""
           return
         }
-        let text = result.cue.trimmingCharacters(in:.whitespacesAndNewlines)
-        let normalized = text.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace }
-        guard result.should_display, result.confidence.isFinite, result.confidence >= 0.6, result.confidence <= 1,
-              ["clarify", "follow_up", "reminder", "respond"].contains(result.type),
-              !text.isEmpty, text.count <= 90, text.split(whereSeparator: { $0.isWhitespace }).count <= 14 else {
+        guard let text = ConversationPolicy.displayText(for:result, trigger:trigger) else {
           // Abstaining keeps whatever is on screen rather than blanking it.
           lastAnalysisOutcome = cue == nil ? "No cue yet." : "Keeping the current cue."
           notice = ""
-          feedback(cue == nil ? "Listening…" : "Streaming")
+          feedback(cue == nil && surroundings ? "Listening…" : "Streaming")
           return
         }
+        let normalized = text.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace }
         let current = cue.map { $0.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace } }
-        if normalized == current {
+        if surroundings { ttlTask?.cancel() } else { expireCue() }
+        // The same advice, or nothing better than what is already showing, keeps the cue on screen.
+        if normalized == current || (cue != nil && ConversationPolicy.isNothingToAdd(text)) {
           lastAnalysisOutcome = "Current cue still fits."
           // A failed/route-blocked utterance may now be playable. CueSpeaker
           // suppresses cues that are pending, playing, or already completed.
           if spokenCuesEnabled { cueSpeaker.speak(text, mode:captureMode) }
           return
         }
-        // Let the current cue be read before swapping it; a newer check cancels this wait.
-        let wait = lastCueAt + SurroundingsPolicy.minimumDwellMs - nowMs()
-        if cue != nil, wait > 0 {
-          try await Task.sleep(for:.milliseconds(Int(wait)))
-          guard epoch == thisEpoch, generation == revision, phase == .active else { return }
-        }
+        pendingManualAnalysisAt = nil // A cue answers a request that was waiting behind this check.
         cue = text; shown += 1; lastCueAt = nowMs(); contextToDisplayMs = lastCueAt - evidenceAt
         lastAnalysisOutcome = "Social cue ready."
         analysisFeedback = "Social cue"
         publishDisplay()
+        captionDiagnostics.cueShown(at:lastCueAt)
         if spokenCuesEnabled { cueSpeaker.speak(text, mode:captureMode) }
         notice = ""
       } catch {
         if epoch == thisEpoch, generation == revision, !Task.isCancelled {
-          notice = "Cue check failed. Retrying automatically."
+          if partial != nil { speculation.requestFailed() }
+          notice = surroundings ? "Cue check failed. Retrying automatically." : "Cue check failed. Check the server connection."
           feedback("Analysis failed. Check phone for details.")
         }
       }

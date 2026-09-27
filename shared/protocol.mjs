@@ -10,13 +10,27 @@ export const cueSchema = {
   properties: {
     cue: { type: 'string' }, reason: { type: 'string' },
     confidence: { type: 'number' },
-    type: { type: 'string', enum: ['clarify', 'follow_up', 'reminder', 'respond', 'abstain'] },
+    type: { type: 'string', enum: ['clarify', 'follow_up', 'reminder', 'respond', 'meaning', 'abstain'] },
     should_display: { type: 'boolean' },
     scene: { type: 'string' },
     summary: { type: 'string' },
   },
   required: ['cue', 'reason', 'confidence', 'type', 'should_display', 'scene', 'summary'],
 };
+
+// Conversation checks are about words, not the setting: no scene or summary means fewer output tokens and a faster cue.
+const SCENE_FIELDS = ['scene', 'summary'];
+export const conversationCueSchema = {
+  ...cueSchema,
+  properties: Object.fromEntries(Object.entries(cueSchema.properties).filter(([key]) => !SCENE_FIELDS.includes(key))),
+  required: cueSchema.required.filter(key => !SCENE_FIELDS.includes(key)),
+};
+
+/** Moments a conversation check can be asked for. The phone fires all but "name". */
+export const TRIGGERS = Object.freeze(['question', 'stuck', 'name', 'indirect', 'manual']);
+/** What a manual check shows when nothing fits, so an explicit request always gets an answer. */
+export const NOTHING_TO_ADD = 'Nothing to add';
+export function isNothingToAdd(cue) { return typeof cue === 'string' && normalizeCue(cue) === normalizeCue(NOTHING_TO_ADD); }
 
 const stringList = { type: 'array', items: { type: 'string' } };
 export const learnSchema = {
@@ -98,7 +112,8 @@ export function validateCue(value) {
   const summary = typeof value.summary === 'string' ? value.summary.trim().slice(0, 200) : '';
   const withSummary = result => summary ? { ...result, summary } : result;
   if (!value.should_display) return withSummary(abstain(value.reason, scene));
-  if (!value.cue.trim() || value.type === 'abstain') throw new Error('Inconsistent cue response');
+  // "Nothing to add" is the one displayed cue that may carry the abstain type.
+  if (!value.cue.trim() || (value.type === 'abstain' && !isNothingToAdd(value.cue))) throw new Error('Inconsistent cue response');
   // This guard is additional defense, not a substitute for model evaluation.
   if (/\b(autis\w*|alzheimer\w*|diagnos\w*|depress\w*|angry|anxious|lying|attracted|emotion|facial expression)\b/i.test(value.cue)) {
     return withSummary(abstain('Unsupported personal inference blocked.', scene));
