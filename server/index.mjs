@@ -25,7 +25,9 @@ export function createServer({ env = process.env, provider = createProvider(env)
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     const json = (status, data) => {
-      if (path.startsWith('/api/')) console.log(`${new Date().toISOString()} ${req.method} ${path} ${status} from ${req.socket.remoteAddress}`);
+      // Timing and provider only, never content: enough to compare Grok and Muse latency from the log.
+      const timing = path === '/api/cue' && data.metrics ? ` provider=${data.metrics.provider ?? 'none'} model=${data.metrics.model ?? 'none'} apiMs=${Math.round(data.metrics.apiMs)}` : '';
+      if (path.startsWith('/api/')) console.log(`${new Date().toISOString()} ${req.method} ${path} ${status} from ${req.socket.remoteAddress}${timing}`);
       if (!res.destroyed) { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); } };
     const path = (req.url || '/').split('?')[0];
     const provided = Buffer.from((req.headers.authorization || '').replace(/^Bearer /, '')), expected = Buffer.from(token);
@@ -36,7 +38,7 @@ export function createServer({ env = process.env, provider = createProvider(env)
     try {
       // A local page cannot be used as a cross-origin proxy; native requests omit Origin.
       if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}` && req.headers.origin !== `https://${req.headers.host}`) return json(403, { error: 'Cross-origin requests are disabled.' });
-      if (req.method === 'GET' && path === '/api/health') return json(200, { ok: true, modelMode: provider.mode, model: provider.model, requiresToken: !!token, hardware: 'unverified', defaults: LIMITS, ...(req.headers.authorization ? { tokenValid } : {}) });
+      if (req.method === 'GET' && path === '/api/health') return json(200, { ok: true, modelMode: provider.mode, model: provider.model, conversationModel: provider.conversationModel ?? provider.model, requiresToken: !!token, hardware: 'unverified', defaults: LIMITS, ...(req.headers.authorization ? { tokenValid } : {}) });
       if (req.method === 'GET' && files[path]) {
         const data = await readFile(new URL(files[path], import.meta.url));
         res.writeHead(200, { 'Content-Type': path.endsWith('.mjs') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html' }); return res.end(data);

@@ -198,3 +198,11 @@ Conversation cues no longer run on a 10-second timer. A check is sent with a `tr
 - **Backend.** `POST /api/cue` accepts `trigger` and an optional `aboutMe` of up to 500 characters. Conversation checks use the new `SYSTEM_PROMPT` and a five-field schema. `meaning` is a valid cue type. Clients that send no trigger get `manual`, `question` or `stuck` from the request. The mock provider abstains on ordinary speech instead of offering generic listening advice.
 
 These settings supersede older timing descriptions elsewhere in this repository. Live Muse latency and cue quality with the new prompt have not been measured.
+
+### Optional Grok provider for conversation checks
+
+Set `XAI_API_KEY` in the ignored `.env` to send conversation checks to xAI's `grok-4.20-non-reasoning` (override with `XAI_MODEL`). The prompt, the five-field strict schema and the text-only request are the same; the output limit is 256 tokens. Scene checks, tone, learning and transcription stay on Muse, and `MUSE_API_KEY` is still required in live mode. With no `XAI_API_KEY`, conversation checks use Muse as before. A failed Grok request shows no cue; it is not retried on Muse.
+
+With the key set, the last three turns and the optional `aboutMe` text are sent to xAI instead of Meta. Review xAI's data terms before using it with real conversations.
+
+Every `/api/cue` response carries `metrics.provider`, `metrics.model` and `metrics.apiMs`, and the server log line for each cue request ends with `provider=… model=… apiMs=…`. `GET /api/health` reports `conversationModel`.
