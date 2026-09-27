@@ -6,19 +6,22 @@ struct GlassesScreen: Equatable, Sendable {
   enum Mode: Sendable { case ready, paused, starting, streaming }
   let mode: Mode
   let cue: String?
+  let seeing: String?
   let detail: String?
   let testOnly: Bool
   let feedback: String?
   let status: String?
   let sceneOnly: Bool
   init(cue: String?, caption: String?, note: String?, paused: Bool,
-       captionsEnabled: Bool, ready: Bool, starting: Bool, testOnly: Bool, feedback: String? = nil, status: String? = nil, sceneOnly: Bool = false) {
+       captionsEnabled: Bool, ready: Bool, starting: Bool, testOnly: Bool, feedback: String? = nil, status: String? = nil, sceneOnly: Bool = false, sceneSummary: String? = nil) {
     mode = starting ? .starting : paused ? (ready ? .ready : .paused) : .streaming
     self.testOnly = testOnly
     self.sceneOnly = sceneOnly
     self.status = mode == .paused ? status.map { String($0.prefix(80)) } : nil
     self.feedback = mode == .streaming ? feedback.map { String($0.prefix(64)) } : nil
     self.cue = mode == .streaming ? cue.map { String($0.prefix(90)) } : nil
+    let summary = sceneSummary?.split(whereSeparator: { $0.isWhitespace }).joined(separator:" ") ?? ""
+    seeing = mode == .streaming && !summary.isEmpty ? String(summary.prefix(80)) + (summary.count > 80 ? "…" : "") : nil
     // Captions stay on the phone. Keep the arguments for older callers, but never render them.
     detail = nil
   }
@@ -65,10 +68,10 @@ extension GlassesController {
   // controls; clearing before every send produces a visible blank-frame flash.
   func show(_ cue: String?, caption: String? = nil, note: String? = nil, paused: Bool = false,
             status: String? = nil, captionsEnabled: Bool = false, ready: Bool = false,
-            starting: Bool = false, testOnly: Bool = false, feedback: String? = nil, sceneOnly: Bool = false) {
+            starting: Bool = false, testOnly: Bool = false, feedback: String? = nil, sceneOnly: Bool = false, sceneSummary: String? = nil) {
     guard displayReady else { return }
     let screen = GlassesScreen(cue:cue, caption:caption, note:note, paused:paused,
-      captionsEnabled:captionsEnabled, ready:ready, starting:starting, testOnly:testOnly, feedback:feedback, status:status, sceneOnly:sceneOnly)
+      captionsEnabled:captionsEnabled, ready:ready, starting:starting, testOnly:testOnly, feedback:feedback, status:status, sceneOnly:sceneOnly, sceneSummary:sceneSummary)
     guard screen != requestedScreen else { return }
     requestedScreen = screen
     displayRevision += 1
@@ -78,15 +81,17 @@ extension GlassesController {
       await previous?.value
       guard let self, self.displayRevision == revision, let display = self.display, self.displayReady else { return }
       do {
-        let content = FlexBox(direction:.column, spacing:8) {
-          Text(screen.title, style:.meta, color:.secondary)
-          // The mascot "says" the cue or status in a speech-bubble card beside it.
-          FlexBox(direction:.row, spacing:10, crossAlignment:.center) {
-            Image(image:GlassesMascot.image, sizePreset:.icon)
-            FlexBox(direction:.column) {
-              Text(screen.message, style:screen.cue == nil ? .meta : .body, color:screen.cue == nil ? .secondary : .primary)
-            }.padding(10).background(.card).flexShrink(1).flexGrow(1)
+        let content = FlexBox(direction:.column, spacing:8, crossAlignment:.stretch) {
+          // Native text takes its measured height rather than being cropped in
+          // a fill-sized image. The mascot yields space before the cue does.
+          Text(screen.message, style:.body).flexShrink(0)
+          if let seeing = screen.seeing {
+            Text(seeing, style:.meta, color:.secondary).flexShrink(0)
           }
+          FlexBox(direction:.row, spacing:12, crossAlignment:.end) {
+            Image(image:GlassesMascot.image, sizePreset:.fill).flexGrow(1).flexShrink(1)
+            Text(screen.title, style:.meta, color:.secondary).flexGrow(2).flexShrink(0)
+          }.flexShrink(1)
           // At most three short labels; never append Dismiss and widen the row.
           ButtonGroup {
             for index in screen.labels.indices {
@@ -98,7 +103,7 @@ extension GlassesController {
               }
             }
           }
-        }.padding(12)
+        }.padding(24)
         try await display.send(content)
       } catch {
         guard self.displayRevision == revision else { return }

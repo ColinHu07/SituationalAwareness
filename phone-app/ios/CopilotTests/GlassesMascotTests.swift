@@ -32,4 +32,16 @@ final class GlassesMascotTests: XCTestCase {
     let paused = GlassesScreen(cue:nil, caption:nil, note:nil, paused:true, captionsEnabled:false, ready:false, starting:false, testOnly:false, status:"Camera stopped.")
     XCTAssertEqual(paused.message, "Camera stopped.")
   }
+
+  func testSeeingSummaryIsSeparateFromCaptionsAndClearsWhenPaused() {
+    let summary = "A person is seated beside a table."
+    let screen = GlassesScreen(cue:"Give them some space.",caption:"P1: Private transcript",note:nil,paused:false,
+      captionsEnabled:true,ready:false,starting:false,testOnly:false,sceneSummary:summary)
+    XCTAssertEqual(screen.seeing,summary)
+    XCTAssertEqual(screen.message,"Give them some space.")
+    XCTAssertNil(screen.detail,"Captions still never appear on the glasses")
+    let paused = GlassesScreen(cue:screen.cue,caption:nil,note:nil,paused:true,
+      captionsEnabled:false,ready:false,starting:false,testOnly:false,sceneSummary:summary)
+    XCTAssertNil(paused.seeing)
+  }
 }

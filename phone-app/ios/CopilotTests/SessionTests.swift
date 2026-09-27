@@ -277,6 +277,18 @@ final class SessionTests: XCTestCase {
     model.stop()
   }
 
+  func testPhoneStartBeginsCaptureWhenGlassesControlsAreAlreadyReady() {
+    let model = SessionModel()
+    model.captureMode = .displayGlasses
+    model.phase = .paused
+    model.glassesControlsReady = true
+    model.startFromPhone()
+    XCTAssertEqual(model.phase,.starting)
+    XCTAssertFalse(model.openingGlassesControls,"The second Start must start capture, not reopen the ready screen")
+    XCTAssertFalse(model.glassesControlsReady)
+    model.stop()
+  }
+
   func testGlassesConversationIsOptionalAndProfilesRemainAvailable() {
     let model = SessionModel(people:PeopleStore(fileURL:nil))
     model.captureMode = .displayGlasses
@@ -514,14 +526,14 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(model.cue,"They mentioned a hard day. Listen and give them space.")
   }
 
-  func testSteadyCadenceAndPauseErasesAudioSummary() async throws {
+  func testConversationCadenceSpeedsUpAndPauseErasesAudioSummary() async throws {
     let model = try await activeModel()
     model.simulateSurroundings = true
     let timestamp = nowMs()
     XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),10)
     model.lastVoiceAt = timestamp
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),10)
-    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:true),15)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:false),2)
+    XCTAssertEqual(model.analysisInterval(at:timestamp,reducedPower:true),4)
     XCTAssertEqual(model.analysisInterval(at:timestamp+30001,reducedPower:false),10)
     model.latestAudioContext = AudioContext(capturedAtMs:timestamp,windowMs:1000,activityRatio:0.5,rmsDbFS:-30,source:"glasses_pcm")
     model.pause()

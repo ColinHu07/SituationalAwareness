@@ -57,7 +57,7 @@ struct ContentView: View {
             }
             HStack(spacing:12) {
               if model.phase == .stopped || model.phase == .paused {
-                Button(model.phase == .paused && !model.glassesControlsReady ? "Resume" : "Start",systemImage:"play.fill") { model.startFromPhone() }
+                Button(model.glassesControlsReady ? "Start streaming" : model.phase == .paused ? "Resume" : "Start",systemImage:"play.fill") { model.startFromPhone() }
                   .buttonStyle(.borderedProminent).tint(ink).disabled(!model.canStart)
               } else {
                 Button("Pause",systemImage:"pause.fill") { model.pause() }.buttonStyle(.borderedProminent).tint(ink)
@@ -66,7 +66,7 @@ struct ContentView: View {
                 Button("Stop",systemImage:"stop.fill",role:.destructive) { model.stop() }.buttonStyle(.bordered)
               }
             }.controlSize(.large)
-            if model.glassesControlsReady { Text("Select Start on the glasses to stream.").font(.caption).foregroundStyle(.secondary) }
+            if model.glassesControlsReady { Text("Tap Start streaming here, or Start on the glasses, to enable the camera and cue audio.").font(.caption).foregroundStyle(.secondary) }
             if !model.simulate && model.phase != .stopped {
               Button("Live view",systemImage:"viewfinder") { showCamera = true }
             }
@@ -86,6 +86,7 @@ struct ContentView: View {
             }.font(.subheadline.weight(.semibold)).tint(mint) }
           }.padding(22).background(ink,in:RoundedRectangle(cornerRadius:20))
           if let status = model.cueAudioStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
+          MuseSeeingCard(summary:model.lastSceneSummary,outcome:model.lastAnalysisOutcome,isThinking:model.isThinking)
           if model.cue != nil { Button("Not helpful",systemImage:"hand.thumbsdown") { model.markDistracting() }.font(.caption).tint(.secondary) }
           if let feedback = model.toneFeedback { RecoveryCard(feedback:feedback) { model.dismissTone() } }
           if !model.sceneOnly { VStack(alignment:.leading,spacing:12) {

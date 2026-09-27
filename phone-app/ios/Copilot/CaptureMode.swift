@@ -26,10 +26,11 @@ struct CaptureActivity {
 enum SurroundingsPolicy {
   /// Seconds between automatic checks. Only one check runs at a time, so model latency also limits the rate.
   static func analysisInterval(recentSpeech: Bool, reducedPower: Bool) -> Double {
-    reducedPower ? 15 : 10
+    recentSpeech ? (reducedPower ? 4 : 2) : (reducedPower ? 15 : 10)
   }
   /// A cue stays on screen at least this long before a different one replaces it, so it can be read.
   static let minimumDwellMs = 10_000.0
+  static let conversationDwellMs = 4_000.0
   /// After the wearer dismisses a cue, automatic checks wait this long.
   static let dismissQuietMs = 10_000.0
   static let contextWindowMs = 10_000.0

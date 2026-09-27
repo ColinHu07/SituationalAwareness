@@ -3,6 +3,43 @@ import XCTest
 
 @MainActor
 final class IntegratedCaptionTests: XCTestCase {
+  func testNewSentenceDuringInferenceTriggersLatestSnapshotWithoutTenSecondWait() async throws {
+    let relay = IntegratedRelay()
+    let model = SessionModel(people:PeopleStore(fileURL:nil),makeRealtimeRelay:{ _,_ in relay })
+    model.simulate = true
+    model.phase = .active
+    defer { model.stop() }
+    await model.startRealtimeCaptions()
+    relay.onEvent?(.init(type:"transcript.partial",turnId:1,text:"Can you have it ready by Friday?"))
+    model.requestCue(manual:true)
+    XCTAssertEqual(model.requests,1)
+    relay.onEvent?(.init(type:"transcript.partial",turnId:2,text:"How is your robotics"))
+    relay.onEvent?(.init(type:"transcript.final",turnId:2,text:"How is your robotics project going?"))
+    XCTAssertEqual(model.requests,1,"New speech must coalesce while the first request runs")
+    try await Task.sleep(for:.milliseconds(2700))
+    XCTAssertEqual(model.requests,2,"A pending sentence must not wait for the ten-second scene poll")
+    XCTAssertTrue(model.lastSceneSummary?.contains("robotics project going") == true,"The follow-up snapshot must include the complete latest sentence")
+    relay.onEvent?(.init(type:"transcript.final",turnId:2,text:"How is your robotics project going?"))
+    XCTAssertEqual(model.requests,2,"Duplicate finals must not create extra requests")
+    model.pause()
+    try await Task.sleep(for:.milliseconds(300))
+    XCTAssertNil(model.cue,"Pause must cancel a response waiting for reading time")
+  }
+
+  func testPauseCancelsSentenceDebounce() async throws {
+    let relay = IntegratedRelay()
+    let model = SessionModel(people:PeopleStore(fileURL:nil),makeRealtimeRelay:{ _,_ in relay })
+    model.simulate = true
+    model.phase = .active
+    defer { model.stop() }
+    await model.startRealtimeCaptions()
+    relay.onEvent?(.init(type:"transcript.final",turnId:1,text:"What should happen next?"))
+    model.pause()
+    try await Task.sleep(for:.milliseconds(500))
+    XCTAssertEqual(model.requests,0)
+    XCTAssertNil(model.cue)
+  }
+
   func testPartialsUpdateSeparateRowsBeforeFinalAndAvoidChunkRequests() async {
     let relay = IntegratedRelay()
     let model = SessionModel(people:PeopleStore(fileURL:nil), makeRealtimeRelay:{ _,_ in relay })

@@ -2,6 +2,48 @@ import XCTest
 @testable import Copilot
 
 final class ConversationContextTests: XCTestCase {
+  func testSentenceEndBypassesSceneIntervalButCoalescesRapidTurns() {
+    var schedule = ConversationCueSchedule()
+    schedule.observe(changed:true,final:false,at:11000)
+    schedule.observe(changed:true,final:true,at:11200)
+    XCTAssertEqual(schedule.readyAt(lastRequestAt:8000,reducedPower:false),11450)
+    schedule.submitted()
+    XCTAssertFalse(schedule.hasPending)
+    schedule.observe(changed:true,final:true,at:11800)
+    XCTAssertEqual(schedule.readyAt(lastRequestAt:11450,reducedPower:false),13450)
+    XCTAssertEqual(schedule.readyAt(lastRequestAt:11450,reducedPower:true),15450)
+  }
+
+  func testContinuousPartialsCannotPostponeAnalysisForever() {
+    var schedule = ConversationCueSchedule()
+    for time in stride(from:10000.0,through:14000.0,by:200) {
+      schedule.observe(changed:true,final:false,at:time)
+    }
+    XCTAssertEqual(schedule.readyAt(lastRequestAt:0,reducedPower:false),13000)
+    schedule.submitted()
+    schedule.observe(changed:false,final:true,at:15000)
+    XCTAssertFalse(schedule.hasPending,"Finalizing an already submitted snapshot does not need another request")
+    schedule.observe(changed:true,final:true,at:15100)
+    XCTAssertTrue(schedule.hasPending,"Corrected text must trigger a fresh snapshot")
+  }
+
+  func testDuplicateAndSpeakerUpdatesDoNotTriggerInference() {
+    var window = ConversationWindow()
+    XCTAssertTrue(window.consume(.init(type:"transcript.partial",turnId:1,text:"What happens next?"),at:1000))
+    XCTAssertFalse(window.consume(.init(type:"transcript.partial",turnId:1,text:"What happens next?"),at:1500))
+    XCTAssertFalse(window.consume(.init(type:"speaker.updated",turnId:1,speaker:"P2"),at:1800))
+    XCTAssertTrue(window.consume(.init(type:"transcript.final",turnId:1,text:"What happens after that?"),at:2000))
+  }
+
+  func testLateFinalCannotMarkNewerPartialAsFinished() {
+    var schedule = ConversationCueSchedule()
+    schedule.observe(changed:true,final:false,turnId:2,at:11000)
+    schedule.observe(changed:false,final:true,turnId:1,at:11100)
+    XCTAssertEqual(schedule.readyAt(lastRequestAt:0,reducedPower:false),11750)
+    schedule.observe(changed:false,final:true,turnId:2,at:11200)
+    XCTAssertEqual(schedule.readyAt(lastRequestAt:0,reducedPower:false),11450)
+  }
+
   func testRecentWindowIncludesPartialsAndSeparateSpeakers() {
     var window = ConversationWindow()
     window.consume(.init(type:"transcript.partial",turnId:1,speaker:"P1",text:"Let's review the plan"),at:1000)

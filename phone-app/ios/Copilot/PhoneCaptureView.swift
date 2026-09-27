@@ -22,20 +22,11 @@ struct PhoneCaptureView: View {
           if let scene = model.currentScene { SceneChip(scene:scene) }
           PresenceStrip(model:model)
           cueCard
+          MuseSeeingCard(summary:model.lastSceneSummary,outcome:model.lastAnalysisOutcome,isThinking:model.isThinking)
           if let feedback = model.toneFeedback { RecoveryCard(feedback:feedback) { model.dismissTone() } }
           if let status = model.cueAudioStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
           sessionStatus
           if !model.sceneOnly { captions }
-          if model.lastSceneSummary != nil || model.lastAnalysisOutcome != nil {
-            VStack(alignment:.leading,spacing:8) {
-              Label("RECENT CONTEXT",systemImage:"text.bubble").font(.caption.bold()).tracking(1)
-              if let summary = model.lastSceneSummary { Text(summary).font(.subheadline) }
-              if let outcome = model.lastAnalysisOutcome {
-                Text(outcome).font(.caption).foregroundStyle(.secondary)
-              }
-            }.frame(maxWidth:.infinity,alignment:.leading)
-              .padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
-          }
           VStack(alignment:.leading,spacing:8) {
             Label("NOTES",systemImage:"note.text").font(.caption.bold()).tracking(1)
             TextField("Add a note",text:$model.contextText,axis:.vertical)
@@ -188,5 +179,23 @@ struct PhoneCaptureView: View {
         }.frame(maxHeight:160)
       }.font(.caption)
     }.padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
+  }
+}
+
+struct MuseSeeingCard: View {
+  let summary: String?
+  let outcome: String?
+  let isThinking: Bool
+  var body: some View {
+    if summary != nil || outcome != nil || isThinking {
+      VStack(alignment:.leading,spacing:8) {
+        Label("Muse is analyzing the stream…",systemImage:"eye").font(.caption.bold())
+        if let summary { Text(summary).font(.subheadline) }
+        else if isThinking { Text("Gathering recent context…").font(.subheadline).foregroundStyle(.secondary) }
+        if let outcome { Text(outcome).font(.caption).foregroundStyle(.secondary) }
+      }.frame(maxWidth:.infinity,alignment:.leading)
+        .padding(18).background(.white,in:RoundedRectangle(cornerRadius:18))
+        .accessibilityIdentifier("capture.seeing")
+    }
   }
 }
