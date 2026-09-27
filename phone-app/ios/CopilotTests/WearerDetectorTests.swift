@@ -250,7 +250,7 @@ final class WearerSessionTests: XCTestCase {
     XCTAssertEqual(model.requests,1,"Someone else's question now prompts a check")
     relay.onEvent?(final(5, "P1", "Do you want to visit?", turn:4))
     XCTAssertEqual(model.requests,1,"The wearer's own question never does")
-    XCTAssertEqual(ConversationPolicy.turns(from:model.transcript, wearerLabel:model.wearerLabel).map(\.speaker), ["wearer", "other", "wearer"])
+    XCTAssertEqual(ConversationPolicy.turns(from:model.transcript, wearerLabel:model.wearerLabel).map(\.speaker), ["wearer", "other", "wearer", "other", "wearer"])
   }
 
   func testBeforeTheWearerIsFoundOnlyAPhrasePromptsACheck() async throws {

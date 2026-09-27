@@ -192,7 +192,7 @@ Conversation cues no longer run on a 10-second timer. A check is sent with a `tr
 - **The wearer's own turns never prompt a check, and no tap is needed.** The glasses microphone sits next to the wearer's mouth, so their voice is the loudest. The app measures the speech level of each live-caption turn and averages it per speaker label. The loudest label becomes the wearer once it has two turns and averages at least 6 dB above every other voice heard. It is re-evaluated only when another label, with two turns, averages 6 dB above it.
 - **The wearer is kept for the whole session.** Caption labels are numbered afresh when captions restart after a pause, so the app keeps the wearer's level and matches the voice again on its first turn. Stop ends the session and forgets it.
 - **Until the wearer is found, no `question` or `stuck` check is sent.** Indirect phrases and **Analyze** still work. **Settings → My voice → That was me** is an optional override that marks the most recent caption as the wearer's. The six-second chunk fallback uses the level found in the session, or the saved voice level.
-- **Checks are small.** Only the last three turns are sent, as text, labeled `wearer` or `other`. No image is sent. Optional **Settings → About me** text is sent as `aboutMe` so a suggested answer can be specific.
+- **Checks are small.** Only the last eight turns are sent, as text, labeled `wearer` or `other`. The newest turn is the one to respond to; the earlier ones show the topic. The most recent summary from a scene check in the same session is sent too, if it is under five minutes old. No image is sent. Optional **Settings → About me** text is sent as `aboutMe` so a suggested answer can be specific.
 - **Stale replies are dropped.** If anyone speaks while a reply is in flight, it is never shown. A cue needs a confidence of at least 0.8, has no minimum dwell, and clears after 8 seconds. **Analyze** always answers, with "Nothing to add" when nothing fits.
 - **Scene-only Display mode** keeps its camera cues and its prompt. Its timer is now 30 seconds. Modes with conversation on no longer send camera images to Muse.
 - **Backend.** `POST /api/cue` accepts `trigger` and an optional `aboutMe` of up to 500 characters. Conversation checks use the new `SYSTEM_PROMPT` and a five-field schema. `meaning` is a valid cue type. Clients that send no trigger get `manual`, `question` or `stuck` from the request. The mock provider abstains on ordinary speech instead of offering generic listening advice.
@@ -201,7 +201,7 @@ These settings supersede older timing descriptions elsewhere in this repository.
 
 ### Early question checks and cue timing
 
-With live captions, a question is checked while it is still being asked. The first partial caption of someone else's turn that looks like a question sends the `question` check, and its cue is shown as soon as it returns. A partial looks like a question when it ends in a question mark (two words or more), or has at least four words and opens with a question word such as what, how, where, when, why, who, "are you", "do you", "did you", "have you", "can you" or "would you". The rules are in `phone-app/ios/Copilot/SpeculativeCue.swift`.
+With live captions, a question is checked before its turn is finalized. A partial caption of someone else's turn sends the `question` check once its words have not changed for 300 ms and it looks like a question, and its cue is shown as soon as it returns. A partial looks like a question when it ends in a question mark (two words or more), or has at least four words and opens with a question word such as what, how, where, when, why, who, "are you", "do you", "did you", "have you", "can you" or "would you". The rules are in `phone-app/ios/Copilot/SpeculativeCue.swift`.
 
 - **One early check per turn, never on the wearer's turns.** The voice must carry a caption label, the wearer's own label must be known, and the two must differ. An unlabeled partial waits for its label.
 - **When the turn is finalized, the words are compared.** Punctuation, case and filler words are not a change, and nothing more is sent. If the words changed and are still a question, the check runs again and its cue replaces the early one. If the turn was the wearer's own, or was not a question, the early cue is cleared.
@@ -209,12 +209,14 @@ With live captions, a question is checked while it is still being asked. The fir
 
 **Caption timing** on the phone now shows five steps for the last cue, each measured from the end of speech: final received, request sent, response received and cue shown. A minus sign means the step happened before the speech ended, which an early check can do. The shared timing log has one line per step and a `Cue timing` line per cue. It records times only, never words.
 
+The conversation prompt also tells the model to abstain when the cue it would suggest does not fit the topic of the last two turns.
+
 ### Optional Grok provider for conversation checks
 
 Set `XAI_API_KEY` in the ignored `.env` to send conversation checks to xAI's `grok-4.20-non-reasoning` (override with `XAI_MODEL`). The prompt, the five-field strict schema and the text-only request are the same; the output limit is 256 tokens. Scene checks, tone, learning and transcription stay on Muse, and `MUSE_API_KEY` is still required in live mode. With no `XAI_API_KEY`, conversation checks use Muse as before.
 
 If the Grok request fails, returns an unusable answer, or has not answered after 3 seconds, the same request is sent once to Muse. If Muse fails too, no cue is shown. A check the client cancelled is not retried. Scene checks are never retried.
 
-With the key set, the last three turns and the optional `aboutMe` text are sent to xAI instead of Meta. Review xAI's data terms before using it with real conversations.
+With the key set, the last eight turns, the most recent summary and the optional `aboutMe` text are sent to xAI instead of Meta. Review xAI's data terms before using it with real conversations.
 
 Every `/api/cue` response carries `metrics.provider`, `metrics.model` and `metrics.apiMs`, and the server log line for each cue request ends with `provider=… model=… apiMs=…`. `provider` is the one that answered. After a fallback the metrics also carry `fallbackFrom`, `fallbackReason` (`timeout`, `rate_limited`, `unavailable` or `error`) and `fallbackAfterMs`, the log line ends with `fallback=xai:timeout:3001ms`, and `apiMs` covers both attempts. `GET /api/health` reports `conversationModel`.

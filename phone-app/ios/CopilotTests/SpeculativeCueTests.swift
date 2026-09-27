@@ -44,35 +44,68 @@ final class SpeculativeCuePolicyTests: XCTestCase {
   func testOnlyALabeledVoiceThatIsNotTheWearersIsChecked() {
     var early = SpeculativeCue()
     let text = "Where do you study"
-    XCTAssertNil(early.consider(turn:1, text:text, speaker:"P1", wearerLabel:"P1"), "Never the wearer's own turn")
-    XCTAssertNil(early.consider(turn:1, text:text, speaker:"wearer", wearerLabel:"P1"))
-    XCTAssertNil(early.consider(turn:1, text:text, speaker:nil, wearerLabel:"P1"), "An unlabeled voice could be the wearer")
-    XCTAssertNil(early.consider(turn:1, text:text, speaker:"P2", wearerLabel:nil), "Until the wearer's label is known, any voice could be theirs")
-    XCTAssertNil(early.consider(turn:1, text:"I study computer science", speaker:"P2", wearerLabel:"P1"))
-    XCTAssertEqual(early.consider(turn:1, text:text, speaker:"P2", wearerLabel:"P1"), text)
+    XCTAssertEqual(early.heard(turn:1, text:text, at:1_000), 300)
+    XCTAssertNil(early.consider(turn:1, speaker:"P1", wearerLabel:"P1", at:1_300), "Never the wearer's own turn")
+    XCTAssertNil(early.consider(turn:1, speaker:"wearer", wearerLabel:"P1", at:1_300))
+    XCTAssertNil(early.consider(turn:1, speaker:nil, wearerLabel:"P1", at:1_300), "An unlabeled voice could be the wearer")
+    XCTAssertNil(early.consider(turn:1, speaker:"P2", wearerLabel:nil, at:1_300), "Until the wearer's label is known, any voice could be theirs")
+    XCTAssertEqual(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_300)?.text, text)
+    XCTAssertEqual(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_300)?.heardAt, 1_000)
+    XCTAssertEqual(early.heard(turn:2, text:"I study computer science", at:2_000), 300)
+    XCTAssertNil(early.consider(turn:2, speaker:"P2", wearerLabel:"P1", at:2_300), "A statement")
+  }
+
+  func testWordsMustStopChangingForThreeHundredMilliseconds() {
+    XCTAssertEqual(SpeculativeCue.settleMs, 300)
+    var early = SpeculativeCue()
+    XCTAssertEqual(early.heard(turn:1, text:"Where do you study", at:1_000), 300)
+    XCTAssertNil(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_000), "Just heard")
+    XCTAssertNil(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_290), "Still settling")
+    XCTAssertEqual(early.heard(turn:1, text:"Where do you study these", at:1_200), 300, "New words start the wait again")
+    XCTAssertNil(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_300), "300 ms after the first words, 100 ms after the latest")
+    XCTAssertEqual(early.heard(turn:1, text:"  Where do you study these ", at:1_350), 150, "The same words again do not")
+    XCTAssertEqual(early.heard(turn:1, text:nil, at:1_400), 100, "Nor does a label without words")
+    XCTAssertEqual(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_500)?.text, "Where do you study these")
+    XCTAssertEqual(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_500)?.heardAt, 1_200, "When the words were last heard")
+    XCTAssertEqual(early.heard(turn:1, text:nil, at:9_000), 0, "Long settled: nothing more to wait for")
   }
 
   func testALabelThatArrivesAfterTheWordsUsesTheLatestPartial() {
     var early = SpeculativeCue()
-    XCTAssertNil(early.consider(turn:4, text:"Where do you", speaker:nil, wearerLabel:"P1"))
-    XCTAssertNil(early.consider(turn:4, text:"Where do you study", speaker:nil, wearerLabel:"P1"))
-    XCTAssertEqual(early.consider(turn:4, text:nil, speaker:"P2", wearerLabel:"P1"), "Where do you study")
-    XCTAssertNil(early.consider(turn:5, text:nil, speaker:"P2", wearerLabel:"P1"), "Another turn's words are not borrowed")
+    XCTAssertNil(early.heard(turn:4, text:nil, at:900), "A label with no words yet has nothing to wait for")
+    XCTAssertEqual(early.heard(turn:4, text:"Where do you", at:1_000), 300)
+    XCTAssertEqual(early.heard(turn:4, text:"Where do you study", at:1_100), 300)
+    XCTAssertNil(early.consider(turn:4, speaker:nil, wearerLabel:"P1", at:1_400))
+    XCTAssertEqual(early.heard(turn:4, text:nil, at:1_600), 0)
+    XCTAssertEqual(early.consider(turn:4, speaker:"P2", wearerLabel:"P1", at:1_600)?.text, "Where do you study")
+    XCTAssertNil(early.heard(turn:5, text:nil, at:1_700), "Another turn's words are not borrowed")
+    XCTAssertNil(early.consider(turn:5, speaker:"P2", wearerLabel:"P1", at:2_000))
   }
 
   func testEachTurnGetsOneEarlyCheck() {
     var early = SpeculativeCue()
-    XCTAssertEqual(early.consider(turn:1, text:"Where do you study", speaker:"P2", wearerLabel:"P1"), "Where do you study")
-    XCTAssertEqual(early.consider(turn:1, text:"Where do you study now", speaker:"P2", wearerLabel:"P1"), "Where do you study now",
+    _ = early.heard(turn:1, text:"Where do you study", at:1_000)
+    XCTAssertEqual(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_300)?.text, "Where do you study")
+    _ = early.heard(turn:1, text:"Where do you study now", at:1_400)
+    XCTAssertEqual(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_700)?.text, "Where do you study now",
                    "Until a check is actually sent the turn can still have one")
     early.sent(turn:1, text:"Where do you study now", generation:7)
     XCTAssertEqual(early.turn, 1)
-    XCTAssertNil(early.consider(turn:1, text:"Where do you study now or", speaker:"P2", wearerLabel:"P1"))
-    XCTAssertEqual(early.consider(turn:2, text:"What do you think", speaker:"P3", wearerLabel:"P1"), "What do you think")
+    XCTAssertNil(early.heard(turn:1, text:"Where do you study now or", at:1_800), "Nothing more to wait for")
+    XCTAssertNil(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:2_200))
+    _ = early.heard(turn:2, text:"What do you think", at:3_000)
+    XCTAssertEqual(early.consider(turn:2, speaker:"P3", wearerLabel:"P1", at:3_300)?.text, "What do you think")
     early.sent(turn:2, text:"What do you think", generation:7)
-    XCTAssertNil(early.consider(turn:1, text:"Where do you study now or later", speaker:"P2", wearerLabel:"P1"), "An older turn stays used")
+    XCTAssertNil(early.heard(turn:1, text:"Where do you study now or later", at:3_400), "An older turn stays used")
     XCTAssertEqual(early.finalize(turn:2, text:"What do you think?", role:"other", generation:7), .keep)
-    XCTAssertNil(early.consider(turn:2, text:"What do you think", speaker:"P3", wearerLabel:"P1"), "A finished turn stays used")
+    XCTAssertNil(early.heard(turn:2, text:"What do you think", at:3_500), "A finished turn stays used")
+  }
+
+  func testATurnFinalizedBeforeItsWordsSettledHasNothingLeftToCheck() {
+    var early = SpeculativeCue()
+    _ = early.heard(turn:1, text:"Where do you study", at:1_000)
+    XCTAssertEqual(early.finalize(turn:1, text:"Where do you study?", role:"other", generation:0), .none, "No early check was sent")
+    XCTAssertNil(early.consider(turn:1, speaker:"P2", wearerLabel:"P1", at:1_300), "The finished turn is checked as usual, not early as well")
   }
 
   func testTheFinishedTurnDecidesWhatHappensToTheEarlyAnswer() {
@@ -208,6 +241,8 @@ final class SpeculativeCueSessionTests: XCTestCase {
     XCTAssertEqual(model.requests,0)
     return model
   }
+  /// Long enough for a partial's words to count as settled.
+  private func settle() async throws { try await Task.sleep(for:.milliseconds(380)) }
   private func partial(_ turn: Int, _ speaker: String?, _ text: String) -> RealtimeASREvent { .init(type:"transcript.partial",turnId:turn,speaker:speaker,text:text) }
   private func final(_ turn: Int, _ speaker: String?, _ text: String) -> RealtimeASREvent { .init(type:"transcript.final",turnId:turn,speaker:speaker,text:text) }
 
@@ -215,9 +250,15 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","Would you"))
+    try await settle()
     XCTAssertEqual(model.requests,0,"Two words are not yet a question")
+    relay.onEvent?(partial(2,"P2","Would you like that hot"))
+    try await Task.sleep(for:.milliseconds(200))
     relay.onEvent?(partial(2,"P2","Would you like that hot or iced"))
-    XCTAssertEqual(model.requests,1,"Sent on the partial, before the turn is finalized")
+    try await Task.sleep(for:.milliseconds(200))
+    XCTAssertEqual(model.requests,0,"The words changed 200 ms ago, so they have not settled")
+    try await Task.sleep(for:.milliseconds(180))
+    XCTAssertEqual(model.requests,1,"Sent on the settled partial, before the turn is finalized")
     XCTAssertTrue(model.isThinking)
     XCTAssertEqual(model.transcript.map(\.text),["Hello there."],"A partial is sent with the check but is not yet a transcript turn")
     relay.onEvent?(partial(2,"P2","Would you like that hot or iced please"))
@@ -233,14 +274,32 @@ final class SpeculativeCueSessionTests: XCTestCase {
     XCTAssertFalse(model.isThinking)
     XCTAssertEqual(model.cue,hotOrIced)
     XCTAssertEqual(model.transcript.map(\.text),["Hello there.","Would you like that hot or iced, please?"])
+    XCTAssertEqual(model.staleDrops,0)
     try await Task.sleep(for:.milliseconds(3300))
     XCTAssertEqual(model.requests,1,"With the cue on screen, silence does not ask again")
+  }
+
+  func testAFinalThatArrivesBeforeTheWordsSettledIsCheckedOnceAsUsual() async throws {
+    let relay = EarlyRelay(), model = await model(relay)
+    defer { model.stop() }
+    relay.onEvent?(partial(2,"P2","Would you like that hot or iced"))
+    try await Task.sleep(for:.milliseconds(100))
+    XCTAssertEqual(model.requests,0)
+    relay.onEvent?(final(2,"P2","Would you like that hot or iced?"))
+    XCTAssertEqual(model.requests,1,"The finished question is the moment")
+    try await settle()
+    XCTAssertEqual(model.requests,1,"The wait that was running sends nothing for a finished turn")
+    XCTAssertEqual(model.staleDrops,0)
+    try await Task.sleep(for:.milliseconds(300))
+    XCTAssertEqual(model.cue,hotOrIced)
+    XCTAssertTrue(model.captionDiagnostics.summary.contains("Last cue: question, speech end "),"Not an early check")
   }
 
   func testAFinalThatArrivesWhileTheEarlyCheckIsInFlightLeavesItAlone() async throws {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","Would you like that hot or iced"))
+    try await settle()
     relay.onEvent?(final(2,"P2","Would you like that hot or iced?"))
     XCTAssertEqual(model.requests,1)
     XCTAssertTrue(model.isThinking,"The check in flight already has these words")
@@ -253,6 +312,7 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","Would you like that hot or iced"))
+    try await settle()
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertEqual(model.cue,hotOrIced)
     relay.onEvent?(final(2,"P2","Would you like that hot or iced on Friday?"))
@@ -268,6 +328,7 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","Can you have that ready"))
+    try await settle()
     XCTAssertEqual(model.requests,1)
     relay.onEvent?(final(2,"P2","Can you have that ready by Friday?"))
     XCTAssertEqual(model.requests,2)
@@ -281,12 +342,16 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P1","What do you think about Friday"))
+    try await settle()
+    XCTAssertEqual(model.requests,0,"The wearer's own question, however settled")
     relay.onEvent?(final(2,"P1","What do you think about Friday?"))
-    XCTAssertEqual(model.requests,0,"The wearer's own question")
+    XCTAssertEqual(model.requests,0)
     relay.onEvent?(partial(3,nil,"Would you like that hot or iced"))
+    try await settle()
     XCTAssertEqual(model.requests,0,"No label yet: this could be the wearer")
     relay.onEvent?(.init(type:"speaker.updated",turnId:3,speaker:"P2"))
-    XCTAssertEqual(model.requests,1,"Checked as soon as the voice is known to be someone else's")
+    try await Task.sleep(for:.milliseconds(50))
+    XCTAssertEqual(model.requests,1,"The words had settled, so the label is all that was missing")
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertEqual(model.cue,hotOrIced)
   }
@@ -295,6 +360,7 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","Would you like that hot or iced"))
+    try await settle()
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertEqual(model.cue,hotOrIced)
     relay.onEvent?(final(2,"P1","Would you like that hot or iced?"))
@@ -307,6 +373,7 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","What a great robot that"))
+    try await settle()
     XCTAssertEqual(model.requests,1)
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertEqual(model.cue,"Ask how their robotics project is going.")
@@ -319,11 +386,13 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","Would you like that hot or iced"))
+    try await settle()
     XCTAssertTrue(model.isThinking)
     relay.onEvent?(partial(3,"P3","I mean"))
     XCTAssertFalse(model.isThinking,"Someone else is talking")
     XCTAssertEqual(model.staleDrops,1)
     relay.onEvent?(partial(2,"P2","Would you like that hot or iced today"))
+    try await settle()
     XCTAssertEqual(model.requests,1,"The turn has had its early check")
     relay.onEvent?(final(2,"P2","Would you like that hot or iced?"))
     XCTAssertEqual(model.requests,2,"Nothing was kept from the dropped check, so the finished question is checked")
@@ -335,6 +404,7 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","Would you like that hot or iced"))
+    try await settle()
     try await Task.sleep(for:.milliseconds(600))
     XCTAssertEqual(model.cue,hotOrIced)
     model.dismiss()
@@ -347,10 +417,12 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","I went to the store on Friday"))
+    try await settle()
     XCTAssertEqual(model.requests,0)
     model.simulateSurroundings = true
     XCTAssertTrue(model.sceneChecks)
     relay.onEvent?(partial(3,"P2","Would you like that hot or iced"))
+    try await settle()
     XCTAssertEqual(model.requests,0)
   }
 
@@ -358,7 +430,9 @@ final class SpeculativeCueSessionTests: XCTestCase {
     let relay = EarlyRelay(), model = await model(relay)
     defer { model.stop() }
     relay.onEvent?(partial(2,"P2","Would you like that hot or iced"))
+    try await settle()
     try await Task.sleep(for:.milliseconds(600))
+    XCTAssertEqual(model.cue,hotOrIced)
     XCTAssertTrue(model.captionDiagnostics.summary.contains("Last cue: —"),"The turn has not finished")
     relay.onEvent?(final(2,"P2","Would you like that hot or iced?"))
     let summary = model.captionDiagnostics.summary, export = model.captionDiagnostics.exportText

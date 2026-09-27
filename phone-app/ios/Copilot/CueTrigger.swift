@@ -20,8 +20,10 @@ enum ConversationPolicy {
   static let cueLifetimeMs = 8_000.0
   /// Cues below this confidence are not shown.
   static let displayConfidence = 0.8
-  /// Only the last few turns are sent, as text.
-  static let turnCount = 3
+  /// Only the last few turns are sent, as text. The newest is the one to respond to; the rest show the topic.
+  static let turnCount = 8
+  /// An earlier summary says what the conversation is about only while it is recent.
+  static let summaryMaxAgeMs = 300_000.0
   /// Longest `aboutMe` the server accepts.
   static let aboutMeCharacters = 500
   /// Shown when the wearer asks and nothing fits, so an explicit request always gets an answer.
@@ -56,6 +58,11 @@ enum ConversationPolicy {
       entry.speaker = role(entry.speaker, wearerLabel:wearerLabel)
       return entry
     }
+  }
+
+  /// The most recent summary of this session, if it is recent enough to still describe the topic.
+  static func summary(from moments: [Moment], at time: Double) -> [Moment] {
+    moments.suffix(1).filter { $0.atMs <= time + 1000 && time - $0.atMs <= summaryMaxAgeMs }
   }
 
   static func isNothingToAdd(_ text: String) -> Bool { IndirectPhrases.normalize(text) == IndirectPhrases.normalize(nothingToAdd) }

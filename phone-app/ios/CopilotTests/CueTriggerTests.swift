@@ -56,26 +56,38 @@ final class ConversationPolicyTests: XCTestCase {
     XCTAssertEqual(ConversationPolicy.role(nil, wearerLabel:"P2"), "other")
   }
 
-  func testOnlyTheLastThreeReliableTurnsAreSentOldestFirst() throws {
-    let lines: [TranscriptEntry] = [
-      .init(text:"One", startMs:0, endMs:1, confidence:nil, speaker:"P1"),
-      .init(text:"Two", startMs:1, endMs:2, confidence:nil, speaker:"P2"),
-      .init(text:"Mumble", startMs:2, endMs:3, confidence:0.2, speaker:"P1"),
-      .init(text:"Three", startMs:3, endMs:4, confidence:nil, speaker:nil),
-      .init(text:"Four?", startMs:4, endMs:5, confidence:0.9, speaker:"P1"),
+  func testOnlyTheLastEightReliableTurnsAreSentOldestFirst() throws {
+    XCTAssertEqual(ConversationPolicy.turnCount, 8)
+    var lines: [TranscriptEntry] = (1...7).map { .init(text:"Line \($0)", startMs:Double($0), endMs:Double($0) + 0.5, confidence:nil, speaker:$0 % 2 == 0 ? "P2" : "P1") }
+    lines += [
+      .init(text:"Mumble", startMs:8, endMs:8.5, confidence:0.2, speaker:"P1"),
+      .init(text:"Eight", startMs:9, endMs:9.5, confidence:nil, speaker:nil),
+      .init(text:"Nine?", startMs:10, endMs:10.5, confidence:0.9, speaker:"P1"),
     ]
     let turns = ConversationPolicy.turns(from:lines, wearerLabel:"P2")
-    XCTAssertEqual(turns.map(\.text), ["Two", "Three", "Four?"])
-    XCTAssertEqual(turns.map(\.speaker), ["wearer", "other", "other"])
-    XCTAssertEqual(turns.map(\.id), [lines[1].id, lines[3].id, lines[4].id], "Relabeling keeps the turn's identity")
+    XCTAssertEqual(turns.map(\.text), ["Line 2", "Line 3", "Line 4", "Line 5", "Line 6", "Line 7", "Eight", "Nine?"], "The oldest line and the unclear one are left out")
+    XCTAssertEqual(turns.map(\.speaker), ["wearer", "other", "wearer", "other", "wearer", "other", "other", "other"])
+    XCTAssertEqual(turns.last?.id, lines.last?.id, "The newest turn is last, and relabeling keeps its identity")
+    XCTAssertEqual(ConversationPolicy.turns(from:Array(lines.prefix(2)), wearerLabel:"P2").map(\.text), ["Line 1", "Line 2"], "A short conversation is sent whole")
     let request = CueRequest(transcript:turns, frame:nil, context:[], manual:false, analysisMode:"conversation",
+                             recentMoments:ConversationPolicy.summary(from:[Moment(atMs:1_000, summary:"Ordering coffee."), Moment(atMs:50_000, summary:"Catching up about school.")], at:60_000),
                              trigger:CueTrigger.question.rawValue, aboutMe:ConversationPolicy.aboutMe("  I study CS at Tech. ", for:.question))
     let body = try XCTUnwrap(JSONSerialization.jsonObject(with:JSONEncoder().encode(request)) as? [String:Any])
     XCTAssertEqual(body["trigger"] as? String, "question")
     XCTAssertEqual(body["aboutMe"] as? String, "I study CS at Tech.")
     XCTAssertNil(body["frame"], "Conversation checks send text only")
     let speakers = try XCTUnwrap(body["transcript"] as? [[String:Any]]).map { $0["speaker"] as? String }
-    XCTAssertEqual(speakers, ["wearer", "other", "other"], "No live-caption labels reach the server")
+    XCTAssertEqual(speakers, turns.map(\.speaker), "No live-caption labels reach the server")
+    XCTAssertEqual(try XCTUnwrap(body["recentMoments"] as? [[String:Any]]).map { $0["summary"] as? String }, ["Catching up about school."])
+  }
+
+  func testOnlyTheMostRecentSummaryIsSentAndOnlyWhileItIsRecent() {
+    let moments = [Moment(atMs:100_000, summary:"Ordering coffee."), Moment(atMs:400_000, summary:"Catching up about school.")]
+    XCTAssertEqual(ConversationPolicy.summary(from:moments, at:410_000), [moments[1]])
+    XCTAssertEqual(ConversationPolicy.summary(from:moments, at:700_000), [moments[1]], "Five minutes old")
+    XCTAssertEqual(ConversationPolicy.summary(from:moments, at:700_001), [], "Too old to say what the talk is about now")
+    XCTAssertEqual(ConversationPolicy.summary(from:moments, at:390_000), [], "Not from the future")
+    XCTAssertEqual(ConversationPolicy.summary(from:[], at:410_000), [])
   }
 
   func testSceneRequestsCarryNoTriggerOrAboutMe() throws {

@@ -33,7 +33,7 @@ test('a conversation check goes to a non-reasoning Grok model with the same prom
   assert.equal(body.stream, false);
   assert.equal(body.messages[0].content, SYSTEM_PROMPT);
   assert.deepEqual(body.messages[1].content.map(part => part.type), ['text'], 'Text only, even when the client supplied an image');
-  assert.deepEqual(Object.keys(JSON.parse(body.messages[1].content[0].text)).sort(), ['aboutMe', 'groups', 'people', 'recent', 'topics', 'trigger']);
+  assert.deepEqual(Object.keys(JSON.parse(body.messages[1].content[0].text)).sort(), ['aboutMe', 'groups', 'people', 'recent', 'summary', 'topics', 'trigger']);
   assert.equal(body.response_format.type, 'json_schema');
   assert.equal(body.response_format.json_schema.strict, true);
   assert.deepEqual(body.response_format.json_schema.schema, conversationCueSchema);

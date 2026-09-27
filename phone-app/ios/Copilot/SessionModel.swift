@@ -154,6 +154,7 @@ final class SessionModel {
   /// The moment behind the check in flight; nil for a scene check.
   @ObservationIgnored private var activeTrigger: CueTrigger?
   @ObservationIgnored private var speculation = SpeculativeCue()
+  @ObservationIgnored private var speculationTask: Task<Void, Never>?
   @ObservationIgnored private var asrTask: Task<Void, Never>?
   @ObservationIgnored private var startTask: Task<Void, Never>?
   @ObservationIgnored private var loopTask: Task<Void, Never>?
@@ -834,13 +835,19 @@ final class SessionModel {
     cueTask?.cancel(); cueTask = nil; isThinking = false; staleDrops += 1
     if trigger == .manual { feedback("New speech. Analyze after a pause.") }
   }
-  /// A question still being asked gets its check early, once per turn. See SpeculativeCue.
-  private func speculate(turn: Int, text: String?, endMs: Double) {
-    guard !sceneChecks, let text = speculation.consider(turn:turn, text:text, speaker:realtimeSpeakers[turn], wearerLabel:wearerLabel) else { return }
-    let sent = requests
-    requestCue(manual:false, trigger:.question, partial:TranscriptEntry(text:String(text.prefix(500)), startMs:endMs - 1000, endMs:endMs, confidence:nil, speaker:realtimeSpeakers[turn]))
-    guard requests > sent else { return }
-    speculation.sent(turn:turn, text:text, generation:generation); captionDiagnostics.cueSentEarly(for:turn)
+  /// A question gets its check before its turn is finalized, once its words have settled. See SpeculativeCue.
+  private func speculate(turn: Int, text: String?) {
+    guard !sceneChecks, let wait = speculation.heard(turn:turn, text:text, at:nowMs()) else { return }
+    speculationTask?.cancel()
+    speculationTask = Task { [weak self] in
+      try? await Task.sleep(for:.milliseconds(Int(wait.rounded(.up))))
+      guard let self, !Task.isCancelled, phase == .active, !sceneChecks,
+            let early = speculation.consider(turn:turn, speaker:realtimeSpeakers[turn], wearerLabel:wearerLabel, at:nowMs()) else { return }
+      let sent = requests
+      requestCue(manual:false, trigger:.question, partial:TranscriptEntry(text:String(early.text.prefix(500)), startMs:early.heardAt - 1000, endMs:early.heardAt, confidence:nil, speaker:realtimeSpeakers[turn]))
+      guard requests > sent else { return }
+      speculation.sent(turn:turn, text:early.text, generation:generation); captionDiagnostics.cueSentEarly(for:turn)
+    }
   }
   /// A finished turn from someone else is a moment to help. The wearer's own turns never are.
   private func turnFinalized(_ entry: TranscriptEntry, turn: Int? = nil) {
@@ -958,7 +965,7 @@ final class SessionModel {
     captionAtMs = time
     if event.type != "speaker.updated", !finalizedTurns.contains(id),
        event.text?.contains(where: { $0.isLetter || $0.isNumber }) == true, speculation.turn != id { dropConversationCheck() }
-    if event.type != "transcript.final", !finalizedTurns.contains(id) { speculate(turn:id, text:event.text, endMs:range.endMs) }
+    if event.type != "transcript.final", !finalizedTurns.contains(id) { speculate(turn:id, text:event.text) }
     guard event.type == "transcript.final", !finalizedTurns.contains(id) else { return }
     finalizedTurns.insert(id)
     // Bound deduplication bookkeeping during long sessions.
@@ -1117,7 +1124,7 @@ final class SessionModel {
                              analysisMode:surroundings ? "surroundings" : "conversation", audioContext:audio,
                              people:present.prefix(8).map { people.context(for:$0) },
                              groups:people.groups(of:present).prefix(8).map(people.context(for:)),
-                             currentScene:surroundings ? currentScene ?? "" : "", recentMoments:surroundings ? moments : [],
+                             currentScene:surroundings ? currentScene ?? "" : "", recentMoments:surroundings ? moments : ConversationPolicy.summary(from:moments, at:timestamp),
                              previousCue:surroundings ? cue ?? "" : "",
                              trigger:trigger?.rawValue, aboutMe:ConversationPolicy.aboutMe(aboutMe, for:trigger))
     let connection = client

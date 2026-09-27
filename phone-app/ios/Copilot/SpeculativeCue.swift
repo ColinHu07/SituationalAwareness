@@ -1,8 +1,9 @@
 import Foundation
 
-/// A question can be answered before the asker stops talking. While someone else's turn is still a partial
-/// caption, the first partial that looks like a question sends the question check early. When the turn is
-/// finalized its words are compared with the ones that were checked, and the check runs again only if they changed.
+/// A question can be answered before its turn is finalized. While someone else's turn is still a partial
+/// caption, a partial that looks like a question and has stopped changing sends the question check early.
+/// When the turn is finalized its words are compared with the ones that were checked, and the check runs
+/// again only if they changed.
 struct SpeculativeCue {
   /// What to do with a finished turn.
   enum Outcome: Equatable {
@@ -16,6 +17,8 @@ struct SpeculativeCue {
     case withdraw
   }
 
+  /// A partial counts once its words have not changed for this long, so a sentence is not checked halfway.
+  static let settleMs = 300.0
   /// A partial that only opens like a question needs this many words, so "What" alone is not checked.
   static let minimumWords = 4
   /// A partial that already ends in a question mark needs fewer.
@@ -38,7 +41,7 @@ struct SpeculativeCue {
   private var failed = false
   /// Turns that have had their one early check. Bounded, oldest first.
   private var used: [Int] = []
-  private var latest: (turn: Int, text: String)?
+  private var latest: (turn: Int, text: String, changedAt: Double)?
 
   /// Lowercase words. Contractions keep their first part, so "what's" opens like "what".
   static func words(_ text: String) -> [String] {
@@ -70,14 +73,23 @@ struct SpeculativeCue {
     words(early).filter { !minorWords.contains($0) } != words(final).filter { !minorWords.contains($0) }
   }
 
-  /// The words to check now, or nil. Call for each partial caption or speaker update of an unfinished turn.
-  /// The speaker must be labeled and must not be the wearer, whose own label has to be known first.
-  mutating func consider(turn id: Int, text: String?, speaker: String?, wearerLabel: String?) -> String? {
-    if let text = text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty { latest = (id, text) }
-    guard !used.contains(id), let latest, latest.turn == id,
+  /// Notes a partial caption or speaker update of an unfinished turn. Returns how long until its words
+  /// have settled, or nil when the turn has no words to wait for or has had its early check.
+  /// The same words again, or a label without words, do not restart the wait.
+  mutating func heard(turn id: Int, text: String?, at time: Double) -> Double? {
+    if let text = text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty,
+       latest?.turn != id || latest?.text != text { latest = (id, text, time) }
+    guard !used.contains(id), let latest, latest.turn == id else { return nil }
+    return max(0, latest.changedAt + Self.settleMs - time)
+  }
+
+  /// The words to check now and when they were last heard, or nil. They must have settled and look like a
+  /// question. The speaker must be labeled and must not be the wearer, whose own label has to be known first.
+  func consider(turn id: Int, speaker: String?, wearerLabel: String?, at time: Double) -> (text: String, heardAt: Double)? {
+    guard !used.contains(id), let latest, latest.turn == id, time - latest.changedAt >= Self.settleMs - 5,
           let speaker, let wearerLabel, speaker != "wearer", speaker != wearerLabel,
           Self.looksLikeQuestion(latest.text) else { return nil }
-    return latest.text
+    return (latest.text, latest.changedAt)
   }
 
   /// The early check for a turn was sent. It is the only one that turn gets.
@@ -93,9 +105,10 @@ struct SpeculativeCue {
   /// Decides what a finished turn needs. `generation` differs from the one at sending when the early check
   /// was dropped by other speech or the wearer dismissed its cue, which leaves nothing to keep.
   mutating func finalize(turn id: Int?, text final: String, role: String, generation now: Int) -> Outcome {
+    // A finished turn has no partial left to settle.
+    if let id, latest?.turn == id { latest = nil }
     guard let id, id == turn else { return .none }
     turn = nil
-    if latest?.turn == id { latest = nil }
     guard !failed, generation == now else { return .none }
     guard role == "other" else { return .withdraw }
     guard Self.changedMeaningfully(from:text, to:final) else { return .keep }

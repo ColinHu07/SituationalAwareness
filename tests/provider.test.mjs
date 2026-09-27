@@ -227,7 +227,7 @@ test('cue requests carry session memory and the cue on screen; summaries survive
   assert.equal('summary' in validateCue(base), false);
   let body;
   const provider = createProvider(env, async (_url, options) => { body = JSON.parse(options.body); return { ok: true, json: async () => completion() }; });
-  // Session memory belongs to scene checks; a conversation check sees only the moment and the last few turns.
+  // The whole session memory belongs to scene checks; a conversation check gets only the newest summary (see triggers.test.mjs).
   await provider.cue({ ...surroundingsInput(), recentMoments: [{ atMs: Date.now() - 20_000, summary: 'Talking about robotics.' }], previousCue: 'Ask about the robot.' });
   const sent = JSON.parse(body.messages[1].content[0].text);
   assert.equal(sent.previousCue, 'Ask about the robot.');
