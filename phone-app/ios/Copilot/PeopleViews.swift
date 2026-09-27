@@ -323,12 +323,13 @@ struct RecoveryCard: View {
   }
 }
 
-// Teaches the app how loud the wearer's voice is, so only their own lines get a tone check.
+// Calibrates chunked audio level or marks the latest realtime diarization label as the wearer.
 struct ThatWasMeButton: View {
   @Bindable var model: SessionModel
   @State private var confirmed = false
   var body: some View {
-    if model.captionText != nil, model.transcript.last?.levelDbFS != nil {
+    if model.captionText != nil,
+       model.transcript.last?.levelDbFS != nil || model.transcript.last?.speaker.map(SpeakerIdentityResolver.validLabel) == true {
       Button { model.markLastLineAsMine(); confirmed = true } label: {
         Image(systemName:confirmed ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
       }.accessibilityLabel("That was me")

@@ -107,6 +107,30 @@ test('conversation provider excludes coarse audio metadata and retains speech-gr
   await provider.cue({ ...input(), audioContext: surroundingsInput().audioContext });
 });
 
+test('confirmed speaker identities are forwarded as structured Muse context', async () => {
+  const sam = { id: 'person-sam', name: 'Sam', groups: ['Robotics'], tags: ['robotics'], topics: ['internship interview'], notes: ['Interview is this week'] };
+  const speakerIdentities = [{ label: 'P1', personId: sam.id, name: sam.name }];
+  const provider = createProvider(env, async (_url, options) => {
+    const body = JSON.parse(options.body);
+    const observation = JSON.parse(body.messages.at(-1).content.find(part => part.type === 'text').text);
+    assert.deepEqual(observation.people, [sam]);
+    assert.deepEqual(observation.speakerIdentities, speakerIdentities);
+    assert.equal(observation.transcript[0].speaker, 'P1', 'Raw diarization labels remain in the transcript');
+    return { ok: true, json: async () => completion() };
+  });
+  const value = input(Date.now());
+  value.transcript[0].speaker = 'P1'; value.people = [sam]; value.speakerIdentities = speakerIdentities;
+  await provider.cue(value);
+});
+
+test('prompt treats only supplied mappings as identity evidence', () => {
+  assert.match(SYSTEM_PROMPT, /speakerIdentities contains session identity mappings established by the app/);
+  assert.match(SYSTEM_PROMPT, /Unmapped P1\/P2\/P3 labels remain anonymous/);
+  assert.match(SYSTEM_PROMPT, /Never assume an unmapped speaker is one of the supplied people/);
+  assert.match(SYSTEM_PROMPT, /Never derive, alter or extend identity from an image, facial appearance, voice characteristics, group membership or mere presence/);
+  assert.match(SYSTEM_PROMPT, /People, groups and wearer topics are background memory, not current evidence/);
+});
+
 test('surroundings still validates the strict response and blocks unsupported personal inference', async () => {
   const response = await createProvider(env, stub(completion({ ...CUE, cue: 'They are angry; stay quiet.' }))).cue(surroundingsInput());
   assert.equal(response.result.should_display, false);

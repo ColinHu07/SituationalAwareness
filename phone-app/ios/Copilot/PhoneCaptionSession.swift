@@ -3,8 +3,10 @@ import Observation
 
 struct CaptionRow: Identifiable, Equatable {
   let id: String
-  let speakerName: String
+  /// Raw session-local diarization label. Display names are resolved separately.
+  let speakerLabel: String?
   let text: String
+  var speakerName: String { speakerLabel ?? "Speaker…" }
 }
 
 // A speaker's next turn replaces only that speaker's row. Pending, unattributed
@@ -68,7 +70,7 @@ struct PhoneCaptionRoster {
     }
 
     let rowID = turn.speaker ?? pendingID
-    let row = CaptionRow(id:rowID, speakerName:turn.speaker.map(Self.speakerName) ?? "Speaker…", text:turn.text)
+    let row = CaptionRow(id:rowID, speakerLabel:turn.speaker, text:turn.text)
     if let index = visible.firstIndex(where: { $0.value.id == rowID }) {
       visible[index] = VisibleRow(value:row, updatedAt:time)
       if rowID != pendingID { visible.removeAll { $0.value.id == pendingID } }
@@ -95,16 +97,6 @@ struct PhoneCaptionRoster {
     return value == "P\(number)"
   }
 
-  private static func speakerName(_ label: String) -> String {
-    var number = Int(label.dropFirst()) ?? 1
-    var letters = ""
-    repeat {
-      number -= 1
-      letters = String(UnicodeScalar(65 + number % 26)!) + letters
-      number /= 26
-    } while number > 0
-    return "Person \(letters)"
-  }
 }
 
 @MainActor
@@ -145,6 +137,10 @@ final class PhoneCaptionSession {
   @ObservationIgnored private var expiryTask: Task<Void, Never>?
   @ObservationIgnored private var epoch = 0
   @ObservationIgnored private var roster = PhoneCaptionRoster()
+  @ObservationIgnored private var identityResolver = SpeakerIdentityResolver()
+  @ObservationIgnored private var identityPresence = PresenceTracker()
+  @ObservationIgnored private var finalizedTurns: Set<Int> = []
+  @ObservationIgnored private var peopleStore: PeopleStore?
 
   convenience init() {
     self.init(microphone:ConversationMicrophone(),
@@ -154,10 +150,19 @@ final class PhoneCaptionSession {
 
   init(microphone: any PhoneCaptionMicrophone,
        makeRelay: @escaping (String, String) -> any PhoneCaptionRelay,
-       healthCheck: @escaping (String, String) async throws -> HealthResponse) {
+       healthCheck: @escaping (String, String) async throws -> HealthResponse,
+       people: PeopleStore? = nil) {
     self.microphone = microphone
     self.makeRelay = makeRelay
     self.healthCheck = healthCheck
+    self.peopleStore = people
+  }
+
+  func attachPeople(_ people: PeopleStore) { peopleStore = people }
+
+  func displaySpeakerName(for label: String?) -> String {
+    guard let label else { return "Speaker…" }
+    return identityResolver.displayName(for:label, people:peopleStore?.people ?? [])
   }
 
   func start(endpoint: String, token: String) {
@@ -166,6 +171,7 @@ final class PhoneCaptionSession {
     let run = epoch
     diagnostics.reset()
     roster = PhoneCaptionRoster(); rows = []
+    identityResolver.resetSession(); identityPresence.reset(); finalizedTurns = []
     phase = .starting; status = "Connecting…"
     microphone.onPCM = { [weak self] data, capturedAt in
       Task { @MainActor in
@@ -232,6 +238,7 @@ final class PhoneCaptionSession {
     microphone.onPCM = nil; microphone.onFailure = nil
     microphone.stop()
     roster = PhoneCaptionRoster(); rows = []
+    identityResolver.resetSession(); identityPresence.reset(); finalizedTurns = []
     phase = .stopped; status = "Stopped. Captions cleared."
   }
 
@@ -242,9 +249,19 @@ final class PhoneCaptionSession {
     let receivedAt = ProcessInfo.processInfo.systemUptime
     diagnostics.received(event)
     guard phase == .listening,
-          ["transcript.partial", "transcript.final", "speaker.updated"].contains(event.type) else { return }
+          ["transcript.partial", "transcript.final", "speaker.updated"].contains(event.type),
+          let id = event.turnId else { return }
     let previousRows = rows
     roster.consume(event, at:nowMs())
+    if event.type == "transcript.final", finalizedTurns.insert(id).inserted,
+       let label = event.speaker, let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty {
+      let profiles = peopleStore?.people ?? []
+      if let person = SpeakerIdentityResolver.selfIdentifiedPerson(in:text, people:profiles) {
+        identityPresence.introduce(person.id, at:nowMs())
+      }
+      _ = identityResolver.observeFinalTurn(label:label, text:text, people:profiles,
+                                            presentPersonIDs:identityPresence.confirmed)
+    }
     rows = roster.rows
     diagnostics.applied(event:event, durationMs:(ProcessInfo.processInfo.systemUptime-receivedAt)*1000, changed:rows != previousRows)
   }

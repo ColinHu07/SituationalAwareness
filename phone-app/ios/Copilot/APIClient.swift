@@ -30,6 +30,8 @@ struct CueRequest: Encodable {
   var audioContext: AudioContext? = nil
   var people: [PersonContext] = []
   var groups: [GroupContext] = []
+  /// Confirmed session-local diarization label -> supplied Person profile links.
+  var speakerIdentities: [SpeakerIdentityContext] = []
   var currentScene = ""
   /// Earlier one-sentence summaries from this session, oldest first: background beyond the recent 10-second window.
   var recentMoments: [Moment] = []

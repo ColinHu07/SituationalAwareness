@@ -6,6 +6,7 @@ import { validateLearn } from '../shared/protocol.mjs';
 import { NOW, input, completion } from './fixtures.mjs';
 
 const jake = { id: 'p1', name: 'Jake', groups: ['Football team'], tags: ['football'], topics: ['fantasy football'], notes: ['Tryout on Friday'] };
+const priya = { id: 'p2', name: 'Priya', groups: [], tags: [], topics: [], notes: [] };
 const group = { name: 'Football team', topics: ['playoffs'], slang: ['mid = mediocre'], style: 'Fast, lots of teasing.', notes: [] };
 function learnInput(now = NOW) {
   return { transcript: [
@@ -19,6 +20,35 @@ test('cue input carries optional people and group profiles', () => {
   assert.deepEqual(value.people, [jake]); assert.deepEqual(value.groups, [group]);
   assert.throws(() => validateInput({ ...input(), people: [{ ...jake, notes: ['x'.repeat(161)] }] }, NOW), InputError);
   assert.throws(() => validateInput({ ...input(), groups: Array(9).fill(group) }, NOW), InputError);
+});
+
+test('cue input accepts only profile-linked speaker identity mappings', () => {
+  const speakerIdentities = [{ label: 'P1', personId: jake.id, name: jake.name }];
+  const value = validateInput({ ...input(), transcript: [{ ...input().transcript[0], speaker: 'P1' }],
+    people: [jake], groups: [group], speakerIdentities }, NOW);
+  assert.deepEqual(value.speakerIdentities, speakerIdentities);
+  assert.equal(validateInput({ ...input(), people: [jake] }, NOW).speakerIdentities.length, 0,
+    'Older cue requests remain valid without speaker identities');
+});
+
+test('cue input rejects malformed, duplicate or profile-disconnected speaker identities', () => {
+  const base = { ...input(), people: [jake, priya] };
+  const validJake = { label: 'P1', personId: jake.id, name: jake.name };
+  for (const speakerIdentities of [
+    null,
+    {},
+    Array(9).fill(validJake),
+    [{ ...validJake, label: 'P0' }],
+    [{ ...validJake, personId: '' }],
+    [{ ...validJake, personId: 'x'.repeat(65) }],
+    [{ ...validJake, name: '' }],
+    [{ ...validJake, name: 'x'.repeat(61) }],
+    [{ ...validJake, extra: true }],
+    [validJake, { label: 'P1', personId: priya.id, name: priya.name }],
+    [validJake, { label: 'P2', personId: jake.id, name: jake.name }],
+    [{ ...validJake, personId: 'missing' }],
+    [{ ...validJake, name: 'Not Jake' }],
+  ]) assert.throws(() => validateInput({ ...base, speakerIdentities }, NOW), InputError);
 });
 
 test('learn input accepts an hour-long conversation and requires identified people', () => {

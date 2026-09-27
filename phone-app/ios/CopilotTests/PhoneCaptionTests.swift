@@ -10,7 +10,7 @@ final class PhoneCaptionTests: XCTestCase {
     roster.consume(event(1, "P1", "Hello"), at:1_000)
     roster.consume(event(2, "P2", "Hi there"), at:2_000)
     roster.consume(event(1, "P1", "Hello everyone"), at:3_000)
-    XCTAssertEqual(roster.rows.map(\.speakerName), ["Person A", "Person B"])
+    XCTAssertEqual(roster.rows.map(\.speakerName), ["P1", "P2"])
     XCTAssertEqual(roster.rows.map(\.text), ["Hello everyone", "Hi there"])
     roster.consume(event(1, "P1", String(repeating:"earlier words ", count:30) + "Newest words"), at:4_000)
     XCTAssertTrue(roster.rows[0].text.hasSuffix("Newest words"))
@@ -21,9 +21,9 @@ final class PhoneCaptionTests: XCTestCase {
     var roster = PhoneCaptionRoster()
     roster.consume(event(1, "P1", "First person"), at:1_000)
     roster.consume(event(2, nil, "Another voice"), at:2_000)
-    XCTAssertEqual(roster.rows.map(\.speakerName), ["Person A", "Speaker…"])
+    XCTAssertEqual(roster.rows.map(\.speakerName), ["P1", "Speaker…"])
     roster.consume(RealtimeASREvent(type:"speaker.updated", turnId:2, speaker:"P2"), at:2_100)
-    XCTAssertEqual(roster.rows.map(\.speakerName), ["Person A", "Person B"])
+    XCTAssertEqual(roster.rows.map(\.speakerName), ["P1", "P2"])
     XCTAssertEqual(roster.rows.map(\.text), ["First person", "Another voice"])
   }
 
@@ -32,7 +32,7 @@ final class PhoneCaptionTests: XCTestCase {
     roster.consume(RealtimeASREvent(type:"speaker.updated", turnId:1, speaker:"P2"), at:1_000)
     XCTAssertTrue(roster.rows.isEmpty)
     roster.consume(event(1, nil, "Hello"), at:1_100)
-    XCTAssertEqual(roster.rows.first?.speakerName, "Person B")
+    XCTAssertEqual(roster.rows.first?.speakerName, "P2")
   }
 
   func testDelayedFinalDoesNotReplaceNewerTurnOfSameSpeaker() {
@@ -57,7 +57,7 @@ final class PhoneCaptionTests: XCTestCase {
     roster.consume(event(1, nil, "Old pending"), at:1_000)
     roster.consume(event(2, "P1", "New speech"), at:2_000)
     roster.consume(RealtimeASREvent(type:"speaker.updated", turnId:1, speaker:"P1"), at:3_000)
-    XCTAssertEqual(roster.rows.map(\.speakerName), ["Person A"])
+    XCTAssertEqual(roster.rows.map(\.speakerName), ["P1"])
     XCTAssertEqual(roster.rows.map(\.text), ["New speech"])
   }
 
@@ -66,11 +66,11 @@ final class PhoneCaptionTests: XCTestCase {
     roster.consume(event(1, "P1", "A"), at:0)
     roster.consume(event(2, "P2", "B"), at:5_000)
     roster.expire(at:15_000)
-    XCTAssertEqual(roster.rows.map(\.speakerName), ["Person B"])
+    XCTAssertEqual(roster.rows.map(\.speakerName), ["P2"])
     roster.consume(event(3, "P3", "C"), at:16_000)
     roster.consume(event(4, "P1", "A again"), at:17_000)
     roster.consume(event(5, "P4", "D"), at:18_000)
-    XCTAssertEqual(roster.rows.map(\.speakerName), ["Person C", "Person A", "Person D"])
+    XCTAssertEqual(roster.rows.map(\.speakerName), ["P3", "P1", "P4"])
   }
 
   func testStopClearsRowsAndOldCallbacksCannotAffectRestart() async {
@@ -108,6 +108,21 @@ final class PhoneCaptionTests: XCTestCase {
     session.sceneBecameInactive()
     XCTAssertEqual(session.phase, .stopped)
     XCTAssertTrue(session.rows.isEmpty)
+  }
+
+  func testStandaloneCaptionUsesConfirmedProfileNameWithoutChangingRawLabel() async {
+    let microphone = FakeCaptionMicrophone(), connection = FakeCaptionRelay()
+    let people = PeopleStore(fileURL:nil)
+    _ = people.addPerson("Sam")
+    let session = PhoneCaptionSession(microphone:microphone, makeRelay:{ _, _ in connection },
+                                     healthCheck:{ _, _ in HealthResponse(modelMode:"live", tokenValid:true) },
+                                     people:people)
+    session.start(endpoint:"https://example.com", token:"test")
+    await settle()
+    connection.onEvent?(event(1, "P1", "I'm Sam.", final:true))
+    XCTAssertEqual(session.rows.first?.speakerLabel, "P1")
+    XCTAssertEqual(session.displaySpeakerName(for:session.rows.first?.speakerLabel), "Sam")
+    session.stop()
   }
 
   func testStopCancelsAHandshakeBeforeMicrophoneStarts() async {

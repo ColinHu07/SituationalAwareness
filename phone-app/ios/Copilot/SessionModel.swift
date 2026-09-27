@@ -56,6 +56,7 @@ final class SessionModel {
   @ObservationIgnored private var realtimeClock = RealtimeSpeechClock()
   @ObservationIgnored private var finalizedTurns: Set<Int> = []
   @ObservationIgnored private var realtimeSpeakers: [Int:String] = [:]
+  @ObservationIgnored private var speakerIdentityResolver = SpeakerIdentityResolver()
   @ObservationIgnored private let makeRealtimeRelay: @MainActor (String, String) -> any PhoneCaptionRelay
   var captionText: String?
   var captionAtMs: Double = 0
@@ -96,6 +97,7 @@ final class SessionModel {
   let people: PeopleStore
   var presentIDs: Set<UUID> = []
   var presentPeople: [Person] { people.people.filter { presentIDs.contains($0.id) } }
+  var speakerIdentityContexts: [SpeakerIdentityContext] { speakerIdentityResolver.contexts(people:presentPeople) }
   var learnReview: LearnReview?
   /// Recognize enrolled friends on-device from camera frames.
   var recognizeFaces = true
@@ -512,6 +514,7 @@ final class SessionModel {
     // Who's here is per conversation; the next session starts from scratch.
     faceTask?.cancel(); faceTask = nil; faceReadout = nil; faceCandidates = [:]
     lastStillAt = [:]; stillsThisSession = [:]; stillsSaved = 0; unknownFaces = []; pendingNames = []
+    speakerIdentityResolver.resetSession()
     presence.reset(); presentIDs = []
   }
   private func learn(from log: [TranscriptEntry]) {
@@ -717,11 +720,16 @@ final class SessionModel {
   }
   /// "That was me": learn the wearer's voice level from the most recent caption, then relabel speech.
   func markLastLineAsMine() {
-    guard let level = transcript.last(where: { $0.levelDbFS.map { $0 > -120 } ?? false })?.levelDbFS else { return }
-    let updated = wearerVoiceDbFS.map { ($0 + level) / 2 } ?? level
-    wearerVoiceDbFS = updated
-    UserDefaults.standard.set(updated, forKey:"copilot.wearerVoiceDbFS")
-    transcript = transcript.map { entry in var entry = entry; entry.speaker = speaker(forLevel:entry.levelDbFS); return entry }
+    if let label = transcript.last?.speaker, SpeakerIdentityResolver.validLabel(label),
+       speakerIdentityResolver.markWearer(label:label, people:people.people, presentPersonIDs:presentIDs) {
+      refreshRealtimeCaptionPresentation()
+    }
+    if let level = transcript.last(where: { $0.levelDbFS.map { $0 > -120 } ?? false })?.levelDbFS {
+      let updated = wearerVoiceDbFS.map { ($0 + level) / 2 } ?? level
+      wearerVoiceDbFS = updated
+      UserDefaults.standard.set(updated, forKey:"copilot.wearerVoiceDbFS")
+      transcript = transcript.map { entry in var entry = entry; entry.speaker = speaker(forLevel:entry.levelDbFS); return entry }
+    }
   }
   func resetWearerVoice() {
     wearerVoiceDbFS = nil
@@ -851,8 +859,20 @@ final class SessionModel {
     realtimeRelay?.stop(); realtimeRelay = nil
     realtimeRoster = PhoneCaptionRoster(); realtimeClock.reset()
     conversationWindow = ConversationWindow()
-    finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []
+    finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []; captionText = nil; captionAtMs = 0
+    speakerIdentityResolver.resetLabelMappings()
     speechMode = "Not started"
+  }
+
+  func displaySpeakerName(for label: String) -> String {
+    speakerIdentityResolver.displayName(for:label, people:people.people)
+  }
+
+  private func refreshRealtimeCaptionPresentation() {
+    captionRows = realtimeRoster.rows
+    captionText = captionRows.isEmpty ? nil : captionRows.map { row in
+      "\(row.speakerLabel.map { displaySpeakerName(for:$0) } ?? "Speaker…"): \(row.text)"
+    }.joined(separator:"\n")
   }
 
   func sendRealtimePCM(_ data: Data, endedAtMs: Double) {
@@ -867,12 +887,11 @@ final class SessionModel {
     guard phase == .active, let id = event.turnId,
           ["transcript.partial", "speaker.updated", "transcript.final"].contains(event.type) else { return }
     let time = nowMs()
-    if let speaker = event.speaker { realtimeSpeakers[id] = speaker }
+    if let speaker = event.speaker, SpeakerIdentityResolver.validLabel(speaker) { realtimeSpeakers[id] = speaker }
     let range = realtimeClock.range(startAudioMs:event.startAudioMs, endAudioMs:event.endAudioMs, fallbackEndMs:time)
     conversationWindow.consume(event, at:min(time, realtimeClock.captureTime(audioProcessedMs:event.audioProcessedMs) ?? range.endMs))
     realtimeRoster.consume(event, at:time)
-    captionRows = realtimeRoster.rows
-    captionText = captionRows.isEmpty ? nil : captionRows.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
+    refreshRealtimeCaptionPresentation()
     captionAtMs = time
     guard event.type == "transcript.final", !finalizedTurns.contains(id) else { return }
     finalizedTurns.insert(id)
@@ -881,11 +900,21 @@ final class SessionModel {
       finalizedTurns.remove(oldest); realtimeSpeakers[oldest] = nil
     }
     guard let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty else { return }
+    let knownPeople = people.people
     let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:range.startMs, endMs:range.endMs,
                                 confidence:nil, speaker:realtimeSpeakers[id])
     transcript.append(entry); transcript.sort { $0.endMs < $1.endMs }
     lastVoiceAt = max(lastVoiceAt, range.endMs)
-    logSpeech(entry); noteNames(in:entry); trimTranscript()
+    logSpeech(entry); noteNames(in:entry)
+    if let person = SpeakerIdentityResolver.selfIdentifiedPerson(in:entry.text, people:knownPeople) {
+      presence.introduce(person.id, at:range.endMs)
+      presentIDs = presence.confirmed
+    }
+    if speakerIdentityResolver.observeFinalTurn(label:entry.speaker, text:entry.text, people:knownPeople,
+                                                presentPersonIDs:presentIDs) {
+      refreshRealtimeCaptionPresentation()
+    }
+    trimTranscript()
   }
 
   func transcribe(_ chunk: AudioChunk) {
@@ -965,8 +994,7 @@ final class SessionModel {
       realtimeRoster.expire(at:timestamp)
       let updated = realtimeRoster.rows
       if updated != captionRows {
-        captionRows = updated
-        captionText = updated.isEmpty ? nil : updated.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
+        refreshRealtimeCaptionPresentation()
       }
       return
     }
@@ -1020,8 +1048,9 @@ final class SessionModel {
     let present = presentPeople
     let request = CueRequest(transcript:entries, frame:frame, context:context, manual:manual,
                              analysisMode:surroundings ? "surroundings" : "conversation", audioContext:audio,
-                             people:present.prefix(8).map { people.context(for:$0) },
+                             people:present.prefix(8).map { people.context(for:$0, includeID:true) },
                              groups:people.groups(of:present).prefix(8).map(people.context(for:)),
+                             speakerIdentities:speakerIdentityResolver.contexts(people:Array(present.prefix(8))),
                              currentScene:currentScene ?? "", recentMoments:moments, previousCue:cue ?? "")
     let connection = client
     let fixtureScene = simulatedScene

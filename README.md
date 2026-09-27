@@ -10,6 +10,14 @@ A runnable native iOS companion with **iPhone**, **regular Meta glasses**, and *
 
 **Implemented and locally tested; physical glasses acceptance remains unverified.** Pocket operation, nearby-speaker transcription and display wake behavior need the hardware acceptance test. Friend matching runs locally against enrolled photos; Muse does not identify faces or infer emotions/intentions. Current and historical verification results are separated below.
 
+## Named speaker captions · September 27
+
+Realtime captions retain Muse's session-local `P1`/`P2`/`P3` diarization labels internally, while the phone can display a confirmed profile name or **You** without rewriting those raw labels. A saved profile can be linked by a narrow self-introduction, or by a conservative single-partner rule only after the wearer is distinguished and the same non-wearer label has at least two finalized turns. Seeing a face or merely listing someone as present never identifies a voice. Mappings are one-to-one, live only for the current realtime-label session, and clear on caption restart or session end.
+
+Confirmed links are sent to Muse Spark separately as validated `speakerIdentities` entries tied to the same ID-bearing `people` profiles. Unmapped labels stay anonymous, and the prompt forbids identity inference from images, appearance, voice characteristics, groups, or presence. Direct-address/reply inference and speaker-aware profile learning are intentionally deferred because their attribution evidence is more ambiguous. Physical-phone and glasses validation of real diarization, self-introduction, **That was me**, and reconnect reset behavior remains required.
+
+Validation for this feature passed **153 native tests** on the iPhone 17 Pro simulator and **131 backend tests**. These results verify deterministic app and server behavior, not physical microphones, real Muse label stability, or glasses display delivery.
+
 ## FaceNet friend matching · September 26
 
 Friend recognition now uses a bundled, on-device FaceNet identity model with shared eye alignment for photo enrollment and camera frames. It rejects ambiguous identities, group-photo enrollment and conflicting profile uploads. **Re-add existing face photos in People** to replace old Vision image features; names and notes remain available. [Model setup, migration and real-camera acceptance](docs/FACENET.md). **98 native tests and 124 backend tests passed**, with simulator and unsigned iPhone builds. Real-world accuracy and glasses latency remain unverified.

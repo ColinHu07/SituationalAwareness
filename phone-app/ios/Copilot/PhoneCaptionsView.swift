@@ -58,7 +58,7 @@ struct PhoneCaptionsView: View {
           } else {
             ForEach(session.rows) { row in
               VStack(alignment:.leading,spacing:10) {
-                Text(row.speakerName)
+                Text(session.displaySpeakerName(for:row.speakerLabel))
                   .font(.headline).foregroundStyle(ink)
                   .padding(.horizontal,12).padding(.vertical,6)
                   .background(mint,in:Capsule())
@@ -107,6 +107,7 @@ struct PhoneCaptionsView: View {
     .onChange(of:settingsPresented) { _, presented in
       if presented { session.stop() }
     }
+    .onAppear { session.attachPeople(model.people) }
     .onDisappear { session.stop() }
   }
 }

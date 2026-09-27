@@ -22,6 +22,7 @@ export function validateInput(body, now = Date.now()) {
     Number.isFinite(m.atMs) && m.atMs <= now + 1000 && m.atMs >= now - 30 * 60_000), 'Invalid recentMoments');
   require(body.previousCue === undefined || isText(body.previousCue, LIMITS.cueChars), 'Invalid previousCue');
   const { people, groups } = validateProfiles(body);
+  const speakerIdentities = validateSpeakerIdentities(body, people);
   let frame = null;
   if (body.frame != null) {
     require(typeof body.frame.dataUrl === 'string' && body.frame.dataUrl.length <= 700_000 &&
@@ -47,7 +48,8 @@ export function validateInput(body, now = Date.now()) {
     if (analysisMode === 'surroundings' && now - audio.capturedAtMs <= LIMITS.frameMs) audioContext = audio;
   }
   return { transcript: boundedTranscript(body.transcript.map(x => ({ ...x, confidence: x.confidence ?? null })), now),
-    frame, context: body.context, manual: body.manual, analysisMode, audioContext, people, groups, currentScene: body.currentScene ?? '',
+    frame, context: body.context, manual: body.manual, analysisMode, audioContext, people, groups, speakerIdentities,
+    currentScene: body.currentScene ?? '',
     recentMoments: recentMoments.map(({ atMs, summary }) => ({ atMs, summary })), previousCue: body.previousCue ?? '' };
 }
 
@@ -67,6 +69,28 @@ function validateProfiles(body, { requireIds = false } = {}) {
     people: people.map(({ id, name, groups, tags, topics, notes }) => ({ ...(id ? { id } : {}), name, groups, tags, topics, notes })),
     groups: groups.map(({ name, topics, slang, style, notes }) => ({ name, topics, slang, style, notes })),
   };
+}
+
+// Confirmed app-established P-label links. Every claim must point back to exactly
+// one validated profile in the same request; the server never accepts free-standing identity claims.
+function validateSpeakerIdentities(body, people) {
+  const identities = body.speakerIdentities === undefined ? [] : body.speakerIdentities;
+  require(Array.isArray(identities) && identities.length <= 8, 'Invalid speakerIdentities');
+  const labels = new Set(), personIds = new Set();
+  return identities.map(identity => {
+    require(identity && typeof identity === 'object' && !Array.isArray(identity) &&
+      Object.keys(identity).sort().join() === ['label', 'name', 'personId'].sort().join(), 'Invalid speaker identity');
+    require(typeof identity.label === 'string' && /^P[1-9][0-9]?$/.test(identity.label), 'Invalid speaker identity label');
+    require(isText(identity.personId, 64) && identity.personId.trim(), 'Invalid speaker identity personId');
+    require(isText(identity.name, 60) && identity.name.trim(), 'Invalid speaker identity name');
+    require(!labels.has(identity.label), 'Duplicate speaker identity label');
+    require(!personIds.has(identity.personId), 'Duplicate speaker identity personId');
+    const matches = people.filter(person => person.id === identity.personId);
+    require(matches.length === 1, 'Speaker identity personId must match one supplied profile');
+    require(matches[0].name === identity.name, 'Speaker identity name must match supplied profile');
+    labels.add(identity.label); personIds.add(identity.personId);
+    return { label: identity.label, personId: identity.personId, name: identity.name };
+  });
 }
 
 // One line the wearer just said, with a little surrounding conversation, to check how it may land.
