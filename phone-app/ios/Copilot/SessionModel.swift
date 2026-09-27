@@ -531,8 +531,12 @@ final class SessionModel {
     people.markSeen(attended)
     guard !log.isEmpty else { return }
     let presentGroups = people.groups(of:present)
+    let logSpeakers = Set(log.compactMap(\.speaker))
+    let relevantIdentities = speakerIdentityResolver.contexts(people:Array(present.prefix(8)))
+      .filter { logSpeakers.contains($0.label) }
     let request = LearnRequest(transcript:log, people:present.prefix(8).map { people.context(for:$0, includeID:true) },
                                groups:presentGroups.prefix(8).map(people.context(for:)),
+                               speakerIdentities:relevantIdentities,
                                otherGroupNames:people.groups.filter { !presentGroups.contains($0) }.prefix(40).map { String($0.name.prefix(40)) },
                                wordsPerMinute:Self.wordsPerMinute(log))
     let offline = simulate && localMock
@@ -562,7 +566,13 @@ final class SessionModel {
   }
   private func logSpeech(_ entry: TranscriptEntry) { sessionLog = Array((sessionLog + [entry]).suffix(400)) }
   /// Correct a wrong match: out for the rest of this conversation unless they introduce themselves.
-  func markNotHere(_ id: UUID) { presence.dismiss(id); syncPresence() }
+  func markNotHere(_ id: UUID) {
+    presence.dismiss(id)
+    syncPresence()
+    if speakerIdentityResolver.invalidate(personID: id) {
+      refreshRealtimeCaptionPresentation()
+    }
+  }
   /// Presence changes feed the next cue request; they don't cancel one already in flight.
   private func syncPresence() { if presentIDs != presence.confirmed { presentIDs = presence.confirmed } }
   func expirePresence(at time: Double = nowMs()) { if !presence.expire(at:time).isEmpty { syncPresence() } }
@@ -739,7 +749,8 @@ final class SessionModel {
       guard captionText != nil,
             speakerIdentityResolver.personID(for:label) == nil,
             speakerIdentityResolver.wearerLabel == nil || speakerIdentityResolver.wearerLabel == label else { return false }
-      _ = speakerIdentityResolver.markWearer(label:label, people:people.people, presentPersonIDs:presentIDs)
+      _ = speakerIdentityResolver.markWearer(label:label, people:people.people, presentPersonIDs:presentIDs,
+                                             hasCompetingUnknownPerson:!unknownFaces.isEmpty)
       if speakerIdentityResolver.isWearer(label) {
         refreshRealtimeCaptionPresentation()
         confirmed = true
@@ -949,8 +960,9 @@ final class SessionModel {
       presence.introduce(person.id, at:range.endMs)
       presentIDs = presence.confirmed
     }
-    if speakerIdentityResolver.observeFinalTurn(label:entry.speaker, text:entry.text, people:knownPeople,
-                                                presentPersonIDs:presentIDs) {
+    let hasCompetingUnknown = !unknownFaces.isEmpty
+    if speakerIdentityResolver.observeFinalTurn(label:entry.speaker, text:entry.text, endMs:range.endMs, people:knownPeople,
+                                                presentPersonIDs:presentIDs, hasCompetingUnknownPerson:hasCompetingUnknown) {
       refreshRealtimeCaptionPresentation()
     }
     // A finalized label is markable only when no newer/overlapping partial turn is visible.
@@ -1088,11 +1100,14 @@ final class SessionModel {
     let context = (sceneOnly ? "" : contextText).split(separator:"\n").prefix(5).map { String($0.prefix(160)) }
     let audio = surroundings ? (ambientWindow.context(at:timestamp) ?? latestAudioContext.flatMap { timestamp - $0.capturedAtMs <= 10000 ? $0 : nil }) : nil
     let present = presentPeople
+    let transcriptSpeakers = Set(entries.compactMap(\.speaker))
+    let relevantIdentities = speakerIdentityResolver.contexts(people:Array(present.prefix(8)))
+      .filter { transcriptSpeakers.contains($0.label) }
     let request = CueRequest(transcript:entries, frame:frame, context:context, manual:manual,
                              analysisMode:surroundings ? "surroundings" : "conversation", audioContext:audio,
                              people:present.prefix(8).map { people.context(for:$0, includeID:true) },
                              groups:people.groups(of:present).prefix(8).map(people.context(for:)),
-                             speakerIdentities:speakerIdentityResolver.contexts(people:Array(present.prefix(8))),
+                             speakerIdentities:relevantIdentities,
                              currentScene:currentScene ?? "", recentMoments:moments, previousCue:cue ?? "")
     let connection = client
     let fixtureScene = simulatedScene

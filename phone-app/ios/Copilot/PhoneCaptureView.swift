@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // Both capture sources use the same session, Muse client, and phone cue surface.
 struct PhoneCaptureView: View {
@@ -173,12 +174,35 @@ struct PhoneCaptureView: View {
       HStack {
         Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
         Spacer()
+        if let text = model.captionText, !text.isEmpty {
+          Button {
+            UIPasteboard.general.string = text
+          } label: {
+            Label("Copy",systemImage:"doc.on.doc")
+          }
+          .font(.caption.weight(.medium))
+          .tint(ink)
+          .accessibilityIdentifier("capture.caption.copy")
+        }
         ThatWasMeButton(model:model)
       }
       Text(model.speechMode).font(.caption).foregroundStyle(.secondary)
       Text(model.captionText ?? "—")
         .font(.title3).foregroundStyle(model.captionText == nil ? .secondary : .primary)
         .frame(maxWidth:.infinity,minHeight:45,alignment:.leading)
+        .textSelection(.enabled)
+        .contextMenu {
+          if let text = model.captionText, !text.isEmpty {
+            Button {
+              UIPasteboard.general.string = text
+            } label: {
+              Label("Copy caption",systemImage:"doc.on.doc")
+            }
+            ShareLink(item:text) {
+              Label("Share caption",systemImage:"square.and.arrow.up")
+            }
+          }
+        }
       DisclosureGroup("Caption timing") {
         Text(model.captionDiagnostics.summary).font(.caption.monospaced())
         ShareLink("Share timing log",item:model.captionDiagnostics.exportText)

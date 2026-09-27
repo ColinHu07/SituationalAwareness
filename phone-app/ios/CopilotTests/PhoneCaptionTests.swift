@@ -119,7 +119,7 @@ final class PhoneCaptionTests: XCTestCase {
                                      people:people)
     session.start(endpoint:"https://example.com", token:"test")
     await settle()
-    connection.onEvent?(event(1, "P1", "I'm Sam.", final:true))
+    connection.onEvent?(event(1, "P1", "Hey everyone, I'm sam, nice to meet you.", final:true))
     XCTAssertEqual(session.rows.first?.speakerLabel, "P1")
     XCTAssertEqual(session.displaySpeakerName(for:session.rows.first?.speakerLabel), "Sam")
     session.stop()

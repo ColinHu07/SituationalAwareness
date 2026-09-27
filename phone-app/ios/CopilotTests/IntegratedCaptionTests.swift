@@ -49,12 +49,9 @@ final class IntegratedCaptionTests: XCTestCase {
     let sam = store.addPerson("Sam")!
     let model = SessionModel(people:store, makeRealtimeRelay:{ _,_ in relay })
     model.phase = .active
-    let time = nowMs()
-    model.applyFaceMatches([sam], at:time)
-    model.applyFaceMatches([sam], at:time + 1)
     await model.startRealtimeCaptions()
-    relay.onEvent?(.init(type:"transcript.final", turnId:1, speaker:"P1", text:"I'm Sam."))
-    XCTAssertEqual(model.captionText, "Sam: I'm Sam.")
+    relay.onEvent?(.init(type:"transcript.final", turnId:1, speaker:"P1", text:"Hey everyone, I'm sam, nice to meet you."))
+    XCTAssertEqual(model.captionText, "Sam: Hey everyone, I'm sam, nice to meet you.")
     XCTAssertEqual(model.captionRows.first?.speakerLabel, "P1")
     XCTAssertEqual(model.transcript.first?.speaker, "P1")
     XCTAssertEqual(model.speakerIdentityContexts, [
@@ -63,6 +60,32 @@ final class IntegratedCaptionTests: XCTestCase {
     model.stop()
     XCTAssertTrue(model.speakerIdentityContexts.isEmpty)
     XCTAssertEqual(model.displaySpeakerName(for:"P1"), "P1")
+  }
+
+  func testDirectAddressConversationResolvesAndDismissReverts() async {
+    let relay = IntegratedRelay()
+    let store = PeopleStore(fileURL:nil)
+    let sam = store.addPerson("Sam")!
+    let model = SessionModel(people:store, makeRealtimeRelay:{ _,_ in relay })
+    model.phase = .active
+    let t = nowMs()
+    model.applyFaceMatches([sam], at:t)
+    model.applyFaceMatches([sam], at:t + 1)
+    await model.startRealtimeCaptions()
+
+    relay.onEvent?(.init(type:"transcript.final", turnId:1, speaker:"P1", text:"Hey Sam, how was the exam?"))
+    relay.onEvent?(.init(type:"transcript.final", turnId:2, speaker:"P2", text:"Pretty good."))
+
+    XCTAssertEqual(model.captionText, "P1: Hey Sam, how was the exam?\nSam: Pretty good.")
+    XCTAssertEqual(model.speakerIdentityContexts, [
+      SpeakerIdentityContext(label:"P2", personId:sam.uuidString, name:"Sam"),
+    ])
+
+    // Dismiss Sam
+    model.markNotHere(sam)
+    XCTAssertEqual(model.captionText, "P1: Hey Sam, how was the exam?\nP2: Pretty good.")
+    XCTAssertTrue(model.speakerIdentityContexts.isEmpty)
+    model.stop()
   }
 
   func testStopCancelsPendingHandshake() async {

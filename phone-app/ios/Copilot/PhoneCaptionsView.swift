@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct PhoneCaptionsView: View {
   @Bindable var model: SessionModel
@@ -12,9 +13,24 @@ struct PhoneCaptionsView: View {
     ScrollViewReader { scroll in
       ScrollView {
         LazyVStack(alignment:.leading,spacing:18) {
-          Text("Live captions")
-            .font(.system(.largeTitle,design:.rounded,weight:.semibold))
-            .foregroundStyle(ink)
+          HStack(alignment:.firstTextBaseline) {
+            Text("Live captions")
+              .font(.system(.largeTitle,design:.rounded,weight:.semibold))
+              .foregroundStyle(ink)
+            Spacer()
+            if !session.rows.isEmpty {
+              Button {
+                let full = session.rows.map { "\(session.displaySpeakerName(for:$0.speakerLabel)): \($0.text)" }.joined(separator:"\n\n")
+                UIPasteboard.general.string = full
+              } label: {
+                Label("Copy all", systemImage:"doc.on.doc")
+              }
+              .font(.subheadline.weight(.medium))
+              .buttonStyle(.bordered)
+              .tint(ink)
+              .accessibilityIdentifier("captions.copyAll")
+            }
+          }
           if session.phase == .stopped {
             Text("Tap Start when everyone agrees to transcription.")
               .font(.body).foregroundStyle(.secondary)
@@ -66,6 +82,7 @@ struct PhoneCaptionsView: View {
                   .font(.system(.title2,design:.rounded,weight:.medium))
                   .foregroundStyle(ink)
                   .fixedSize(horizontal:false,vertical:true)
+                  .textSelection(.enabled)
               }
               .frame(maxWidth:.infinity,alignment:.leading)
               .padding(22)
@@ -73,6 +90,16 @@ struct PhoneCaptionsView: View {
               .accessibilityElement(children:.combine)
               .accessibilityIdentifier("captions.row.\(row.id)")
               .id(row.id)
+              .contextMenu {
+                Button {
+                  UIPasteboard.general.string = "\(session.displaySpeakerName(for:row.speakerLabel)): \(row.text)"
+                } label: {
+                  Label("Copy caption", systemImage:"doc.on.doc")
+                }
+                ShareLink(item:"\(session.displaySpeakerName(for:row.speakerLabel)): \(row.text)") {
+                  Label("Share caption", systemImage:"square.and.arrow.up")
+                }
+              }
             }
           }
         }.padding(20)
@@ -109,5 +136,14 @@ struct PhoneCaptionsView: View {
     }
     .onAppear { session.attachPeople(model.people) }
     .onDisappear { session.stop() }
+    .toolbar {
+      if !session.rows.isEmpty {
+        ToolbarItem(placement:.topBarTrailing) {
+          ShareLink(item:session.rows.map { "\(session.displaySpeakerName(for:$0.speakerLabel)): \($0.text)" }.joined(separator:"\n\n")) {
+            Label("Share captions", systemImage:"square.and.arrow.up")
+          }
+        }
+      }
+    }
   }
 }

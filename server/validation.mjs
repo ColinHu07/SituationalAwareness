@@ -22,7 +22,8 @@ export function validateInput(body, now = Date.now()) {
     Number.isFinite(m.atMs) && m.atMs <= now + 1000 && m.atMs >= now - 30 * 60_000), 'Invalid recentMoments');
   require(body.previousCue === undefined || isText(body.previousCue, LIMITS.cueChars), 'Invalid previousCue');
   const { people, groups } = validateProfiles(body);
-  const speakerIdentities = validateSpeakerIdentities(body, people);
+  const transcript = boundedTranscript(body.transcript.map(x => ({ ...x, confidence: x.confidence ?? null })), now);
+  const speakerIdentities = validateSpeakerIdentities(body, people, transcript);
   let frame = null;
   if (body.frame != null) {
     require(typeof body.frame.dataUrl === 'string' && body.frame.dataUrl.length <= 700_000 &&
@@ -47,7 +48,7 @@ export function validateInput(body, now = Date.now()) {
     // Energy alone cannot establish a setting or identify speech, sounds, or mood.
     if (analysisMode === 'surroundings' && now - audio.capturedAtMs <= LIMITS.frameMs) audioContext = audio;
   }
-  return { transcript: boundedTranscript(body.transcript.map(x => ({ ...x, confidence: x.confidence ?? null })), now),
+  return { transcript,
     frame, context: body.context, manual: body.manual, analysisMode, audioContext, people, groups, speakerIdentities,
     currentScene: body.currentScene ?? '',
     recentMoments: recentMoments.map(({ atMs, summary }) => ({ atMs, summary })), previousCue: body.previousCue ?? '' };
@@ -73,10 +74,11 @@ function validateProfiles(body, { requireIds = false } = {}) {
 
 // Confirmed app-established P-label links. Every claim must point back to exactly
 // one validated profile in the same request; the server never accepts free-standing identity claims.
-function validateSpeakerIdentities(body, people) {
+function validateSpeakerIdentities(body, people, transcript = null) {
   const identities = body.speakerIdentities === undefined ? [] : body.speakerIdentities;
   require(Array.isArray(identities) && identities.length <= 8, 'Invalid speakerIdentities');
   const labels = new Set(), personIds = new Set();
+  const activeLabels = transcript ? new Set(transcript.map(t => t.speaker).filter(s => typeof s === 'string')) : null;
   return identities.map(identity => {
     require(identity && typeof identity === 'object' && !Array.isArray(identity) &&
       Object.keys(identity).sort().join() === ['label', 'name', 'personId'].sort().join(), 'Invalid speaker identity');
@@ -88,6 +90,9 @@ function validateSpeakerIdentities(body, people) {
     const matches = people.filter(person => person.id === identity.personId);
     require(matches.length === 1, 'Speaker identity personId must match one supplied profile');
     require(matches[0].name === identity.name, 'Speaker identity name must match supplied profile');
+    if (activeLabels) {
+      require(activeLabels.has(identity.label), 'Speaker identity label must appear in transcript');
+    }
     labels.add(identity.label); personIds.add(identity.personId);
     return { label: identity.label, personId: identity.personId, name: identity.name };
   });
@@ -118,6 +123,7 @@ export function validateLearnInput(body, now = Date.now()) {
     require(item && isText(item.text, 500) && item.text.trim(), 'Invalid transcript text');
     require(Number.isFinite(item.startMs) && Number.isFinite(item.endMs) && item.startMs <= item.endMs &&
       item.endMs <= now + 1000 && item.startMs >= now - 6 * 3_600_000, 'Invalid transcript timestamp');
+    require(item.speaker === undefined || ['wearer', 'other'].includes(item.speaker) || (typeof item.speaker === 'string' && /^P[1-9][0-9]?$/.test(item.speaker)), 'Invalid speaker');
     chars += item.text.length;
   }
   require(chars <= 60_000, 'Transcript too long');
@@ -125,7 +131,8 @@ export function validateLearnInput(body, now = Date.now()) {
   require(people.length > 0, 'At least one person is required');
   require(isList(body.otherGroupNames ?? [], 40, 40), 'Invalid group names');
   require(body.wordsPerMinute == null || (Number.isFinite(body.wordsPerMinute) && body.wordsPerMinute >= 0 && body.wordsPerMinute <= 400), 'Invalid wordsPerMinute');
-  return { transcript: body.transcript.map(({ text, startMs, endMs }) => ({ text, startMs, endMs })), people, groups,
+  const speakerIdentities = validateSpeakerIdentities(body, people, body.transcript);
+  return { transcript: body.transcript.map(({ text, startMs, endMs, speaker }) => ({ text, startMs, endMs, ...(speaker ? { speaker } : {}) })), people, groups, speakerIdentities,
     otherGroupNames: body.otherGroupNames ?? [], wordsPerMinute: body.wordsPerMinute ?? null };
 }
 

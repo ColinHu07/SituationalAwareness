@@ -50,6 +50,7 @@ struct LearnRequest: Encodable {
   let transcript: [TranscriptEntry]
   let people: [PersonContext]
   let groups: [GroupContext]
+  var speakerIdentities: [SpeakerIdentityContext] = []
   let otherGroupNames: [String]
   let wordsPerMinute: Double?
 }
@@ -235,12 +236,22 @@ final class PeopleStore {
       }
     }
     topics = Array(fresh(topics, existing:[]).prefix(5))
+    let identities = request.speakerIdentities
+    let labelByPerson = Dictionary(identities.map { ($0.personId, $0.label) }, uniquingKeysWith: { first, _ in first })
     let people = request.people.map { person in
+      let pid = person.id ?? ""
+      let mappedLabel = labelByPerson[pid]
       let first = person.name.split(separator:" ").first.map(String.init) ?? person.name
-      let facts = lines.filter { line in
-        line.count <= 160 && line.range(of:"\\b\(NSRegularExpression.escapedPattern(for:first))\\b", options:[.regularExpression, .caseInsensitive]) != nil
+      let facts = request.transcript.compactMap { entry -> String? in
+        let line = entry.text.trimmingCharacters(in:.whitespaces)
+        guard line.count <= 160 else { return nil }
+        if let mappedLabel, entry.speaker == mappedLabel { return line }
+        if line.range(of:"\\b\(NSRegularExpression.escapedPattern(for:first))\\b", options:[.regularExpression, .caseInsensitive]) != nil {
+          return line
+        }
+        return nil
       }
-      return LearnResult.PersonUpdate(id:person.id ?? "", facts:Array(facts.prefix(3)), topics:request.people.count == 1 ? topics : [], tags:[], groups:[])
+      return LearnResult.PersonUpdate(id:pid, facts:Array(facts.prefix(3)), topics:request.people.count == 1 ? topics : [], tags:[], groups:[])
     }
     let sets = request.people.map { Set($0.groups) }
     let shared = sets.dropFirst().reduce(sets.first ?? []) { $0.intersection($1) }

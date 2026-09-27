@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
   @Bindable var model: SessionModel
@@ -92,6 +93,16 @@ struct ContentView: View {
             HStack {
               Label("CAPTIONS",systemImage:"captions.bubble").font(.caption.bold()).tracking(1)
               Spacer()
+              if let text = model.captionText, !text.isEmpty {
+                Button {
+                  UIPasteboard.general.string = text
+                } label: {
+                  Label("Copy",systemImage:"doc.on.doc")
+                }
+                .font(.caption.weight(.medium))
+                .tint(ink)
+                .accessibilityIdentifier("caption.copy")
+              }
               ThatWasMeButton(model:model)
             }
             Text(model.speechMode).font(.caption).foregroundStyle(.secondary)
@@ -99,6 +110,19 @@ struct ContentView: View {
               .font(.system(size:25,weight:.medium,design:.rounded))
               .foregroundStyle(model.captionText == nil ? .secondary : .primary)
               .frame(maxWidth:.infinity,minHeight:80,alignment:.leading)
+              .textSelection(.enabled)
+              .contextMenu {
+                if let text = model.captionText, !text.isEmpty {
+                  Button {
+                    UIPasteboard.general.string = text
+                  } label: {
+                    Label("Copy caption",systemImage:"doc.on.doc")
+                  }
+                  ShareLink(item:text) {
+                    Label("Share caption",systemImage:"square.and.arrow.up")
+                  }
+                }
+              }
           }.padding(22).background(.white,in:RoundedRectangle(cornerRadius:20))
 
           }
@@ -115,12 +139,56 @@ struct ContentView: View {
           }
           DisclosureGroup("Transcript") {
             VStack(alignment:.leading,spacing:10) {
-              if model.transcript.isEmpty { Text("—").foregroundStyle(.secondary) }
+              if model.transcript.isEmpty {
+                Text("—").foregroundStyle(.secondary)
+              } else {
+                HStack {
+                  Spacer()
+                  Button {
+                    let formatted = model.transcript.map { entry in
+                      let time = Date(timeIntervalSince1970:entry.endMs/1000).formatted(date:.omitted,time:.standard)
+                      let speakerPrefix = entry.speaker.map { "\($0): " } ?? ""
+                      return "[\(time)] \(speakerPrefix)\(entry.text)"
+                    }.joined(separator:"\n")
+                    UIPasteboard.general.string = formatted
+                  } label: {
+                    Label("Copy transcript",systemImage:"doc.on.doc")
+                  }
+                  .font(.caption.weight(.medium))
+                  .buttonStyle(.bordered)
+                  .tint(ink)
+                  .accessibilityIdentifier("transcript.copy")
+
+                  ShareLink(item:model.transcript.map { entry in
+                    let time = Date(timeIntervalSince1970:entry.endMs/1000).formatted(date:.omitted,time:.standard)
+                    let speakerPrefix = entry.speaker.map { "\($0): " } ?? ""
+                    return "[\(time)] \(speakerPrefix)\(entry.text)"
+                  }.joined(separator:"\n")) {
+                    Label("Share",systemImage:"square.and.arrow.up")
+                  }
+                  .font(.caption.weight(.medium))
+                  .buttonStyle(.bordered)
+                  .tint(ink)
+                  .accessibilityIdentifier("transcript.share")
+                }
+              }
               ForEach(model.transcript) { entry in
                 VStack(alignment:.leading,spacing:3) {
                   Text(Date(timeIntervalSince1970:entry.endMs/1000),style:.time).font(.caption).foregroundStyle(.secondary)
                   Text(entry.text).font(.subheadline)
-                }.frame(maxWidth:.infinity,alignment:.leading)
+                    .textSelection(.enabled)
+                }
+                .frame(maxWidth:.infinity,alignment:.leading)
+                .contextMenu {
+                  Button {
+                    UIPasteboard.general.string = entry.text
+                  } label: {
+                    Label("Copy line",systemImage:"doc.on.doc")
+                  }
+                  ShareLink(item:entry.text) {
+                    Label("Share line",systemImage:"square.and.arrow.up")
+                  }
+                }
               }
             }.padding(.top,12)
           }

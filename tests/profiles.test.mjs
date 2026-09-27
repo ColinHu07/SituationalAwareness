@@ -76,6 +76,49 @@ test('mock learner records named mentions, liked topics and pace for the shared 
   assert.equal(result.groups[0].name, 'Football team'); assert.match(result.groups[0].style, /^Fast pace/);
 });
 
+test('learn input accepts valid speakerIdentities and rejects absent transcript labels', () => {
+  const inputWithSpeaker = {
+    ...learnInput(),
+    transcript: [
+      { text: 'I started a new job yesterday.', startMs: NOW - 50_000, endMs: NOW - 48_000, speaker: 'P1' },
+      { text: 'That sounds really exciting!', startMs: NOW - 40_000, endMs: NOW - 38_000, speaker: 'P2' },
+    ],
+    speakerIdentities: [{ label: 'P1', personId: jake.id, name: jake.name }],
+  };
+  const validated = validateLearnInput(inputWithSpeaker, NOW);
+  assert.deepEqual(validated.speakerIdentities, [{ label: 'P1', personId: jake.id, name: jake.name }]);
+
+  // Reject label that does not appear in transcript
+  assert.throws(() => validateLearnInput({
+    ...inputWithSpeaker,
+    speakerIdentities: [{ label: 'P3', personId: jake.id, name: jake.name }],
+  }, NOW), InputError);
+
+  // Reject mismatched personId or name
+  assert.throws(() => validateLearnInput({
+    ...inputWithSpeaker,
+    speakerIdentities: [{ label: 'P1', personId: 'unknown', name: jake.name }],
+  }, NOW), InputError);
+});
+
+test('mock learner attributes speech from mapped speaker labels to that person while unmapped speech remains anonymous', () => {
+  const inputWithIdentities = validateLearnInput({
+    ...learnInput(),
+    people: [jake, priya],
+    transcript: [
+      { text: 'I broke my leg skiing last winter.', startMs: NOW - 50_000, endMs: NOW - 48_000, speaker: 'P1' },
+      { text: 'I work at a coffee shop on weekends.', startMs: NOW - 40_000, endMs: NOW - 38_000, speaker: 'P2' },
+    ],
+    speakerIdentities: [{ label: 'P1', personId: jake.id, name: jake.name }],
+  }, NOW);
+  const result = mockLearn(inputWithIdentities);
+  const jakeResult = result.people.find(p => p.id === jake.id);
+  const priyaResult = result.people.find(p => p.id === priya.id);
+
+  assert.ok(jakeResult.facts.includes('I broke my leg skiing last winter.'));
+  assert.deepEqual(priyaResult.facts, [], 'Unmapped speaker speech is not attributed to another person');
+});
+
 test('mock cue suggests a saved topic only when explicitly asked', () => {
   assert.equal(mockCue({ transcript: [], manual: true, people: [jake] }).cue, 'Ask Jake about fantasy football.');
   assert.equal(mockCue({ transcript: [], manual: false, people: [jake] }).should_display, false);
