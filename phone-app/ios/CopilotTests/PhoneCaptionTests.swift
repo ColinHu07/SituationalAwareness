@@ -125,6 +125,64 @@ final class PhoneCaptionTests: XCTestCase {
     session.stop()
   }
 
+  func testFinalizedTurnBeforeSpeakerUpdatedResolvesStandaloneCaption() async {
+    let microphone = FakeCaptionMicrophone(), connection = FakeCaptionRelay()
+    let people = PeopleStore(fileURL:nil)
+    _ = people.addPerson("Sam")
+    let session = PhoneCaptionSession(microphone:microphone, makeRelay:{ _, _ in connection },
+                                     healthCheck:{ _, _ in HealthResponse(modelMode:"live", tokenValid:true) },
+                                     people:people)
+    session.start(endpoint:"https://example.com", token:"test")
+    await settle()
+
+    // 1. transcript.final arrives first with speaker: nil
+    connection.onEvent?(event(1, nil, "I am Sam.", final:true))
+    await settle()
+    XCTAssertEqual(session.rows.first?.speakerLabel, nil)
+    XCTAssertEqual(session.displaySpeakerName(for:session.rows.first?.speakerLabel), "Speaker…")
+
+    // 2. speaker.updated arrives later with speaker: "P1"
+    connection.onEvent?(RealtimeASREvent(type:"speaker.updated", turnId:1, speaker:"P1"))
+    await settle()
+    XCTAssertEqual(session.rows.first?.speakerLabel, "P1")
+    XCTAssertEqual(session.displaySpeakerName(for:session.rows.first?.speakerLabel), "Sam")
+    XCTAssertEqual("\(session.displaySpeakerName(for:session.rows.first?.speakerLabel)): \(session.rows.first?.text ?? "")", "Sam: I am Sam.")
+
+    // 3. Duplicate late speaker.updated does not duplicate or corrupt rows
+    let rowCountBefore = session.rows.count
+    connection.onEvent?(RealtimeASREvent(type:"speaker.updated", turnId:1, speaker:"P1"))
+    await settle()
+    XCTAssertEqual(session.rows.count, rowCountBefore)
+    XCTAssertEqual(session.rows.first?.speakerLabel, "P1")
+    XCTAssertEqual(session.displaySpeakerName(for:session.rows.first?.speakerLabel), "Sam")
+
+    session.stop()
+  }
+
+  func testSpeakerUpdatedBeforeFinalizedTurnResolvesStandaloneCaption() async {
+    let microphone = FakeCaptionMicrophone(), connection = FakeCaptionRelay()
+    let people = PeopleStore(fileURL:nil)
+    _ = people.addPerson("Sam")
+    let session = PhoneCaptionSession(microphone:microphone, makeRelay:{ _, _ in connection },
+                                     healthCheck:{ _, _ in HealthResponse(modelMode:"live", tokenValid:true) },
+                                     people:people)
+    session.start(endpoint:"https://example.com", token:"test")
+    await settle()
+
+    // 1. speaker.updated arrives first
+    connection.onEvent?(RealtimeASREvent(type:"speaker.updated", turnId:1, speaker:"P1"))
+    await settle()
+
+    // 2. transcript.final arrives second with speaker: nil
+    connection.onEvent?(event(1, nil, "I am Sam.", final:true))
+    await settle()
+    XCTAssertEqual(session.rows.first?.speakerLabel, "P1")
+    XCTAssertEqual(session.displaySpeakerName(for:session.rows.first?.speakerLabel), "Sam")
+    XCTAssertEqual("\(session.displaySpeakerName(for:session.rows.first?.speakerLabel)): \(session.rows.first?.text ?? "")", "Sam: I am Sam.")
+
+    session.stop()
+  }
+
   func testStopCancelsAHandshakeBeforeMicrophoneStarts() async {
     let microphone = FakeCaptionMicrophone(), connection = FakeCaptionRelay()
     connection.waitForHandshake = true

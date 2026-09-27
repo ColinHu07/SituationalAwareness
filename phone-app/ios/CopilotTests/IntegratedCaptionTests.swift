@@ -23,7 +23,8 @@ final class IntegratedCaptionTests: XCTestCase {
     relay.onEvent?(.init(type:"transcript.final",turnId:1,speaker:"P1",text:"Hello"))
     XCTAssertEqual(model.transcript.count,1)
     XCTAssertEqual(model.recentCueTranscript().count,2,"Finalization must not duplicate partial context")
-    XCTAssertEqual(model.transcript.first?.speaker,"P1")
+    XCTAssertNil(model.transcript.first?.speaker)
+    XCTAssertEqual(model.transcript.first?.speakerAlias,"P1")
     XCTAssertTrue(model.captionText?.contains("P2: Hi there") == true)
     let lateEvent = relay.onEvent
     model.pause()
@@ -43,7 +44,26 @@ final class IntegratedCaptionTests: XCTestCase {
     model.stop()
   }
 
-  func testConfirmedProfileNameChangesDisplayWithoutChangingRawSpeaker() async {
+  func testRealtimeResetPreservesMappingForLearningSnapshot() async {
+    let relay = IntegratedRelay()
+    let store = PeopleStore(fileURL:nil)
+    let sam = store.addPerson("Sam")!
+    let model = SessionModel(people:store, makeRealtimeRelay:{ _,_ in relay })
+    model.phase = .active
+    await model.startRealtimeCaptions()
+    relay.onEvent?(.init(type:"transcript.final", turnId:1, speaker:"P2", text:"I'm Sam."))
+    XCTAssertEqual(model.speakerIdentityContexts.first?.personId, sam.uuidString)
+
+    relay.onFailure?("Disconnected")
+
+    XCTAssertTrue(model.speakerIdentityContexts.isEmpty, "The live resolver must reset after disconnect")
+    XCTAssertEqual(model.pendingLearningSpeakerIdentities, [
+      SpeakerIdentityContext(label:"P2", personId:sam.uuidString, name:"Sam"),
+    ], "Learning must retain the completed connection's mapping snapshot")
+    model.stop()
+  }
+
+  func testConfirmedProfileNameChangesDisplayWithoutChangingRawAlias() async {
     let relay = IntegratedRelay()
     let store = PeopleStore(fileURL:nil)
     let sam = store.addPerson("Sam")!
@@ -53,7 +73,8 @@ final class IntegratedCaptionTests: XCTestCase {
     relay.onEvent?(.init(type:"transcript.final", turnId:1, speaker:"P1", text:"Hey everyone, I'm sam, nice to meet you."))
     XCTAssertEqual(model.captionText, "Sam: Hey everyone, I'm sam, nice to meet you.")
     XCTAssertEqual(model.captionRows.first?.speakerLabel, "P1")
-    XCTAssertEqual(model.transcript.first?.speaker, "P1")
+    XCTAssertNil(model.transcript.first?.speaker)
+    XCTAssertEqual(model.transcript.first?.speakerAlias, "P1")
     XCTAssertEqual(model.speakerIdentityContexts, [
       SpeakerIdentityContext(label:"P1", personId:sam.uuidString, name:"Sam"),
     ])

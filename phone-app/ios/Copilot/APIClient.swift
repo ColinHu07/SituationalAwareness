@@ -7,11 +7,13 @@ struct TranscriptEntry: Codable, Identifiable {
   let startMs: Double
   let endMs: Double
   let confidence: Double?
-  /// "wearer" or "other" once the wearer's voice level is calibrated; nil when unknown.
+  /// Semantic relationship to the wearer: "wearer", "other", or nil when unknown.
   var speaker: String? = nil
+  /// Raw Muse realtime diarization label (P1...P99); nil for chunked ASR.
+  var speakerAlias: String? = nil
   /// Loudness of the voiced parts of this chunk at the microphone (dBFS), used to tell the wearer apart.
   var levelDbFS: Double? = nil
-  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence, speaker }
+  enum CodingKeys: String, CodingKey { case text, startMs, endMs, confidence, speaker, speakerAlias }
 }
 struct SampledFrame: Codable { let dataUrl: String; let capturedAtMs: Double }
 struct AudioContext: Encodable, Sendable {

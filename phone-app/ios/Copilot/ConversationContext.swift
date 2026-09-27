@@ -8,7 +8,7 @@ struct ConversationWindow {
   private struct Turn {
     var characters: [CharacterSample] = []
     var fullLength = 0
-    var speaker: String?
+    var speakerAlias: String?
     var final = false
   }
   private var turns: [Int:Turn] = [:]
@@ -17,7 +17,9 @@ struct ConversationWindow {
   mutating func consume(_ event: RealtimeASREvent, at time: Double) {
     guard let id = event.turnId else { return }
     var turn = turns[id] ?? Turn()
-    if let speaker = event.speaker { turn.speaker = speaker }
+    if let speakerAlias = event.speaker, SpeakerIdentityResolver.validLabel(speakerAlias) {
+      turn.speakerAlias = speakerAlias
+    }
     if let text = event.text, !turn.final {
       let full = Array(text)
       let incoming = Array(full.suffix(4000))
@@ -47,7 +49,8 @@ struct ConversationWindow {
       let recent = turn.characters.filter { $0.atMs >= time - SurroundingsPolicy.contextWindowMs && $0.atMs <= time + 1000 }
       let text = String(recent.map(\.value).suffix(500)).trimmingCharacters(in:.whitespacesAndNewlines)
       guard text.contains(where: { $0.isLetter || $0.isNumber }), let start = recent.map(\.atMs).min(), let end = recent.map(\.atMs).max() else { return nil }
-      return TranscriptEntry(text:text, startMs:min(start,end), endMs:max(start,end), confidence:nil, speaker:turn.speaker)
+      return TranscriptEntry(text:text, startMs:min(start,end), endMs:max(start,end), confidence:nil,
+                             speakerAlias:turn.speakerAlias)
     }.sorted { $0.endMs < $1.endMs }.suffix(12).map { $0 }
   }
 }

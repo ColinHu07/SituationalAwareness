@@ -94,11 +94,18 @@ for (const [label, change] of [
   test(`audio validation rejects ${label}`, () => assert.throws(() => validateAudio(change(audioInput()), NOW), InputError));
 }
 
-test('session-local diarization labels are accepted without treating them as identities', () => {
-  const value = input(); value.transcript[0].speaker = 'P2';
-  assert.equal(validateInput(value, NOW).transcript[0].speaker, 'P2');
-  for (const invalid of ['P0', 'P100', 'Alice']) {
+test('speaker role and diarization alias have strict independent semantics', () => {
+  const value = input();
+  value.transcript[0].speaker = 'other'; value.transcript[0].speakerAlias = 'P2';
+  assert.equal(validateInput(value, NOW).transcript[0].speaker, 'other');
+  assert.equal(validateInput(value, NOW).transcript[0].speakerAlias, 'P2');
+  for (const invalid of ['P2', 'me', 'Alice']) {
     value.transcript[0].speaker = invalid;
-    assert.throws(() => validateInput(value, NOW));
+    assert.throws(() => validateInput(value, NOW), InputError);
+  }
+  value.transcript[0].speaker = 'other';
+  for (const invalid of ['wearer', 'P0', 'P100', 'Alice']) {
+    value.transcript[0].speakerAlias = invalid;
+    assert.throws(() => validateInput(value, NOW), InputError);
   }
 });

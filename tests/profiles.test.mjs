@@ -24,7 +24,7 @@ test('cue input carries optional people and group profiles', () => {
 
 test('cue input accepts only profile-linked speaker identity mappings', () => {
   const speakerIdentities = [{ label: 'P1', personId: jake.id, name: jake.name }];
-  const value = validateInput({ ...input(), transcript: [{ ...input().transcript[0], speaker: 'P1' }],
+  const value = validateInput({ ...input(), transcript: [{ ...input().transcript[0], speaker: 'other', speakerAlias: 'P1' }],
     people: [jake], groups: [group], speakerIdentities }, NOW);
   assert.deepEqual(value.speakerIdentities, speakerIdentities);
   assert.equal(validateInput({ ...input(), people: [jake] }, NOW).speakerIdentities.length, 0,
@@ -80,8 +80,8 @@ test('learn input accepts valid speakerIdentities and rejects absent transcript 
   const inputWithSpeaker = {
     ...learnInput(),
     transcript: [
-      { text: 'I started a new job yesterday.', startMs: NOW - 50_000, endMs: NOW - 48_000, speaker: 'P1' },
-      { text: 'That sounds really exciting!', startMs: NOW - 40_000, endMs: NOW - 38_000, speaker: 'P2' },
+      { text: 'I started a new job yesterday.', startMs: NOW - 50_000, endMs: NOW - 48_000, speaker: 'other', speakerAlias: 'P1' },
+      { text: 'That sounds really exciting!', startMs: NOW - 40_000, endMs: NOW - 38_000, speaker: 'wearer', speakerAlias: 'P2' },
     ],
     speakerIdentities: [{ label: 'P1', personId: jake.id, name: jake.name }],
   };
@@ -106,8 +106,8 @@ test('mock learner attributes speech from mapped speaker labels to that person w
     ...learnInput(),
     people: [jake, priya],
     transcript: [
-      { text: 'I broke my leg skiing last winter.', startMs: NOW - 50_000, endMs: NOW - 48_000, speaker: 'P1' },
-      { text: 'I work at a coffee shop on weekends.', startMs: NOW - 40_000, endMs: NOW - 38_000, speaker: 'P2' },
+      { text: 'I broke my leg skiing last winter.', startMs: NOW - 50_000, endMs: NOW - 48_000, speaker: 'other', speakerAlias: 'P1' },
+      { text: 'I work at a coffee shop on weekends.', startMs: NOW - 40_000, endMs: NOW - 38_000, speaker: 'other', speakerAlias: 'P2' },
     ],
     speakerIdentities: [{ label: 'P1', personId: jake.id, name: jake.name }],
   }, NOW);
@@ -117,6 +117,16 @@ test('mock learner attributes speech from mapped speaker labels to that person w
 
   assert.ok(jakeResult.facts.includes('I broke my leg skiing last winter.'));
   assert.deepEqual(priyaResult.facts, [], 'Unmapped speaker speech is not attributed to another person');
+});
+
+test('speaker identity validation searches speakerAlias rather than wearer role', () => {
+  const base = {
+    ...learnInput(),
+    transcript: [{ text: 'Hello.', startMs: NOW - 2_000, endMs: NOW - 1_000, speaker: 'other', speakerAlias: 'P2' }],
+    speakerIdentities: [{ label: 'P2', personId: jake.id, name: jake.name }],
+  };
+  assert.equal(validateLearnInput(base, NOW).speakerIdentities[0].label, 'P2');
+  assert.throws(() => validateLearnInput({ ...base, speakerIdentities: [{ label: 'P3', personId: jake.id, name: jake.name }] }, NOW), InputError);
 });
 
 test('mock cue suggests a saved topic only when explicitly asked', () => {
@@ -132,6 +142,9 @@ test('live learn sends strict profile schema and prompts use profiles as backgro
   });
   const { result } = await provider.learn(validateLearnInput(learnInput(), NOW));
   assert.equal(body.messages[0].content, LEARN_PROMPT);
+  assert.match(LEARN_PROMPT, /speaker is only the relationship to the wearer/);
+  assert.match(LEARN_PROMPT, /speakerAlias is Muse ASR's anonymous session-local P-label/);
+  assert.match(LEARN_PROMPT, /Unmapped P1\/P2\/P3 aliases remain anonymous/);
   assert.equal(body.response_format.json_schema.strict, true);
   assert.deepEqual(result.people[0].facts, ['Made the team']);
   for (const prompt of [SYSTEM_PROMPT, SURROUNDINGS_PROMPT]) assert.match(prompt, /background memory, not current evidence/);

@@ -139,6 +139,13 @@ final class PhoneCaptionSession {
   @ObservationIgnored private var roster = PhoneCaptionRoster()
   @ObservationIgnored private var identityResolver = SpeakerIdentityResolver()
   @ObservationIgnored private var identityPresence = PresenceTracker()
+  private struct FinalizedTurnRecord {
+    let text: String
+    var speakerAlias: String?
+    var identityResolved: Bool
+  }
+  @ObservationIgnored private var realtimeSpeakers: [Int: String] = [:]
+  @ObservationIgnored private var finalizedTurnRecords: [Int: FinalizedTurnRecord] = [:]
   @ObservationIgnored private var finalizedTurns: Set<Int> = []
   @ObservationIgnored private var peopleStore: PeopleStore?
 
@@ -172,6 +179,7 @@ final class PhoneCaptionSession {
     diagnostics.reset()
     roster = PhoneCaptionRoster(); rows = []
     identityResolver.resetSession(); identityPresence.reset(); finalizedTurns = []
+    realtimeSpeakers = [:]; finalizedTurnRecords = [:]
     phase = .starting; status = "Connecting…"
     microphone.onPCM = { [weak self] data, capturedAt in
       Task { @MainActor in
@@ -239,6 +247,7 @@ final class PhoneCaptionSession {
     microphone.stop()
     roster = PhoneCaptionRoster(); rows = []
     identityResolver.resetSession(); identityPresence.reset(); finalizedTurns = []
+    realtimeSpeakers = [:]; finalizedTurnRecords = [:]
     phase = .stopped; status = "Stopped. Captions cleared."
   }
 
@@ -252,16 +261,49 @@ final class PhoneCaptionSession {
           ["transcript.partial", "transcript.final", "speaker.updated"].contains(event.type),
           let id = event.turnId else { return }
     let previousRows = rows
-    roster.consume(event, at:nowMs())
-    if event.type == "transcript.final", finalizedTurns.insert(id).inserted,
-       let label = event.speaker, let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty {
-      let profiles = peopleStore?.people ?? []
-      if let person = SpeakerIdentityResolver.selfIdentifiedPerson(in:text, people:profiles) {
-        identityPresence.introduce(person.id, at:nowMs())
-      }
-      _ = identityResolver.observeFinalTurn(label:label, text:text, people:profiles,
-                                            presentPersonIDs:identityPresence.confirmed)
+    if let speaker = event.speaker, SpeakerIdentityResolver.validLabel(speaker) {
+      realtimeSpeakers[id] = speaker
     }
+    roster.consume(event, at:nowMs())
+
+    if event.type == "speaker.updated",
+       let speakerAlias = realtimeSpeakers[id],
+       var record = finalizedTurnRecords[id] {
+      if !record.identityResolved {
+        record.speakerAlias = speakerAlias
+        record.identityResolved = true
+        finalizedTurnRecords[id] = record
+        let profiles = peopleStore?.people ?? []
+        if let person = SpeakerIdentityResolver.selfIdentifiedPerson(in:record.text, people:profiles) {
+          identityPresence.introduce(person.id, at:nowMs())
+        }
+        _ = identityResolver.observeFinalTurn(label:speakerAlias, text:record.text, people:profiles,
+                                              presentPersonIDs:identityPresence.confirmed)
+      }
+    }
+
+    if event.type == "transcript.final", finalizedTurns.insert(id).inserted {
+      if finalizedTurns.count > 256, let oldest = finalizedTurns.min() {
+        finalizedTurns.remove(oldest)
+        realtimeSpeakers[oldest] = nil
+        finalizedTurnRecords[oldest] = nil
+      }
+      if let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty {
+        let speakerAlias = (event.speaker.flatMap { SpeakerIdentityResolver.validLabel($0) ? $0 : nil }) ?? realtimeSpeakers[id]
+        let profiles = peopleStore?.people ?? []
+        if let person = SpeakerIdentityResolver.selfIdentifiedPerson(in:text, people:profiles) {
+          identityPresence.introduce(person.id, at:nowMs())
+        }
+        var identityResolved = false
+        if let speakerAlias {
+          _ = identityResolver.observeFinalTurn(label:speakerAlias, text:text, people:profiles,
+                                                presentPersonIDs:identityPresence.confirmed)
+          identityResolved = true
+        }
+        finalizedTurnRecords[id] = FinalizedTurnRecord(text:text, speakerAlias:speakerAlias, identityResolved:identityResolved)
+      }
+    }
+
     rows = roster.rows
     diagnostics.applied(event:event, durationMs:(ProcessInfo.processInfo.systemUptime-receivedAt)*1000, changed:rows != previousRows)
   }

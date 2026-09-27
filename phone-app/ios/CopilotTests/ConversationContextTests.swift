@@ -2,11 +2,21 @@ import XCTest
 @testable import Copilot
 
 final class ConversationContextTests: XCTestCase {
+  func testTranscriptEncodingKeepsRoleAndAliasSeparate() throws {
+    let entry = TranscriptEntry(text:"Pretty good.", startMs:1, endMs:2, confidence:nil,
+                                speaker:"other", speakerAlias:"P2")
+    let data = try JSONEncoder().encode(entry)
+    let object = try XCTUnwrap(JSONSerialization.jsonObject(with:data) as? [String:Any])
+    XCTAssertEqual(object["speaker"] as? String, "other")
+    XCTAssertEqual(object["speakerAlias"] as? String, "P2")
+  }
+
   func testRecentWindowIncludesPartialsAndSeparateSpeakers() {
     var window = ConversationWindow()
     window.consume(.init(type:"transcript.partial",turnId:1,speaker:"P1",text:"Let's review the plan"),at:1000)
     window.consume(.init(type:"transcript.partial",turnId:2,speaker:"P2",text:"What about the cost?"),at:2000)
-    XCTAssertEqual(window.entries(at:3000).map(\.speaker),["P1","P2"])
+    XCTAssertEqual(window.entries(at:3000).map(\.speakerAlias),["P1","P2"])
+    XCTAssertTrue(window.entries(at:3000).allSatisfy { $0.speaker == nil })
     XCTAssertEqual(window.entries(at:3000).map(\.text),["Let's review the plan","What about the cost?"])
   }
 
@@ -17,7 +27,7 @@ final class ConversationContextTests: XCTestCase {
     window.consume(.init(type:"speaker.updated",turnId:1,speaker:"P2"),at:13000)
     window.consume(.init(type:"transcript.final",turnId:1,text:"Old topic. New proposal"),at:14000)
     XCTAssertEqual(window.entries(at:15000).map(\.text),["New proposal"])
-    XCTAssertEqual(window.entries(at:15000).first?.speaker,"P2")
+    XCTAssertEqual(window.entries(at:15000).first?.speakerAlias,"P2")
     XCTAssertEqual(window.entries(at:15000).first?.endMs,12000)
     XCTAssertTrue(window.entries(at:22001).isEmpty)
     window.consume(.init(type:"transcript.final",turnId:1,text:"Old topic. New proposal"),at:23000)

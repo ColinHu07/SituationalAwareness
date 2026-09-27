@@ -50,6 +50,7 @@ final class ToneTests: XCTestCase {
     model.markLastLineAsMine()
     XCTAssertEqual(model.wearerVoiceDbFS, -22)
     XCTAssertEqual(model.transcript[0].speaker, "wearer")
+    XCTAssertNil(model.transcript[0].speakerAlias, "Chunked ASR has no Muse diarization alias")
     XCTAssertEqual(model.speaker(forLevel:-25), "wearer")
     XCTAssertEqual(model.speaker(forLevel:-35), "other", "Much quieter voices are someone else")
     model.resetWearerVoice()

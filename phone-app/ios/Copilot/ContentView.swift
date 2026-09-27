@@ -147,7 +147,7 @@ struct ContentView: View {
                   Button {
                     let formatted = model.transcript.map { entry in
                       let time = Date(timeIntervalSince1970:entry.endMs/1000).formatted(date:.omitted,time:.standard)
-                      let speakerPrefix = entry.speaker.map { "\($0): " } ?? ""
+                      let speakerPrefix = "\(model.displaySpeakerName(for:entry)): "
                       return "[\(time)] \(speakerPrefix)\(entry.text)"
                     }.joined(separator:"\n")
                     UIPasteboard.general.string = formatted
@@ -161,7 +161,7 @@ struct ContentView: View {
 
                   ShareLink(item:model.transcript.map { entry in
                     let time = Date(timeIntervalSince1970:entry.endMs/1000).formatted(date:.omitted,time:.standard)
-                    let speakerPrefix = entry.speaker.map { "\($0): " } ?? ""
+                    let speakerPrefix = "\(model.displaySpeakerName(for:entry)): "
                     return "[\(time)] \(speakerPrefix)\(entry.text)"
                   }.joined(separator:"\n")) {
                     Label("Share",systemImage:"square.and.arrow.up")

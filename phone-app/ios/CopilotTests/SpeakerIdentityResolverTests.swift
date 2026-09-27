@@ -299,11 +299,14 @@ final class SpeakerIdentitySessionTests: XCTestCase {
     model.phase = .active
     model.applyRealtimeCaption(.init(type:"transcript.final", turnId:1, speaker:"P1", text:"The project went well."))
     XCTAssertEqual(model.captionText, "P1: The project went well.")
+    XCTAssertNil(model.transcript.last?.speaker)
+    XCTAssertEqual(model.transcript.last?.speakerAlias, "P1")
     XCTAssertEqual(model.realtimeWearerCandidateLabel, "P1")
     XCTAssertTrue(model.canMarkLastLineAsMine)
     XCTAssertTrue(model.markLastLineAsMine())
     XCTAssertEqual(model.captionText, "You: The project went well.")
-    XCTAssertEqual(model.transcript.last?.speaker, "P1")
+    XCTAssertEqual(model.transcript.last?.speaker, "wearer")
+    XCTAssertEqual(model.transcript.last?.speakerAlias, "P1")
     model.stop()
   }
 
@@ -336,7 +339,8 @@ final class SpeakerIdentitySessionTests: XCTestCase {
     model.phase = .active
     model.applyRealtimeCaption(.init(type:"transcript.final", turnId:1, speaker:"P1", text:"Partner line."))
     model.applyRealtimeCaption(.init(type:"transcript.partial", turnId:2, speaker:"P2", text:"My current line"))
-    XCTAssertEqual(model.transcript.last?.speaker, "P1", "P2 is not finalized yet")
+    XCTAssertNil(model.transcript.last?.speaker, "Wearer role is unknown before confirmation")
+    XCTAssertEqual(model.transcript.last?.speakerAlias, "P1", "P2 is not finalized yet")
     XCTAssertNil(model.realtimeWearerCandidateLabel)
     XCTAssertFalse(model.canMarkLastLineAsMine)
     XCTAssertFalse(model.markLastLineAsMine())
@@ -346,7 +350,10 @@ final class SpeakerIdentitySessionTests: XCTestCase {
     XCTAssertEqual(model.realtimeWearerCandidateLabel, "P2")
     XCTAssertTrue(model.markLastLineAsMine())
     XCTAssertEqual(model.captionText, "P1: Partner line.\nYou: My current line.")
-    XCTAssertEqual(model.transcript.last?.speaker, "P2")
+    XCTAssertEqual(model.transcript.last?.speaker, "wearer")
+    XCTAssertEqual(model.transcript.last?.speakerAlias, "P2")
+    XCTAssertEqual(model.transcript.first?.speaker, "other")
+    XCTAssertEqual(model.transcript.first?.speakerAlias, "P1")
     model.stop()
   }
 
@@ -385,5 +392,107 @@ final class SpeakerIdentitySessionTests: XCTestCase {
     XCTAssertEqual(model.captionText, "P1: Hello")
     XCTAssertEqual(model.displaySpeakerName(for:"P1"), "P1")
     model.stop()
+  }
+
+  func testFinalizedTurnBeforeSpeakerUpdatedResolvesProfileOnLateSpeaker() {
+    let store = PeopleStore(fileURL:nil)
+    _ = store.addPerson("Sam")
+    let model = SessionModel(people:store)
+    model.phase = .active
+    defer { model.stop() }
+
+    // 1. transcript.final arrives first with speaker: nil
+    model.applyRealtimeCaption(.init(type:"transcript.final", turnId:1, speaker:nil, text:"I am Sam."))
+    XCTAssertEqual(model.captionText, "Speaker…: I am Sam.")
+    XCTAssertNil(model.transcript.first?.speaker)
+    XCTAssertNil(model.transcript.first?.speakerAlias)
+    XCTAssertNil(model.sessionLog.first?.speaker)
+    XCTAssertNil(model.sessionLog.first?.speakerAlias)
+
+    // 2. speaker.updated arrives later with speaker: "P1"
+    model.applyRealtimeCaption(.init(type:"speaker.updated", turnId:1, speaker:"P1"))
+    XCTAssertEqual(model.displaySpeakerName(for:"P1"), "Sam")
+    XCTAssertEqual(model.captionText, "Sam: I am Sam.")
+    XCTAssertEqual(model.captionRows.first?.speakerLabel, "P1")
+    XCTAssertNil(model.transcript.first?.speaker)
+    XCTAssertEqual(model.transcript.first?.speakerAlias, "P1")
+    XCTAssertNil(model.sessionLog.first?.speaker)
+    XCTAssertEqual(model.sessionLog.first?.speakerAlias, "P1")
+
+    // 3. Duplicate late speaker.updated does not duplicate or reprocess
+    let transcriptCountBefore = model.transcript.count
+    let logCountBefore = model.sessionLog.count
+    model.applyRealtimeCaption(.init(type:"speaker.updated", turnId:1, speaker:"P1"))
+    XCTAssertEqual(model.transcript.count, transcriptCountBefore)
+    XCTAssertEqual(model.sessionLog.count, logCountBefore)
+    XCTAssertEqual(model.captionText, "Sam: I am Sam.")
+  }
+
+  func testSpeakerUpdatedBeforeFinalizedTurnResolvesProfileImmediately() {
+    let store = PeopleStore(fileURL:nil)
+    _ = store.addPerson("Sam")
+    let model = SessionModel(people:store)
+    model.phase = .active
+    defer { model.stop() }
+
+    // 1. speaker.updated arrives first
+    model.applyRealtimeCaption(.init(type:"speaker.updated", turnId:1, speaker:"P1"))
+
+    // 2. transcript.final arrives second with speaker: nil
+    model.applyRealtimeCaption(.init(type:"transcript.final", turnId:1, speaker:nil, text:"I am Sam."))
+    XCTAssertEqual(model.displaySpeakerName(for:"P1"), "Sam")
+    XCTAssertEqual(model.captionText, "Sam: I am Sam.")
+    XCTAssertEqual(model.captionRows.first?.speakerLabel, "P1")
+    XCTAssertNil(model.transcript.first?.speaker)
+    XCTAssertEqual(model.transcript.first?.speakerAlias, "P1")
+    XCTAssertNil(model.sessionLog.first?.speaker)
+    XCTAssertEqual(model.sessionLog.first?.speakerAlias, "P1")
+  }
+
+  func testDisplayUsesRoleThenIdentityThenRawAlias() {
+    let store = PeopleStore(fileURL:nil)
+    let sam = store.addPerson("Sam")!
+    let model = SessionModel(people:store)
+    model.phase = .active
+    defer { model.stop() }
+
+    model.applyRealtimeCaption(.init(type:"transcript.final", turnId:1, speaker:"P2", text:"I'm Sam."))
+    let known = model.transcript[0]
+    XCTAssertEqual(known.speakerAlias, "P2")
+    XCTAssertEqual(model.displaySpeakerName(for:known), "Sam")
+
+    let unresolved = TranscriptEntry(text:"Hello", startMs:0, endMs:1, confidence:nil, speakerAlias:"P3")
+    XCTAssertEqual(model.displaySpeakerName(for:unresolved), "P3")
+    let wearer = TranscriptEntry(text:"Mine", startMs:0, endMs:1, confidence:nil,
+                                 speaker:"wearer", speakerAlias:"P1")
+    XCTAssertEqual(model.displaySpeakerName(for:wearer), "You")
+    XCTAssertEqual(model.transcript[0].speakerAlias, "P2", "Identity resolution must not replace the raw alias")
+    XCTAssertEqual(model.speakerIdentityContexts.first?.personId, sam.uuidString)
+  }
+
+  func testLearningSnapshotSurvivesResetAndRejectsReusedAliasAcrossReconnect() {
+    let sam = Person(name:"Sam"), alex = Person(name:"Alex")
+    let old = TranscriptEntry(text:"I got the internship.", startMs:1, endMs:2, confidence:nil,
+                              speaker:"other", speakerAlias:"P1")
+    let new = TranscriptEntry(text:"I moved apartments.", startMs:3, endMs:4, confidence:nil,
+                              speaker:"other", speakerAlias:"P1")
+
+    let preserved = SessionModel.learningSpeakerIdentities(
+      log:[old], logGenerations:[old.id:1], identityMappings:[1:["P1":sam.id]], people:[sam,alex]
+    )
+    XCTAssertEqual(preserved, [SpeakerIdentityContext(label:"P1", personId:sam.id.uuidString, name:"Sam")])
+
+    let conflictingReconnect = SessionModel.learningSpeakerIdentities(
+      log:[old,new], logGenerations:[old.id:1,new.id:2],
+      identityMappings:[1:["P1":sam.id],2:["P1":alex.id]], people:[sam,alex]
+    )
+    XCTAssertTrue(conflictingReconnect.isEmpty,
+                  "A new connection's P1 must not attribute an old connection's P1 speech")
+
+    let unresolvedReconnect = SessionModel.learningSpeakerIdentities(
+      log:[old,new], logGenerations:[old.id:1,new.id:2],
+      identityMappings:[1:["P1":sam.id],2:[:]], people:[sam,alex]
+    )
+    XCTAssertTrue(unresolvedReconnect.isEmpty)
   }
 }

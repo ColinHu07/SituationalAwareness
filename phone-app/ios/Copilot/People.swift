@@ -245,7 +245,7 @@ final class PeopleStore {
       let facts = request.transcript.compactMap { entry -> String? in
         let line = entry.text.trimmingCharacters(in:.whitespaces)
         guard line.count <= 160 else { return nil }
-        if let mappedLabel, entry.speaker == mappedLabel { return line }
+        if let mappedLabel, entry.speakerAlias == mappedLabel { return line }
         if line.range(of:"\\b\(NSRegularExpression.escapedPattern(for:first))\\b", options:[.regularExpression, .caseInsensitive]) != nil {
           return line
         }

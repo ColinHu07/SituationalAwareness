@@ -52,12 +52,25 @@ final class SessionModel {
   let captionDiagnostics = CaptionDiagnostics()
   var speechMode = "Not started"
   @ObservationIgnored private var realtimeRelay: (any PhoneCaptionRelay)?
+  private struct RealtimeFinalizedTurn {
+    let text: String
+    let startMs: Double
+    let endMs: Double
+    let entryId: UUID
+    var speakerAlias: String?
+    var identityResolved: Bool
+  }
   @ObservationIgnored private var realtimeRoster = PhoneCaptionRoster()
   @ObservationIgnored private var realtimeClock = RealtimeSpeechClock()
   @ObservationIgnored private var finalizedTurns: Set<Int> = []
   @ObservationIgnored private var realtimeSpeakers: [Int:String] = [:]
+  @ObservationIgnored private var realtimeFinalizedTurns: [Int: RealtimeFinalizedTurn] = [:]
   @ObservationIgnored private var realtimePartialTurns: [Int:Double] = [:]
   @ObservationIgnored private var speakerIdentityResolver = SpeakerIdentityResolver()
+  @ObservationIgnored private var nextRealtimeLabelGeneration = 0
+  @ObservationIgnored private var activeRealtimeLabelGeneration: Int?
+  @ObservationIgnored private var sessionLogGenerationByEntryID: [UUID:Int] = [:]
+  @ObservationIgnored private var identityMappingsByGeneration: [Int:[String:UUID]] = [:]
   @ObservationIgnored private let makeRealtimeRelay: @MainActor (String, String) -> any PhoneCaptionRelay
   private(set) var realtimeWearerCandidateLabel: String?
   var captionText: String?
@@ -100,6 +113,10 @@ final class SessionModel {
   var presentIDs: Set<UUID> = []
   var presentPeople: [Person] { people.people.filter { presentIDs.contains($0.id) } }
   var speakerIdentityContexts: [SpeakerIdentityContext] { speakerIdentityResolver.contexts(people:presentPeople) }
+  var pendingLearningSpeakerIdentities: [SpeakerIdentityContext] {
+    Self.learningSpeakerIdentities(log:sessionLog, logGenerations:sessionLogGenerationByEntryID,
+                                   identityMappings:identityMappingsByGeneration, people:people.people)
+  }
   var learnReview: LearnReview?
   /// Recognize enrolled friends on-device from camera frames.
   var recognizeFaces = true
@@ -512,14 +529,18 @@ final class SessionModel {
   }
   private func finishConversation() {
     let log = sessionLog; sessionLog = []
-    learn(from:log)
+    let logGenerations = sessionLogGenerationByEntryID
+    let identityMappings = identityMappingsByGeneration
+    sessionLogGenerationByEntryID = [:]
+    identityMappingsByGeneration = [:]
+    learn(from:log, logGenerations:logGenerations, identityMappings:identityMappings)
     // Who's here is per conversation; the next session starts from scratch.
     faceTask?.cancel(); faceTask = nil; faceReadout = nil; faceCandidates = [:]
     lastStillAt = [:]; stillsThisSession = [:]; stillsSaved = 0; unknownFaces = []; pendingNames = []
     speakerIdentityResolver.resetSession()
     presence.reset(); presentIDs = []
   }
-  private func learn(from log: [TranscriptEntry]) {
+  private func learn(from log: [TranscriptEntry], logGenerations: [UUID:Int], identityMappings: [Int:[String:UUID]]) {
     guard !uploadsDisabled else { return }
     // Everyone detected during the session, including people who already left.
     let attended = presence.everConfirmed
@@ -531,9 +552,10 @@ final class SessionModel {
     people.markSeen(attended)
     guard !log.isEmpty else { return }
     let presentGroups = people.groups(of:present)
-    let logSpeakers = Set(log.compactMap(\.speaker))
-    let relevantIdentities = speakerIdentityResolver.contexts(people:Array(present.prefix(8)))
-      .filter { logSpeakers.contains($0.label) }
+    let relevantIdentities = Self.learningSpeakerIdentities(
+      log:log, logGenerations:logGenerations, identityMappings:identityMappings,
+      people:Array(present.prefix(8))
+    )
     let request = LearnRequest(transcript:log, people:present.prefix(8).map { people.context(for:$0, includeID:true) },
                                groups:presentGroups.prefix(8).map(people.context(for:)),
                                speakerIdentities:relevantIdentities,
@@ -564,13 +586,44 @@ final class SessionModel {
     guard words >= 20, minutes >= 10.0 / 60 else { return nil }
     return min(400, Double(words) / minutes)
   }
-  private func logSpeech(_ entry: TranscriptEntry) { sessionLog = Array((sessionLog + [entry]).suffix(400)) }
+  static func learningSpeakerIdentities(
+    log: [TranscriptEntry],
+    logGenerations: [UUID:Int],
+    identityMappings: [Int:[String:UUID]],
+    people: [Person]
+  ) -> [SpeakerIdentityContext] {
+    let profiles = Dictionary(people.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    let aliases = Set(log.compactMap(\.speakerAlias))
+    var candidates: [SpeakerIdentityContext] = []
+    for alias in aliases {
+      let entries = log.filter { $0.speakerAlias == alias }
+      guard entries.allSatisfy({ logGenerations[$0.id] != nil }) else { continue }
+      let generations = Set(entries.compactMap { logGenerations[$0.id] })
+      let ids = generations.compactMap { identityMappings[$0]?[alias] }
+      guard ids.count == generations.count, Set(ids).count == 1,
+            let id = ids.first, let person = profiles[id] else { continue }
+      candidates.append(SpeakerIdentityContext(label:alias, personId:id.uuidString,
+                                               name:String(person.name.prefix(60))))
+    }
+    candidates.sort { (Int($0.label.dropFirst()) ?? 0) < (Int($1.label.dropFirst()) ?? 0) }
+    var seenPeople: Set<String> = []
+    return candidates.filter { seenPeople.insert($0.personId).inserted }
+  }
+  private func logSpeech(_ entry: TranscriptEntry, realtimeGeneration: Int? = nil) {
+    sessionLog = Array((sessionLog + [entry]).suffix(400))
+    if let realtimeGeneration { sessionLogGenerationByEntryID[entry.id] = realtimeGeneration }
+    let retained = Set(sessionLog.map(\.id))
+    sessionLogGenerationByEntryID = sessionLogGenerationByEntryID.filter { retained.contains($0.key) }
+  }
   /// Correct a wrong match: out for the rest of this conversation unless they introduce themselves.
   func markNotHere(_ id: UUID) {
     presence.dismiss(id)
     syncPresence()
     if speakerIdentityResolver.invalidate(personID: id) {
       refreshRealtimeCaptionPresentation()
+    }
+    for generation in Array(identityMappingsByGeneration.keys) {
+      identityMappingsByGeneration[generation] = identityMappingsByGeneration[generation]?.filter { $0.value != id }
     }
   }
   /// Presence changes feed the next cue request; they don't cancel one already in flight.
@@ -730,6 +783,10 @@ final class SessionModel {
     guard let calibrated = wearerVoiceDbFS, let level, level > -120 else { return nil }
     return level >= calibrated - Self.wearerLevelMarginDb ? "wearer" : "other"
   }
+  private func speakerRole(for alias: String?) -> String? {
+    guard let alias, let wearerLabel = speakerIdentityResolver.wearerLabel else { return nil }
+    return alias == wearerLabel ? "wearer" : "other"
+  }
   var canMarkLastLineAsMine: Bool {
     guard captionText != nil else { return false }
     if let label = realtimeWearerCandidateLabel {
@@ -752,6 +809,20 @@ final class SessionModel {
       _ = speakerIdentityResolver.markWearer(label:label, people:people.people, presentPersonIDs:presentIDs,
                                              hasCompetingUnknownPerson:!unknownFaces.isEmpty)
       if speakerIdentityResolver.isWearer(label) {
+        if let generation = activeRealtimeLabelGeneration {
+          transcript = transcript.map { entry in
+            guard sessionLogGenerationByEntryID[entry.id] == generation, entry.speakerAlias != nil else { return entry }
+            var updated = entry
+            updated.speaker = speakerRole(for:entry.speakerAlias)
+            return updated
+          }
+          sessionLog = sessionLog.map { entry in
+            guard sessionLogGenerationByEntryID[entry.id] == generation, entry.speakerAlias != nil else { return entry }
+            var updated = entry
+            updated.speaker = speakerRole(for:entry.speakerAlias)
+            return updated
+          }
+        }
         refreshRealtimeCaptionPresentation()
         confirmed = true
       }
@@ -857,6 +928,8 @@ final class SessionModel {
   }
   func startRealtimeCaptions() async {
     stopRealtimeCaptions()
+    nextRealtimeLabelGeneration += 1
+    activeRealtimeLabelGeneration = nextRealtimeLabelGeneration
     captionDiagnostics.reset()
     captionDiagnostics.record("Capture running; opening realtime connection")
     let run = epoch
@@ -891,11 +964,16 @@ final class SessionModel {
   }
 
   private func stopRealtimeCaptions() {
+    if let generation = activeRealtimeLabelGeneration {
+      identityMappingsByGeneration[generation] = speakerIdentityResolver.personByLabel
+    }
+    activeRealtimeLabelGeneration = nil
     realtimeRelay?.onEvent = nil; realtimeRelay?.onFailure = nil; realtimeRelay?.onSend = nil
     realtimeRelay?.stop(); realtimeRelay = nil
     realtimeRoster = PhoneCaptionRoster(); realtimeClock.reset()
     conversationWindow = ConversationWindow()
     finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); realtimePartialTurns.removeAll()
+    realtimeFinalizedTurns.removeAll()
     realtimeWearerCandidateLabel = nil; captionRows = []; captionText = nil; captionAtMs = 0
     speakerIdentityResolver.resetLabelMappings()
     speechMode = "Not started"
@@ -903,6 +981,12 @@ final class SessionModel {
 
   func displaySpeakerName(for label: String) -> String {
     speakerIdentityResolver.displayName(for:label, people:people.people)
+  }
+
+  func displaySpeakerName(for entry: TranscriptEntry) -> String {
+    if entry.speaker == "wearer" { return "You" }
+    if let alias = entry.speakerAlias { return displaySpeakerName(for:alias) }
+    return entry.speaker == "other" ? "Other" : "Speaker…"
   }
 
   private func refreshRealtimeCaptionPresentation() {
@@ -924,6 +1008,10 @@ final class SessionModel {
     guard phase == .active, let id = event.turnId,
           ["transcript.partial", "speaker.updated", "transcript.final"].contains(event.type) else { return }
     let time = nowMs()
+    if activeRealtimeLabelGeneration == nil {
+      nextRealtimeLabelGeneration += 1
+      activeRealtimeLabelGeneration = nextRealtimeLabelGeneration
+    }
     realtimePartialTurns = realtimePartialTurns.filter { time - $0.value < 15_000 }
     if event.type == "transcript.partial",
        event.text?.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty == false {
@@ -939,34 +1027,81 @@ final class SessionModel {
     realtimeRoster.consume(event, at:time)
     refreshRealtimeCaptionPresentation()
     captionAtMs = time
+
+    if event.type == "speaker.updated",
+       let speakerAlias = realtimeSpeakers[id],
+       var record = realtimeFinalizedTurns[id] {
+      if let index = transcript.firstIndex(where: { $0.id == record.entryId }) {
+        transcript[index].speakerAlias = speakerAlias
+        transcript[index].speaker = speakerRole(for:speakerAlias)
+      }
+      if let logIndex = sessionLog.firstIndex(where: { $0.id == record.entryId }) {
+        sessionLog[logIndex].speakerAlias = speakerAlias
+        sessionLog[logIndex].speaker = speakerRole(for:speakerAlias)
+      }
+      if !record.identityResolved {
+        record.speakerAlias = speakerAlias
+        record.identityResolved = true
+        realtimeFinalizedTurns[id] = record
+        let knownPeople = people.people
+        if let person = SpeakerIdentityResolver.selfIdentifiedPerson(in:record.text, people:knownPeople) {
+          presence.introduce(person.id, at:record.endMs)
+          presentIDs = presence.confirmed
+        }
+        let hasCompetingUnknown = !unknownFaces.isEmpty
+        if speakerIdentityResolver.observeFinalTurn(label:speakerAlias, text:record.text, endMs:record.endMs, people:knownPeople,
+                                                    presentPersonIDs:presentIDs, hasCompetingUnknownPerson:hasCompetingUnknown) {
+          refreshRealtimeCaptionPresentation()
+        }
+      }
+      if realtimePartialTurns.isEmpty, transcript.last?.id == record.entryId {
+        realtimeWearerCandidateLabel = speakerAlias
+      }
+    }
+
     guard event.type == "transcript.final", !finalizedTurns.contains(id) else { return }
     finalizedTurns.insert(id)
     realtimePartialTurns[id] = nil
     // Bound deduplication bookkeeping during long sessions.
     if finalizedTurns.count > 256, let oldest = finalizedTurns.min() {
-      finalizedTurns.remove(oldest); realtimeSpeakers[oldest] = nil
+      finalizedTurns.remove(oldest)
+      realtimeSpeakers[oldest] = nil
+      realtimeFinalizedTurns[oldest] = nil
     }
     guard let text = event.text?.trimmingCharacters(in:.whitespacesAndNewlines), !text.isEmpty else {
       realtimeWearerCandidateLabel = nil
       return
     }
+    let speakerAlias = realtimeSpeakers[id]
     let knownPeople = people.people
     let entry = TranscriptEntry(text:String(text.prefix(500)), startMs:range.startMs, endMs:range.endMs,
-                                confidence:nil, speaker:realtimeSpeakers[id])
+                                confidence:nil, speaker:speakerRole(for:speakerAlias), speakerAlias:speakerAlias)
     transcript.append(entry); transcript.sort { $0.endMs < $1.endMs }
     lastVoiceAt = max(lastVoiceAt, range.endMs)
-    logSpeech(entry); noteNames(in:entry)
+    logSpeech(entry, realtimeGeneration:activeRealtimeLabelGeneration); noteNames(in:entry)
     if let person = SpeakerIdentityResolver.selfIdentifiedPerson(in:entry.text, people:knownPeople) {
       presence.introduce(person.id, at:range.endMs)
       presentIDs = presence.confirmed
     }
-    let hasCompetingUnknown = !unknownFaces.isEmpty
-    if speakerIdentityResolver.observeFinalTurn(label:entry.speaker, text:entry.text, endMs:range.endMs, people:knownPeople,
-                                                presentPersonIDs:presentIDs, hasCompetingUnknownPerson:hasCompetingUnknown) {
-      refreshRealtimeCaptionPresentation()
+    var identityResolved = false
+    if let speakerAlias {
+      let hasCompetingUnknown = !unknownFaces.isEmpty
+      if speakerIdentityResolver.observeFinalTurn(label:speakerAlias, text:entry.text, endMs:range.endMs, people:knownPeople,
+                                                  presentPersonIDs:presentIDs, hasCompetingUnknownPerson:hasCompetingUnknown) {
+        refreshRealtimeCaptionPresentation()
+      }
+      identityResolved = true
     }
+    realtimeFinalizedTurns[id] = RealtimeFinalizedTurn(
+      text: entry.text,
+      startMs: range.startMs,
+      endMs: range.endMs,
+      entryId: entry.id,
+      speakerAlias: speakerAlias,
+      identityResolved: identityResolved
+    )
     // A finalized label is markable only when no newer/overlapping partial turn is visible.
-    realtimeWearerCandidateLabel = realtimePartialTurns.isEmpty ? entry.speaker : nil
+    realtimeWearerCandidateLabel = (realtimePartialTurns.isEmpty && speakerAlias != nil) ? speakerAlias : nil
     trimTranscript()
   }
 
@@ -1060,7 +1195,13 @@ final class SessionModel {
   }
   func recentCueTranscript(at timestamp: Double = nowMs()) -> [TranscriptEntry] {
     guard !sceneOnly else { return [] }
-    if realtimeRelay != nil { return conversationWindow.entries(at:timestamp) }
+    if realtimeRelay != nil {
+      return conversationWindow.entries(at:timestamp).map { entry in
+        var entry = entry
+        entry.speaker = speakerRole(for:entry.speakerAlias)
+        return entry
+      }
+    }
     return transcript.filter { timestamp - $0.endMs <= SurroundingsPolicy.contextWindowMs && $0.endMs <= timestamp + 1000 && ($0.confidence ?? 1) >= 0.65 }
   }
   func requestCue(manual: Bool) {
@@ -1100,7 +1241,7 @@ final class SessionModel {
     let context = (sceneOnly ? "" : contextText).split(separator:"\n").prefix(5).map { String($0.prefix(160)) }
     let audio = surroundings ? (ambientWindow.context(at:timestamp) ?? latestAudioContext.flatMap { timestamp - $0.capturedAtMs <= 10000 ? $0 : nil }) : nil
     let present = presentPeople
-    let transcriptSpeakers = Set(entries.compactMap(\.speaker))
+    let transcriptSpeakers = Set(entries.compactMap(\.speakerAlias))
     let relevantIdentities = speakerIdentityResolver.contexts(people:Array(present.prefix(8)))
       .filter { transcriptSpeakers.contains($0.label) }
     let request = CueRequest(transcript:entries, frame:frame, context:context, manual:manual,

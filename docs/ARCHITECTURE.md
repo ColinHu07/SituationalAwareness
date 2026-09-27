@@ -89,7 +89,34 @@ The wearer keeps profiles of individual people and friend groups (`phone-app/ios
 
 One label cannot map to multiple people, and one person cannot map to multiple labels. Stronger evidence can correct a weaker inferred mapping (e.g., explicit self-identification overrules a conversational inference). Face visibility and presence alone never bind a voice; presence is strictly supporting context. When a person is dismissed via **Not here**, their active mapping is invalidated immediately, visible captions revert to the raw `P` label, and `speakerIdentities` drops the claim. The wearer control identifies its finalized target explicitly (for example, **I was P2**) and is unavailable while a newer or overlapping partial turn is visible. The display renders the wearer as **You**, a confirmed profile by name, and every unresolved speaker as the original `P` label. Raw transcript and ASR bookkeeping retain their original labels. Caption-label restart clears all mappings and evidence; conversation end fully resets the resolver.
 
+Transcript speaker state has three separate layers:
+
+```text
+Muse realtime ASR
+        │
+        ▼
+ speakerAlias = P2 ─────────► SpeakerIdentityResolver ─────────► Sam
+        │
+        ▼
+ wearer classifier
+        │
+        ▼
+ speaker = other
+
+text = "Pretty good."
+speaker = other
+speakerAlias = P2
+P2 -> Sam
+display = "Sam: Pretty good."
+```
+
+`TranscriptEntry.speaker` is only the semantic relationship to the wearer: `wearer`, `other`, or absent when unknown. `TranscriptEntry.speakerAlias` is only Muse's anonymous connection-local diarization label (`P1` through `P99`) or absent for chunked ASR. Diarization is not identity, and wearer role is not diarization. The resolver consumes `speakerAlias` and produces a separate alias-to-Person mapping; it never replaces the raw alias with a name. Realtime turns initially keep an unknown role until the wearer label is established. **That was me** preserves the alias and reclassifies all logged turns from the active label generation as `wearer` for the matching alias and `other` for the other aliases. Chunked ASR has no alias and continues to classify only `speaker` from calibrated voice level.
+
+Face recognition is optional supporting presence evidence, not a prerequisite for speaker identity. An unambiguous saved-name self-introduction or sufficiently strong conversational structure may resolve an alias without a current face match. Unknown-face competition still blocks the conservative single-partner fallback.
+
 Each `POST /api/cue` carries the present people and their groups as `people` / `groups`. Confirmed label links are carried separately as bounded `speakerIdentities` objects containing the raw label plus the matching profile ID and name. Server validation rejects duplicate, malformed, missing-profile, name-mismatched, or transcript-absent links. Muse may connect a mapped speaker's current words to that supplied profile, but unmapped labels remain anonymous and the prompt forbids deriving identity from images, appearance, voice characteristics, groups, or mere presence. Profiles remain background memory rather than current evidence. Profile learning (`POST /api/learn`) receives validated `speakerIdentities` matching labels in the submitted conversation log, allowing Muse to attribute facts and topics spoken by mapped labels directly to those profiles while unmapped turns remain anonymous.
+
+Cue and learning transcript objects carry `speaker` and `speakerAlias` independently; `speakerIdentities[].label` must occur in `transcript[].speakerAlias`. Before a realtime connection is reset, the app snapshots its resolved alias mappings for learning and then clears the live resolver. Whole-conversation log entries retain their label-generation association. Because Muse may reuse `P1` after reconnect for a different person, learning submits an alias mapping only when every logged generation that used that alias resolved it to the same Person. Conflicting or unresolved reuse remains anonymous rather than risking attribution across connections.
 
 Unlike the rest of the session, recognized speech is also kept in a whole-conversation log (at most 400 entries) until Stop. On Stop, if anyone was detected during the session (including people who have since dropped off), the phone sends that log, the present profiles, their groups, other group names and a measured words-per-minute to `POST /api/learn`. The model proposes new facts, topics, tags and group memberships per person (only when the transcript makes attribution clear) and topics, slang and style per group. The wearer approves each proposal in a review sheet before anything is saved. The log is then discarded. The offline simulated demo and mock server use a narrow fixture learner (name mentions become facts, "I love X" becomes a topic).
 
