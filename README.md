@@ -199,6 +199,16 @@ Conversation cues no longer run on a 10-second timer. A check is sent with a `tr
 
 These settings supersede older timing descriptions elsewhere in this repository. Live Muse latency and cue quality with the new prompt have not been measured.
 
+### Early question checks and cue timing
+
+With live captions, a question is checked while it is still being asked. The first partial caption of someone else's turn that looks like a question sends the `question` check, and its cue is shown as soon as it returns. A partial looks like a question when it ends in a question mark (two words or more), or has at least four words and opens with a question word such as what, how, where, when, why, who, "are you", "do you", "did you", "have you", "can you" or "would you". The rules are in `phone-app/ios/Copilot/SpeculativeCue.swift`.
+
+- **One early check per turn, never on the wearer's turns.** The voice must carry a caption label, the wearer's own label must be known, and the two must differ. An unlabeled partial waits for its label.
+- **When the turn is finalized, the words are compared.** Punctuation, case and filler words are not a change, and nothing more is sent. If the words changed and are still a question, the check runs again and its cue replaces the early one. If the turn was the wearer's own, or was not a question, the early cue is cleared.
+- **Chunked transcription has no partial captions**, so it keeps the finished-turn checks only.
+
+**Caption timing** on the phone now shows five steps for the last cue, each measured from the end of speech: final received, request sent, response received and cue shown. A minus sign means the step happened before the speech ended, which an early check can do. The shared timing log has one line per step and a `Cue timing` line per cue. It records times only, never words.
+
 ### Optional Grok provider for conversation checks
 
 Set `XAI_API_KEY` in the ignored `.env` to send conversation checks to xAI's `grok-4.20-non-reasoning` (override with `XAI_MODEL`). The prompt, the five-field strict schema and the text-only request are the same; the output limit is 256 tokens. Scene checks, tone, learning and transcription stay on Muse, and `MUSE_API_KEY` is still required in live mode. With no `XAI_API_KEY`, conversation checks use Muse as before.

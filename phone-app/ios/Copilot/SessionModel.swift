@@ -153,6 +153,7 @@ final class SessionModel {
   @ObservationIgnored private var stuckTask: Task<Void, Never>?
   /// The moment behind the check in flight; nil for a scene check.
   @ObservationIgnored private var activeTrigger: CueTrigger?
+  @ObservationIgnored private var speculation = SpeculativeCue()
   @ObservationIgnored private var asrTask: Task<Void, Never>?
   @ObservationIgnored private var startTask: Task<Void, Never>?
   @ObservationIgnored private var loopTask: Task<Void, Never>?
@@ -833,13 +834,27 @@ final class SessionModel {
     cueTask?.cancel(); cueTask = nil; isThinking = false; staleDrops += 1
     if trigger == .manual { feedback("New speech. Analyze after a pause.") }
   }
+  /// A question still being asked gets its check early, once per turn. See SpeculativeCue.
+  private func speculate(turn: Int, text: String?, endMs: Double) {
+    guard !sceneChecks, let text = speculation.consider(turn:turn, text:text, speaker:realtimeSpeakers[turn], wearerLabel:wearerLabel) else { return }
+    let sent = requests
+    requestCue(manual:false, trigger:.question, partial:TranscriptEntry(text:String(text.prefix(500)), startMs:endMs - 1000, endMs:endMs, confidence:nil, speaker:realtimeSpeakers[turn]))
+    guard requests > sent else { return }
+    speculation.sent(turn:turn, text:text, generation:generation); captionDiagnostics.cueSentEarly(for:turn)
+  }
   /// A finished turn from someone else is a moment to help. The wearer's own turns never are.
-  private func turnFinalized(_ entry: TranscriptEntry) {
-    guard !sceneChecks, phase == .active, transcript.last?.id == entry.id,
-          ConversationPolicy.role(entry.speaker, wearerLabel:wearerLabel) == "other" else { return }
+  private func turnFinalized(_ entry: TranscriptEntry, turn: Int? = nil) {
+    captionDiagnostics.turnFinal(turn:turn, speechEndMs:entry.endMs)
+    let role = ConversationPolicy.role(entry.speaker, wearerLabel:wearerLabel)
+    let early = speculation.finalize(turn:turn, text:entry.text, role:role, generation:generation)
+    // Different words make the early answer out of date. Its cue stays until the new answer replaces it,
+    // unless the turn was the wearer's own or no question after all.
+    if early == .rerun || early == .withdraw { dropConversationCheck() }
+    if early == .withdraw { cueSpeaker.stop(); clearCue() }
+    guard !sceneChecks, phase == .active, transcript.last?.id == entry.id, role == "other" else { return }
     // Until the wearer's voice is found, this turn could be their own: no question or stuck check.
     let known = wearerKnown
-    if let trigger = ConversationPolicy.trigger(for:entry.text, wearerKnown:known) { requestCue(manual:false, trigger:trigger) }
+    if early != .keep, let trigger = early == .rerun ? .question : ConversationPolicy.trigger(for:entry.text, wearerKnown:known) { requestCue(manual:false, trigger:trigger) }
     guard known else { return }
     stuckTask = Task { [weak self] in
       try? await Task.sleep(for:.milliseconds(Int(ConversationPolicy.stuckDelayMs)))
@@ -916,7 +931,7 @@ final class SessionModel {
     realtimeRelay?.stop(); realtimeRelay = nil
     realtimeRoster = PhoneCaptionRoster(); realtimeClock.reset()
     conversationWindow = ConversationWindow()
-    finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []
+    finalizedTurns.removeAll(); realtimeSpeakers.removeAll(); captionRows = []; speculation = SpeculativeCue()
     wearerDetector.captionsRestarted(); levelTrack = SpeechLevelTrack()
     speechMode = "Not started"
   }
@@ -942,7 +957,8 @@ final class SessionModel {
     captionText = captionRows.isEmpty ? nil : captionRows.map { "\($0.id.hasPrefix("P") ? $0.id : "Speaker…"): \($0.text)" }.joined(separator:"\n")
     captionAtMs = time
     if event.type != "speaker.updated", !finalizedTurns.contains(id),
-       event.text?.contains(where: { $0.isLetter || $0.isNumber }) == true { dropConversationCheck() }
+       event.text?.contains(where: { $0.isLetter || $0.isNumber }) == true, speculation.turn != id { dropConversationCheck() }
+    if event.type != "transcript.final", !finalizedTurns.contains(id) { speculate(turn:id, text:event.text, endMs:range.endMs) }
     guard event.type == "transcript.final", !finalizedTurns.contains(id) else { return }
     finalizedTurns.insert(id)
     // Bound deduplication bookkeeping during long sessions.
@@ -958,7 +974,7 @@ final class SessionModel {
     transcript.append(entry); transcript.sort { $0.endMs < $1.endMs }
     lastVoiceAt = max(lastVoiceAt, range.endMs)
     logSpeech(entry); noteNames(in:entry); trimTranscript()
-    turnFinalized(entry)
+    turnFinalized(entry, turn:id)
   }
 
   func transcribe(_ chunk: AudioChunk) {
@@ -1055,7 +1071,7 @@ final class SessionModel {
     if realtimeRelay != nil { return conversationWindow.entries(at:timestamp) }
     return transcript.filter { timestamp - $0.endMs <= SurroundingsPolicy.contextWindowMs && $0.endMs <= timestamp + 1000 && ($0.confidence ?? 1) >= 0.65 }
   }
-  func requestCue(manual: Bool, trigger: CueTrigger? = nil) {
+  func requestCue(manual: Bool, trigger: CueTrigger? = nil, partial: TranscriptEntry? = nil) {
     guard !uploadsDisabled else { if manual { notice = "Connection test makes no API requests. Use Manual display test." }; return }
     guard phase == .active else { return }
     let timestamp = nowMs()
@@ -1075,7 +1091,7 @@ final class SessionModel {
     }
     if let issue = liveInputIssue(at:timestamp) { if manual { queueManualAnalysis(issue, at:timestamp) }; return }
     // Conversation checks send text only: the last few turns, labeled wearer or other.
-    let entries = surroundings ? recentCueTranscript(at:timestamp) : ConversationPolicy.turns(from:transcript, wearerLabel:wearerLabel)
+    let entries = surroundings ? recentCueTranscript(at:timestamp) : ConversationPolicy.turns(from:transcript + [partial].compactMap { $0 }, wearerLabel:wearerLabel)
     let last = entries.last
     let freshSpeech = last
     let frame = !surroundings ? nil : latestFrame.flatMap { timestamp - $0.capturedAtMs <= SurroundingsPolicy.frameFreshnessMs && $0.capturedAtMs <= timestamp ? $0 : nil }
@@ -1112,6 +1128,7 @@ final class SessionModel {
     pendingManualAnalysisAt = nil
     activeTrigger = trigger
     isThinking = true; requests += 1
+    captionDiagnostics.cueRequested(trigger:trigger?.rawValue ?? "scene", early:partial != nil, speechEndMs:last?.endMs, at:timestamp)
     // An automatic conversation check stays quiet on the lens unless it has something to show.
     if surroundings || manual { feedback(sceneOnly ? "Muse is checking the scene…" : "Analyzing…") }
     cueTask = Task { [weak self] in
@@ -1152,6 +1169,7 @@ final class SessionModel {
           response = result.0; uploadedBytes += result.1
         }
         let completedAt = nowMs()
+        captionDiagnostics.cueAnswered(at:completedAt)
         let speechStillFresh = freshSpeech.map { completedAt - $0.endMs <= SurroundingsPolicy.deliveryFreshnessMs } ?? false
         let frameStillFresh = frame.map { completedAt - $0.capturedAtMs <= SurroundingsPolicy.deliveryFreshnessMs } ?? false
         let evidenceStillFresh = surroundings ? (speechStillFresh || frameStillFresh) : (manual || speechStillFresh)
@@ -1203,10 +1221,12 @@ final class SessionModel {
         lastAnalysisOutcome = "Social cue ready."
         analysisFeedback = "Social cue"
         publishDisplay()
+        captionDiagnostics.cueShown(at:lastCueAt)
         if spokenCuesEnabled { cueSpeaker.speak(text, mode:captureMode) }
         notice = ""
       } catch {
         if epoch == thisEpoch, generation == revision, !Task.isCancelled {
+          if partial != nil { speculation.requestFailed() }
           notice = surroundings ? "Cue check failed. Retrying automatically." : "Cue check failed. Check the server connection."
           feedback("Analysis failed. Check phone for details.")
         }
